@@ -1,0 +1,8 @@
+{
+  "appId": "com.tythac.yschat",
+  "appName": "YSChat",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "http"
+  }
+}

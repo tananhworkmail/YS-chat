@@ -1,0 +1,44 @@
+{
+  "name": "YSWeb-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "mobile:build": "vite build --mode mobile",
+    "mobile:sync": "npm run mobile:build && npx cap sync android",
+    "mobile:android": "npm run mobile:sync && npx cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.4.1",
+    "@capacitor/cli": "^8.4.1",
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/push-notifications": "^8.1.1",
+    "@chenfengyuan/vue-qrcode": "^2.0.0",
+    "@iconify/vue": "^5.0.0",
+    "axios": "^1.8.1",
+    "dayjs": "^1.11.13",
+    "iconify": "^1.4.0",
+    "lottie-web": "^5.12.2",
+    "lucide-vue-next": "^0.555.0",
+    "pinia": "^3.0.1",
+    "tailwindcss": "^4.0.9",
+    "vue": "^3.5.13",
+    "vue-i18n": "^9.14.5",
+    "vue-print-nb": "^1.7.5",
+    "vue-router": "^4.0.13",
+    "vue3-lottie": "^3.3.1",
+    "vue3-print-nb": "^0.1.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "element-plus": "^2.9.5",
+    "sass-embedded": "^1.85.1",
+    "unplugin-auto-import": "^19.1.1",
+    "unplugin-vue-components": "^28.4.1",
+    "vite": "^6.1.0",
+    "vite-plugin-vue-devtools": "^7.7.2"
+  }
+}

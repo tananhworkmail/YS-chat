@@ -1,0 +1,20 @@
+server:
+  port: "9999"
+  secret: "change-me"
+  # release | debug
+  mode: "debug"
+
+cors:
+  global: "true"
+  ips: "http://localhost:9999"
+
+database:
+  # mysql | postgres | sqlite | sqlserver
+  driver: "mysql"
+  dbname: "ysweb"
+  username: "user"
+  password: "password"
+  host: "127.0.0.1"
+  port: "3306"
+  sslmode: "false"
+  logmode: "true"
