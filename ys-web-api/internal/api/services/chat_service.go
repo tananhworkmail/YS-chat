@@ -38,22 +38,25 @@ var (
 )
 
 type chatConversationRecord struct {
-	ID        uint64    `gorm:"column:id;primaryKey"`
-	Type      string    `gorm:"column:type"`
-	Name      string    `gorm:"column:name"`
-	Avatar    string    `gorm:"column:avatar"`
-	CreatedBy string    `gorm:"column:created_by"`
-	CreatedAt time.Time `gorm:"column:created_at"`
-	UpdatedAt time.Time `gorm:"column:updated_at"`
+	ID         uint64    `gorm:"column:id;primaryKey"`
+	Type       string    `gorm:"column:type"`
+	Name       string    `gorm:"column:name"`
+	Avatar     string    `gorm:"column:avatar"`
+	Background string    `gorm:"column:background"`
+	CreatedBy  string    `gorm:"column:created_by"`
+	CreatedAt  time.Time `gorm:"column:created_at"`
+	UpdatedAt  time.Time `gorm:"column:updated_at"`
 }
 
 type chatMessageRecord struct {
-	ID             uint64    `gorm:"column:id;primaryKey"`
-	ConversationID uint64    `gorm:"column:conversation_id"`
-	SenderUserid   string    `gorm:"column:sender_userid"`
-	MessageType    string    `gorm:"column:message_type"`
-	Content        string    `gorm:"column:content"`
-	CreatedAt      time.Time `gorm:"column:created_at"`
+	ID                     uint64    `gorm:"column:id;primaryKey"`
+	ConversationID         uint64    `gorm:"column:conversation_id"`
+	SenderUserid           string    `gorm:"column:sender_userid"`
+	MessageType            string    `gorm:"column:message_type"`
+	Content                string    `gorm:"column:content"`
+	ReplyToMessageID       *uint64   `gorm:"column:reply_to_message_id"`
+	ForwardedFromMessageID *uint64   `gorm:"column:forwarded_from_message_id"`
+	CreatedAt              time.Time `gorm:"column:created_at"`
 }
 
 type chatAttachmentRecord struct {
@@ -72,6 +75,7 @@ type conversationRow struct {
 	Type             string     `gorm:"column:type"`
 	Name             string     `gorm:"column:name"`
 	Avatar           string     `gorm:"column:avatar"`
+	Background       string     `gorm:"column:background"`
 	MemberCount      int        `gorm:"column:member_count"`
 	CreatedAt        time.Time  `gorm:"column:created_at"`
 	UpdatedAt        time.Time  `gorm:"column:updated_at"`
@@ -88,19 +92,30 @@ type memberRow struct {
 	ConversationID uint64 `gorm:"column:conversation_id"`
 	Userid         string `gorm:"column:userid"`
 	Fullname       string `gorm:"column:fullname"`
+	Nickname       string `gorm:"column:nickname"`
 	Avatar         string `gorm:"column:avatar"`
 	Role           string `gorm:"column:role"`
 }
 
 type messageRow struct {
-	ID             uint64    `gorm:"column:id"`
-	ConversationID uint64    `gorm:"column:conversation_id"`
-	SenderUserid   string    `gorm:"column:sender_userid"`
-	SenderName     string    `gorm:"column:sender_name"`
-	SenderAvatar   string    `gorm:"column:sender_avatar"`
-	MessageType    string    `gorm:"column:message_type"`
-	Content        string    `gorm:"column:content"`
-	CreatedAt      time.Time `gorm:"column:created_at"`
+	ID                     uint64    `gorm:"column:id"`
+	ConversationID         uint64    `gorm:"column:conversation_id"`
+	SenderUserid           string    `gorm:"column:sender_userid"`
+	SenderName             string    `gorm:"column:sender_name"`
+	SenderAvatar           string    `gorm:"column:sender_avatar"`
+	MessageType            string    `gorm:"column:message_type"`
+	Content                string    `gorm:"column:content"`
+	ReplyToMessageID       *uint64   `gorm:"column:reply_to_message_id"`
+	ForwardedFromMessageID *uint64   `gorm:"column:forwarded_from_message_id"`
+	CreatedAt              time.Time `gorm:"column:created_at"`
+}
+
+type messageReferenceRow struct {
+	ID           uint64 `gorm:"column:id"`
+	SenderUserid string `gorm:"column:sender_userid"`
+	SenderName   string `gorm:"column:sender_name"`
+	MessageType  string `gorm:"column:message_type"`
+	Content      string `gorm:"column:content"`
 }
 
 func (s *ChatService) SearchUsers(currentUserid, keyword string) ([]types.ChatUser, error) {
@@ -340,6 +355,51 @@ func (s *ChatService) CreateGroupConversation(currentUserid string, req request.
 	return s.getConversation(db, currentUserid, newID)
 }
 
+func (s *ChatService) UpdateConversationSettings(currentUserid string, conversationID uint64, req request.UpdateConversationSettingsRequest) (*types.ChatConversation, error) {
+	db, err := s.chatDB()
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	if ok, err := s.isConversationMember(db, conversationID, currentUserid); err != nil {
+		return nil, errors.New(ErrSystem)
+	} else if !ok {
+		return nil, errors.New(ErrChatNoPermission)
+	}
+
+	conversationType, err := s.conversationType(db, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conversationType != "group" {
+		return nil, errors.New(ErrChatNoPermission)
+	}
+
+	if ok, err := s.isConversationOwner(db, conversationID, currentUserid); err != nil {
+		return nil, errors.New(ErrSystem)
+	} else if !ok {
+		return nil, errors.New(ErrChatOnlyOwnerCanManageMembers)
+	}
+
+	avatar := strings.TrimSpace(req.Avatar)
+	background := strings.TrimSpace(req.Background)
+	if len(avatar) > 1024 || len(background) > 1024 {
+		return nil, errors.New(ErrInvalidInput)
+	}
+
+	if err := db.Table("chat_conversations").
+		Where("id = ?", conversationID).
+		Updates(map[string]interface{}{
+			"avatar":     avatar,
+			"background": background,
+			"updated_at": time.Now(),
+		}).Error; err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	return s.getConversation(db, currentUserid, conversationID)
+}
+
 func (s *ChatService) AddMembers(currentUserid string, conversationID uint64, req request.AddConversationMembersRequest) (*types.ChatConversation, error) {
 	db, err := s.chatDB()
 	if err != nil {
@@ -386,6 +446,43 @@ func (s *ChatService) AddMembers(currentUserid string, conversationID uint64, re
 			Update("updated_at", now).Error
 	})
 	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	return s.getConversation(db, currentUserid, conversationID)
+}
+
+func (s *ChatService) UpdateMemberNickname(currentUserid string, conversationID uint64, targetUserid string, req request.UpdateConversationMemberNicknameRequest) (*types.ChatConversation, error) {
+	db, err := s.chatDB()
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	targetUserid = strings.TrimSpace(targetUserid)
+	if targetUserid == "" {
+		return nil, errors.New(ErrInvalidInput)
+	}
+
+	if ok, err := s.isConversationMember(db, conversationID, currentUserid); err != nil {
+		return nil, errors.New(ErrSystem)
+	} else if !ok {
+		return nil, errors.New(ErrChatNoPermission)
+	}
+
+	if ok, err := s.isConversationMember(db, conversationID, targetUserid); err != nil {
+		return nil, errors.New(ErrSystem)
+	} else if !ok {
+		return nil, errors.New(ErrChatMemberNotFound)
+	}
+
+	nickname := strings.TrimSpace(req.Nickname)
+	if len([]rune(nickname)) > 80 {
+		return nil, errors.New(ErrInvalidInput)
+	}
+
+	if err := db.Table("chat_members").
+		Where("conversation_id = ? AND userid = ?", conversationID, targetUserid).
+		Update("nickname", nickname).Error; err != nil {
 		return nil, errors.New(ErrSystem)
 	}
 
@@ -471,10 +568,12 @@ func (s *ChatService) ListMessages(currentUserid string, conversationID uint64) 
 	var rows []messageRow
 	if err := db.Raw(`
 		SELECT m.id, m.conversation_id, m.sender_userid,
-			COALESCE(u.fullname, m.sender_userid) AS sender_name,
+			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid) AS sender_name,
 			COALESCE(u.avatar, '') AS sender_avatar,
-			m.message_type, COALESCE(m.content, '') AS content, m.created_at
+			m.message_type, COALESCE(m.content, '') AS content,
+			m.reply_to_message_id, m.forwarded_from_message_id, m.created_at
 		FROM chat_messages m
+		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = m.conversation_id AND cm_sender.userid = m.sender_userid
 		LEFT JOIN users u ON u.userid = m.sender_userid
 		WHERE m.conversation_id = ?
 		ORDER BY m.id DESC
@@ -514,15 +613,37 @@ func (s *ChatService) SendMessage(currentUserid string, conversationID uint64, r
 		return nil, errors.New(ErrChatEmptyMessage)
 	}
 
+	var replyToMessageID *uint64
+	if req.ReplyToMessageID > 0 {
+		if ok, err := s.messageInConversation(db, conversationID, req.ReplyToMessageID); err != nil {
+			return nil, errors.New(ErrSystem)
+		} else if !ok {
+			return nil, errors.New(ErrChatNoPermission)
+		}
+		replyToMessageID = &req.ReplyToMessageID
+	}
+
+	var forwardedFromMessageID *uint64
+	if req.ForwardedFromMessageID > 0 {
+		if ok, err := s.canAccessMessage(db, currentUserid, req.ForwardedFromMessageID); err != nil {
+			return nil, errors.New(ErrSystem)
+		} else if !ok {
+			return nil, errors.New(ErrChatNoPermission)
+		}
+		forwardedFromMessageID = &req.ForwardedFromMessageID
+	}
+
 	var messageID uint64
 	err = db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now()
 		message := chatMessageRecord{
-			ConversationID: conversationID,
-			SenderUserid:   currentUserid,
-			MessageType:    messageType,
-			Content:        content,
-			CreatedAt:      now,
+			ConversationID:         conversationID,
+			SenderUserid:           currentUserid,
+			MessageType:            messageType,
+			Content:                content,
+			ReplyToMessageID:       replyToMessageID,
+			ForwardedFromMessageID: forwardedFromMessageID,
+			CreatedAt:              now,
 		}
 		if err := tx.Table("chat_messages").Create(&message).Error; err != nil {
 			return err
@@ -607,6 +728,7 @@ func ensureChatSchema(db *gorm.DB) error {
 			type VARCHAR(20) NOT NULL,
 			name VARCHAR(160) NULL,
 			avatar VARCHAR(255) NULL,
+			background VARCHAR(1024) NULL,
 			created_by VARCHAR(64) NOT NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -619,6 +741,7 @@ func ensureChatSchema(db *gorm.DB) error {
 			conversation_id BIGINT UNSIGNED NOT NULL,
 			userid VARCHAR(64) NOT NULL,
 			role VARCHAR(20) NOT NULL DEFAULT 'member',
+			nickname VARCHAR(80) NULL,
 			joined_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (id),
 			UNIQUE KEY uk_chat_members_conversation_user (conversation_id, userid),
@@ -652,6 +775,8 @@ func ensureChatSchema(db *gorm.DB) error {
 			sender_userid VARCHAR(64) NOT NULL,
 			message_type VARCHAR(20) NOT NULL,
 			content TEXT NULL,
+			reply_to_message_id BIGINT UNSIGNED NULL,
+			forwarded_from_message_id BIGINT UNSIGNED NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (id),
 			INDEX idx_chat_messages_conversation_created (conversation_id, created_at),
@@ -677,7 +802,39 @@ func ensureChatSchema(db *gorm.DB) error {
 		}
 	}
 
+	if err := ensureColumn(db, "chat_members", "nickname", "VARCHAR(80) NULL AFTER role"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "chat_conversations", "background", "VARCHAR(1024) NULL AFTER avatar"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "chat_messages", "reply_to_message_id", "BIGINT UNSIGNED NULL AFTER content"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "chat_messages", "forwarded_from_message_id", "BIGINT UNSIGNED NULL AFTER reply_to_message_id"); err != nil {
+		return err
+	}
+
 	chatSchemaReady = true
+	return nil
+}
+
+func ensureColumn(db *gorm.DB, tableName, columnName, definition string) error {
+	var columnCount int64
+	if err := db.Raw(`
+		SELECT COUNT(*)
+		FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE()
+			AND TABLE_NAME = ?
+			AND COLUMN_NAME = ?
+	`, tableName, columnName).Scan(&columnCount).Error; err != nil {
+		return err
+	}
+	if columnCount == 0 {
+		if err := db.Exec("ALTER TABLE " + tableName + " ADD COLUMN " + columnName + " " + definition).Error; err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -759,6 +916,23 @@ func (s *ChatService) conversationMemberUserids(db *gorm.DB, conversationID uint
 	return userids, err
 }
 
+func (s *ChatService) messageInConversation(db *gorm.DB, conversationID uint64, messageID uint64) (bool, error) {
+	var count int64
+	err := db.Table("chat_messages").
+		Where("id = ? AND conversation_id = ?", messageID, conversationID).
+		Count(&count).Error
+	return count > 0, err
+}
+
+func (s *ChatService) canAccessMessage(db *gorm.DB, userid string, messageID uint64) (bool, error) {
+	var count int64
+	err := db.Table("chat_messages m").
+		Joins("JOIN chat_members cm ON cm.conversation_id = m.conversation_id AND cm.userid = ?", userid).
+		Where("m.id = ?", messageID).
+		Count(&count).Error
+	return count > 0, err
+}
+
 func (s *ChatService) getConversation(db *gorm.DB, currentUserid string, conversationID uint64) (*types.ChatConversation, error) {
 	conversations, err := s.loadConversations(db, currentUserid, conversationID)
 	if err != nil {
@@ -774,11 +948,12 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 	var rows []conversationRow
 	query := `
 		SELECT c.id, c.type, COALESCE(c.name, '') AS name, COALESCE(c.avatar, '') AS avatar,
+			COALESCE(c.background, '') AS background,
 			(SELECT COUNT(*) FROM chat_members cm_count WHERE cm_count.conversation_id = c.id) AS member_count,
 			c.created_at, c.updated_at,
 			m.id AS last_message_id,
 			COALESCE(m.sender_userid, '') AS last_sender_userid,
-			COALESCE(u.fullname, m.sender_userid, '') AS last_sender_name,
+			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid, '') AS last_sender_name,
 			COALESCE(u.avatar, '') AS last_sender_avatar,
 			COALESCE(m.message_type, '') AS last_message_type,
 			COALESCE(m.content, '') AS last_content,
@@ -792,6 +967,7 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 			LIMIT 1
 		)
 		LEFT JOIN users u ON u.userid = m.sender_userid
+		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = c.id AND cm_sender.userid = m.sender_userid
 	`
 	args := []interface{}{currentUserid}
 	if conversationID > 0 {
@@ -825,6 +1001,7 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 			Type:        row.Type,
 			Name:        row.Name,
 			Avatar:      row.Avatar,
+			Background:  row.Background,
 			MemberCount: row.MemberCount,
 			Members:     members,
 			CreatedAt:   row.CreatedAt,
@@ -834,13 +1011,13 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 		if conversation.Type == "direct" {
 			for _, member := range members {
 				if member.Userid != currentUserid {
-					conversation.Name = member.Fullname
+					conversation.Name = chatUserDisplayName(member)
 					conversation.Avatar = member.Avatar
 					break
 				}
 			}
 			if conversation.Name == "" && len(members) > 0 {
-				conversation.Name = members[0].Fullname
+				conversation.Name = chatUserDisplayName(members[0])
 				conversation.Avatar = members[0].Avatar
 			}
 		} else if conversation.Name == "" {
@@ -876,6 +1053,7 @@ func (s *ChatService) loadMembers(db *gorm.DB, conversationIDs []uint64) (map[ui
 		SELECT cm.conversation_id,
 			COALESCE(u.userid, cm.userid) AS userid,
 			COALESCE(u.fullname, cm.userid) AS fullname,
+			COALESCE(cm.nickname, '') AS nickname,
 			COALESCE(u.avatar, '') AS avatar,
 			COALESCE(cm.role, 'member') AS role
 		FROM chat_members cm
@@ -891,6 +1069,7 @@ func (s *ChatService) loadMembers(db *gorm.DB, conversationIDs []uint64) (map[ui
 		result[row.ConversationID] = append(result[row.ConversationID], types.ChatUser{
 			Userid:   row.Userid,
 			Fullname: row.Fullname,
+			Nickname: row.Nickname,
 			Avatar:   row.Avatar,
 			Role:     row.Role,
 		})
@@ -902,10 +1081,12 @@ func (s *ChatService) loadMessageByID(db *gorm.DB, messageID uint64) (*types.Cha
 	var rows []messageRow
 	if err := db.Raw(`
 		SELECT m.id, m.conversation_id, m.sender_userid,
-			COALESCE(u.fullname, m.sender_userid) AS sender_name,
+			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid) AS sender_name,
 			COALESCE(u.avatar, '') AS sender_avatar,
-			m.message_type, COALESCE(m.content, '') AS content, m.created_at
+			m.message_type, COALESCE(m.content, '') AS content,
+			m.reply_to_message_id, m.forwarded_from_message_id, m.created_at
 		FROM chat_messages m
+		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = m.conversation_id AND cm_sender.userid = m.sender_userid
 		LEFT JOIN users u ON u.userid = m.sender_userid
 		WHERE m.id = ?
 	`, messageID).Scan(&rows).Error; err != nil {
@@ -927,17 +1108,43 @@ func (s *ChatService) buildMessages(db *gorm.DB, rows []messageRow) ([]types.Cha
 	}
 
 	messageIDs := make([]uint64, 0, len(rows))
+	referenceIDs := make([]uint64, 0)
+	seenReferenceIDs := make(map[uint64]struct{})
 	for _, row := range rows {
 		messageIDs = append(messageIDs, row.ID)
+		if row.ReplyToMessageID != nil && *row.ReplyToMessageID > 0 {
+			if _, ok := seenReferenceIDs[*row.ReplyToMessageID]; !ok {
+				seenReferenceIDs[*row.ReplyToMessageID] = struct{}{}
+				referenceIDs = append(referenceIDs, *row.ReplyToMessageID)
+			}
+		}
+		if row.ForwardedFromMessageID != nil && *row.ForwardedFromMessageID > 0 {
+			if _, ok := seenReferenceIDs[*row.ForwardedFromMessageID]; !ok {
+				seenReferenceIDs[*row.ForwardedFromMessageID] = struct{}{}
+				referenceIDs = append(referenceIDs, *row.ForwardedFromMessageID)
+			}
+		}
 	}
 
 	attachmentsByMessage, err := s.loadAttachments(db, messageIDs)
 	if err != nil {
 		return nil, errors.New(ErrSystem)
 	}
+	referencesByID, err := s.loadMessageReferences(db, referenceIDs)
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
 
 	messages := make([]types.ChatMessage, 0, len(rows))
 	for _, row := range rows {
+		var replyTo *types.ChatMessageReference
+		if row.ReplyToMessageID != nil {
+			replyTo = referencesByID[*row.ReplyToMessageID]
+		}
+		var forwardedFrom *types.ChatMessageReference
+		if row.ForwardedFromMessageID != nil {
+			forwardedFrom = referencesByID[*row.ForwardedFromMessageID]
+		}
 		messages = append(messages, types.ChatMessage{
 			ID:             row.ID,
 			ConversationID: row.ConversationID,
@@ -946,11 +1153,44 @@ func (s *ChatService) buildMessages(db *gorm.DB, rows []messageRow) ([]types.Cha
 			SenderAvatar:   row.SenderAvatar,
 			Type:           row.MessageType,
 			Content:        row.Content,
+			ReplyTo:        replyTo,
+			ForwardedFrom:  forwardedFrom,
 			Attachments:    attachmentsByMessage[row.ID],
 			CreatedAt:      row.CreatedAt,
 		})
 	}
 	return messages, nil
+}
+
+func (s *ChatService) loadMessageReferences(db *gorm.DB, messageIDs []uint64) (map[uint64]*types.ChatMessageReference, error) {
+	result := make(map[uint64]*types.ChatMessageReference)
+	if len(messageIDs) == 0 {
+		return result, nil
+	}
+
+	var rows []messageReferenceRow
+	if err := db.Raw(`
+		SELECT m.id, m.sender_userid,
+			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid) AS sender_name,
+			m.message_type, COALESCE(m.content, '') AS content
+		FROM chat_messages m
+		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = m.conversation_id AND cm_sender.userid = m.sender_userid
+		LEFT JOIN users u ON u.userid = m.sender_userid
+		WHERE m.id IN ?
+	`, messageIDs).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	for _, row := range rows {
+		result[row.ID] = &types.ChatMessageReference{
+			ID:           row.ID,
+			SenderUserid: row.SenderUserid,
+			SenderName:   row.SenderName,
+			Type:         row.MessageType,
+			Content:      row.Content,
+		}
+	}
+	return result, nil
 }
 
 func (s *ChatService) loadAttachments(db *gorm.DB, messageIDs []uint64) (map[uint64][]types.ChatAttachment, error) {
@@ -1008,8 +1248,8 @@ func appendUniqueUserid(userids []string, userid string) []string {
 func groupFallbackName(members []types.ChatUser) string {
 	names := make([]string, 0, len(members))
 	for _, member := range members {
-		if member.Fullname != "" {
-			names = append(names, member.Fullname)
+		if name := chatUserDisplayName(member); name != "" {
+			names = append(names, name)
 		}
 		if len(names) == 3 {
 			break
@@ -1019,6 +1259,16 @@ func groupFallbackName(members []types.ChatUser) string {
 		return "Nhom chat"
 	}
 	return strings.Join(names, ", ")
+}
+
+func chatUserDisplayName(user types.ChatUser) string {
+	if strings.TrimSpace(user.Nickname) != "" {
+		return strings.TrimSpace(user.Nickname)
+	}
+	if strings.TrimSpace(user.Fullname) != "" {
+		return strings.TrimSpace(user.Fullname)
+	}
+	return user.Userid
 }
 
 func isValidMessageType(messageType string) bool {

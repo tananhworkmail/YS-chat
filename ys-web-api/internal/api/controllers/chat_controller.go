@@ -125,6 +125,26 @@ func (h *ChatController) CreateGroupConversation(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"conversation": conversation})
 }
 
+func (h *ChatController) UpdateConversationSettings(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+
+	var req request.UpdateConversationSettingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+
+	conversation, err := services.ChatServiceInstance.UpdateConversationSettings(currentUserid(c), conversationID, req)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"conversation": conversation})
+}
+
 func (h *ChatController) AddMembers(c *gin.Context) {
 	conversationID, ok := parseConversationID(c)
 	if !ok {
@@ -138,6 +158,32 @@ func (h *ChatController) AddMembers(c *gin.Context) {
 	}
 
 	conversation, err := services.ChatServiceInstance.AddMembers(currentUserid(c), conversationID, req)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"conversation": conversation})
+}
+
+func (h *ChatController) UpdateMemberNickname(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+
+	targetUserid := strings.TrimSpace(c.Param("userid"))
+	if targetUserid == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+
+	var req request.UpdateConversationMemberNicknameRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+
+	conversation, err := services.ChatServiceInstance.UpdateMemberNickname(currentUserid(c), conversationID, targetUserid, req)
 	if err != nil {
 		writeChatError(c, err)
 		return

@@ -105,7 +105,7 @@
             type="button"
             @click="selectConversation(conversation)"
           >
-            <div v-if="conversation.type === 'group'" class="conversation-avatar group">
+            <div v-if="conversation.type === 'group' && !conversation.avatar" class="conversation-avatar group">
               <Users :size="22" />
               <span>{{ conversation.memberCount }}</span>
             </div>
@@ -211,7 +211,7 @@
             type="button"
             @click="selectConversation(conversation)"
           >
-            <div v-if="conversation.type === 'group'" class="conversation-avatar group">
+            <div v-if="conversation.type === 'group' && !conversation.avatar" class="conversation-avatar group">
               <Users :size="22" />
               <span>{{ conversation.memberCount }}</span>
             </div>
@@ -257,7 +257,7 @@
           </div>
         </header>
 
-        <section ref="messageListRef" class="message-list">
+        <section ref="messageListRef" class="message-list" :style="messageListStyle">
           <div v-if="loadingMessages" class="message-state">Đang tải tin nhắn...</div>
           <div v-else-if="messages.length === 0" class="message-state">
             <MessageCircle :size="34" />
@@ -267,6 +267,7 @@
           <div
             v-for="message in messages"
             v-else
+            :id="`message-${message.id}`"
             :key="message.id"
             class="message-row"
             :class="{ own: isOwnMessage(message) }"
@@ -288,6 +289,21 @@
               </span>
 
               <div class="message-bubble" :class="message.type">
+                <button
+                  v-if="message.replyTo"
+                  class="reply-reference"
+                  type="button"
+                  @click="scrollToMessage(message.replyTo.id)"
+                >
+                  <strong>{{ message.replyTo.senderName }}</strong>
+                  <span>{{ messageReferencePreview(message.replyTo) }}</span>
+                </button>
+
+                <div v-if="message.forwardedFrom" class="forwarded-label">
+                  <Forward :size="13" />
+                  <span>Chuyển tiếp từ {{ message.forwardedFrom.senderName }}</span>
+                </div>
+
                 <a
                   v-if="message.type === 'link'"
                   class="message-link"
@@ -334,8 +350,10 @@
                     <a
                       class="download-button"
                       :href="attachment.fileUrl"
+                      :download="downloadFileName(attachment)"
                       target="_blank"
                       rel="noopener noreferrer"
+                      title="Tải về"
                     >
                       <Download :size="16" />
                     </a>
@@ -351,6 +369,9 @@
                   >
                     <div class="attachment-icon">
                       <component :is="fileIcon(attachment, message.type)" :size="19" />
+                      <small v-if="fileBadge(attachment, message.type)" class="attachment-badge">
+                        {{ fileBadge(attachment, message.type) }}
+                      </small>
                     </div>
                     <div class="attachment-meta">
                       <a :href="attachment.fileUrl" target="_blank" rel="noopener noreferrer">
@@ -363,8 +384,10 @@
                     <a
                       class="download-button"
                       :href="attachment.fileUrl"
+                      :download="downloadFileName(attachment)"
                       target="_blank"
                       rel="noopener noreferrer"
+                      title="Tải về"
                     >
                       <Download :size="16" />
                     </a>
@@ -373,11 +396,34 @@
 
                 <time>{{ formatTime(message.createdAt) }}</time>
               </div>
+              <div class="message-actions">
+                <el-tooltip content="Trả lời" placement="top">
+                  <button type="button" @click="startReply(message)">
+                    <Reply :size="15" />
+                  </button>
+                </el-tooltip>
+                <el-tooltip content="Chuyển tiếp" placement="top">
+                  <button type="button" @click="openForwardDialog(message)">
+                    <Forward :size="15" />
+                  </button>
+                </el-tooltip>
+              </div>
             </div>
           </div>
         </section>
 
         <footer class="composer">
+          <div v-if="replyingTo" class="reply-compose">
+            <Reply :size="17" />
+            <div>
+              <strong>Trả lời {{ replyingTo.senderName }}</strong>
+              <span>{{ messageReferencePreview(replyingTo) }}</span>
+            </div>
+            <button type="button" @click="cancelReply">
+              <X :size="15" />
+            </button>
+          </div>
+
           <div v-if="pendingAttachments.length" class="pending-files">
             <div
               v-for="attachment in pendingAttachments"
@@ -392,14 +438,6 @@
                 <X :size="14" />
               </button>
             </div>
-          </div>
-
-          <div v-if="linkMode" class="link-compose">
-            <Link2 :size="18" />
-            <input v-model.trim="linkValue" type="url" placeholder="Dán liên kết cần gửi" />
-            <button type="button" @click="closeLinkMode">
-              <X :size="16" />
-            </button>
           </div>
 
           <div v-if="isRecording" class="voice-recording">
@@ -421,17 +459,6 @@
               <el-tooltip content="Gửi thư mục" placement="top">
                 <button class="tool-button" type="button" :disabled="isRecording" @click="folderInputRef?.click()">
                   <FolderUp :size="20" />
-                </button>
-              </el-tooltip>
-              <el-tooltip content="Gửi liên kết" placement="top">
-                <button
-                  class="tool-button"
-                  :class="{ active: linkMode }"
-                  type="button"
-                  :disabled="isRecording"
-                  @click="toggleLinkMode"
-                >
-                  <Link2 :size="20" />
                 </button>
               </el-tooltip>
               <el-tooltip :content="isRecording ? 'Dung va gui voice' : 'Ghi voice'" placement="top">
@@ -458,10 +485,10 @@
                   @mousedown.prevent="insertMention(member)"
                 >
                   <el-avatar :size="28" :src="member.avatar || undefined">
-                    {{ initials(member.fullname) }}
+                    {{ initials(displayName(member)) }}
                   </el-avatar>
                   <span>
-                    <strong>{{ member.fullname }}</strong>
+                    <strong>{{ displayName(member) }}</strong>
                     <small>{{ member.userid }}</small>
                   </span>
                 </button>
@@ -470,7 +497,6 @@
               <textarea
                 ref="composerInputRef"
                 v-model="composerText"
-                :disabled="linkMode"
                 rows="1"
                 placeholder="Nhập tin nhắn, dùng @ để tag tên"
                 @input="updateMentionState"
@@ -527,36 +553,94 @@
 
     <aside class="info-panel" v-if="activeConversation">
       <div class="profile-block">
-        <el-avatar :size="72" :src="activeConversation.avatar || undefined">
+        <div
+          v-if="activeConversation.type === 'group'"
+          class="conversation-cover"
+          :class="{ empty: !activeConversation.background }"
+        >
+          <img v-if="activeConversation.background" :src="activeConversation.background" alt="" />
+          <button
+            v-if="isCurrentUserGroupOwner"
+            class="cover-upload-button"
+            type="button"
+            @click="groupBackgroundInputRef?.click()"
+          >
+            <Camera :size="15" />
+          </button>
+        </div>
+        <div class="conversation-avatar-editor" :class="{ 'with-cover': activeConversation.type === 'group' }">
+          <el-avatar :size="72" :src="activeConversation.avatar || undefined">
           {{ initials(activeConversation.name) }}
-        </el-avatar>
+          </el-avatar>
+          <button
+            v-if="isCurrentUserGroupOwner"
+            class="avatar-upload-button mini"
+            type="button"
+            @click="groupAvatarInputRef?.click()"
+          >
+            <Camera :size="15" />
+          </button>
+        </div>
         <h3>{{ activeConversation.name }}</h3>
+        <input
+          ref="groupAvatarInputRef"
+          hidden
+          accept="image/*"
+          type="file"
+          @change="handleGroupImageSelected($event, 'avatar')"
+        />
+        <input
+          ref="groupBackgroundInputRef"
+          hidden
+          accept="image/*"
+          type="file"
+          @change="handleGroupImageSelected($event, 'background')"
+        />
         <span>{{ activeConversation.memberCount }} thành viên</span>
       </div>
 
       <section class="info-section">
         <div class="section-title">
-          <h4>Thành viên</h4>
+          <h4>Thành viên nhóm</h4>
           <button v-if="activeConversation.type === 'group'" type="button" @click="openAddMemberDialog">
             <UserPlus :size="16" />
           </button>
         </div>
-        <div class="member-list">
+        <button
+          v-if="activeConversation.type === 'group'"
+          class="member-count-button"
+          type="button"
+          @click="membersExpanded = !membersExpanded"
+        >
+          <Users :size="20" />
+          <strong>{{ activeConversation.memberCount }} thành viên</strong>
+        </button>
+        <div v-if="activeConversation.type !== 'group' || membersExpanded" class="member-list">
           <div v-for="member in activeConversation.members" :key="member.userid" class="member-item">
             <el-avatar :size="32" :src="member.avatar || undefined">
-              {{ initials(member.fullname) }}
+              {{ initials(displayName(member)) }}
             </el-avatar>
             <div class="member-meta">
-              <strong>{{ member.fullname }}</strong>
-              <span>{{ member.userid }}</span>
+              <strong>{{ displayName(member) }}</strong>
+              <span>{{ member.nickname && member.fullname ? `${member.fullname} · ${member.userid}` : member.userid }}</span>
             </div>
+            <el-tooltip content="Đặt biệt danh" placement="left">
+              <button
+                class="member-action-button"
+                type="button"
+                :aria-label="`Đặt biệt danh cho ${member.fullname || member.userid}`"
+                @click="openNicknameDialog(member)"
+              >
+                <Pencil :size="15" />
+              </button>
+            </el-tooltip>
             <el-tooltip
               v-if="isCurrentUserGroupOwner && member.userid !== currentUserid"
               content="Xóa thành viên"
               placement="left"
             >
               <button
-                class="member-remove-button"
+                class="member-action-button danger"
                 type="button"
                 :aria-label="`Xóa ${member.fullname || member.userid} khỏi nhóm`"
                 @click="removeMemberFromGroup(member)"
@@ -570,21 +654,66 @@
 
       <section class="info-section">
         <div class="section-title">
-          <h4>Tệp đã gửi</h4>
+          <h4>Ảnh / Video</h4>
         </div>
-        <div v-if="sharedFiles.length" class="shared-files">
+        <div v-if="sharedMedia.length" class="shared-media-grid">
           <a
-            v-for="file in sharedFiles"
+            v-for="file in sharedMedia"
             :key="file.fileUrl"
             :href="file.fileUrl"
             target="_blank"
             rel="noopener noreferrer"
           >
-            <component :is="fileIcon(file, 'file')" :size="16" />
+            <img v-if="isImageAttachment(file)" :src="file.fileUrl" :alt="file.fileName" loading="lazy" />
+            <span v-else>
+              <FileVideo :size="22" />
+            </span>
+          </a>
+        </div>
+        <p v-else class="muted">Chưa có media</p>
+      </section>
+
+      <section class="info-section">
+        <div class="section-title">
+          <h4>File / Folder</h4>
+        </div>
+        <div v-if="sharedDocuments.length" class="shared-files">
+          <a
+            v-for="file in sharedDocuments"
+            :key="file.fileUrl"
+            :href="file.fileUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <span class="shared-file-icon" :class="fileKind(file, 'file')">
+              <component :is="fileIcon(file, 'file')" :size="16" />
+              <small v-if="fileBadge(file, 'file')">{{ fileBadge(file, 'file') }}</small>
+            </span>
             <span>{{ file.relativePath || file.fileName }}</span>
           </a>
         </div>
         <p v-else class="muted">Chưa có tệp</p>
+      </section>
+
+      <section class="info-section">
+        <div class="section-title">
+          <h4>Link</h4>
+        </div>
+        <div v-if="sharedLinks.length" class="shared-files">
+          <a
+            v-for="link in sharedLinks"
+            :key="`${link.id}-${link.content}`"
+            :href="safeLink(link.content)"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <span class="shared-file-icon link">
+              <Link2 :size="16" />
+            </span>
+            <span>{{ link.content }}</span>
+          </a>
+        </div>
+        <p v-else class="muted">Chưa có link</p>
       </section>
     </aside>
 
@@ -798,6 +927,62 @@
         </button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="nicknameDialogVisible" title="Đặt biệt danh" width="420px" class="chat-dialog">
+      <div class="dialog-form">
+        <label>Thành viên</label>
+        <input :value="nicknameTarget?.fullname || nicknameTarget?.userid || ''" disabled type="text" />
+
+        <label>Biệt danh</label>
+        <input
+          v-model.trim="nicknameValue"
+          type="text"
+          maxlength="80"
+          placeholder="Nhập biệt danh, để trống để xóa"
+          @keydown.enter.prevent="submitNickname"
+        />
+      </div>
+
+      <template #footer>
+        <button class="dialog-button ghost" type="button" @click="nicknameDialogVisible = false">
+          Hủy
+        </button>
+        <button class="dialog-button primary" type="button" @click="submitNickname">
+          Lưu
+        </button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="forwardDialogVisible" title="Chuyển tiếp tin nhắn" width="440px" class="chat-dialog">
+      <div class="forward-preview">
+        <Forward :size="17" />
+        <span>{{ forwardingMessage ? messageReferencePreview(forwardingMessage) : "" }}</span>
+      </div>
+      <div class="forward-conversation-list">
+        <button
+          v-for="conversation in conversations"
+          :key="conversation.id"
+          class="forward-conversation"
+          :class="{ selected: forwardTargetConversationId === conversation.id }"
+          type="button"
+          @click="forwardTargetConversationId = conversation.id"
+        >
+          <el-avatar :size="34" :src="conversation.avatar || undefined">
+            {{ initials(conversation.name) }}
+          </el-avatar>
+          <span>{{ conversation.name }}</span>
+        </button>
+      </div>
+
+      <template #footer>
+        <button class="dialog-button ghost" type="button" @click="forwardDialogVisible = false">
+          Hủy
+        </button>
+        <button class="dialog-button primary" type="button" @click="submitForward">
+          Chuyển tiếp
+        </button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -812,6 +997,7 @@ import {
   Camera,
   ChevronLeft,
   Download,
+  File,
   FileArchive,
   FileAudio,
   FileCode,
@@ -819,14 +1005,18 @@ import {
   FileSpreadsheet,
   FileText,
   FileVideo,
+  Folder,
   FolderUp,
+  Forward,
   Link2,
   LogOut,
   MessageCircle,
   Mic,
   Paperclip,
+  Pencil,
   Plus,
   Presentation,
+  Reply,
   Search,
   SendHorizontal,
   Square,
@@ -871,20 +1061,26 @@ const mentionActive = ref(false);
 const mentionQuery = ref("");
 const mentionStartIndex = ref(-1);
 const mentionSelectedIndex = ref(0);
+const replyingTo = ref(null);
+const forwardDialogVisible = ref(false);
+const forwardingMessage = ref(null);
+const forwardTargetConversationId = ref(null);
 const pendingAttachments = ref([]);
 const pendingAttachmentType = ref("file");
 const isRecording = ref(false);
 const preparingRecording = ref(false);
 const recordingDuration = ref(0);
-const linkMode = ref(false);
-const linkValue = ref("");
 const groupDialogVisible = ref(false);
 const groupName = ref("");
 const groupMemberInput = ref("");
 const groupMemberUserids = ref([]);
+const membersExpanded = ref(false);
 const addMemberDialogVisible = ref(false);
 const addMemberInput = ref("");
 const addMemberUserids = ref([]);
+const nicknameDialogVisible = ref(false);
+const nicknameTarget = ref(null);
+const nicknameValue = ref("");
 const contactDialogVisible = ref(false);
 const contactUserid = ref("");
 const contactLookupUsers = ref([]);
@@ -897,6 +1093,8 @@ const composerInputRef = ref(null);
 const fileInputRef = ref(null);
 const folderInputRef = ref(null);
 const avatarInputRef = ref(null);
+const groupAvatarInputRef = ref(null);
+const groupBackgroundInputRef = ref(null);
 let refreshTimer = null;
 let searchTimer = null;
 let contactLookupTimer = null;
@@ -946,15 +1144,43 @@ const filteredConversations = computed(() => {
   if (!keyword) return conversations.value;
   return conversations.value.filter((conversation) => {
     const memberText = (conversation.members || [])
-      .map((member) => `${member.fullname} ${member.userid}`)
+      .map((member) => `${member.fullname} ${member.nickname || ""} ${member.userid}`)
       .join(" ")
       .toLowerCase();
     return `${conversation.name} ${memberText}`.toLowerCase().includes(keyword);
   });
 });
 
-const sharedFiles = computed(() =>
-  messages.value.flatMap((message) => message.attachments || []).slice(-12).reverse(),
+const messageListStyle = computed(() => {
+  const background = activeConversation.value?.background;
+  if (!background) return {};
+  return {
+    backgroundImage: `linear-gradient(rgba(248, 250, 252, 0.84), rgba(248, 250, 252, 0.84)), url("${cssUrl(background)}")`,
+  };
+});
+
+const sharedAttachments = computed(() =>
+  messages.value.flatMap((message) => message.attachments || []).reverse(),
+);
+
+const sharedMedia = computed(() =>
+  sharedAttachments.value
+    .filter((attachment) => isImageAttachment(attachment) || isVideoAttachment(attachment))
+    .slice(0, 12),
+);
+
+const sharedDocuments = computed(() =>
+  sharedAttachments.value
+    .filter((attachment) => !isImageAttachment(attachment) && !isVideoAttachment(attachment) && !isAudioAttachment(attachment))
+    .slice(0, 12),
+);
+
+const sharedLinks = computed(() =>
+  messages.value
+    .filter((message) => message.type === "link" && message.content)
+    .slice()
+    .reverse()
+    .slice(0, 12),
 );
 
 const recordingDurationLabel = computed(() => formatDuration(recordingDuration.value));
@@ -974,7 +1200,7 @@ const mentionSuggestions = computed(() => {
     .filter((member) => member.userid !== currentUserid)
     .filter((member) => {
       if (!keyword) return true;
-      return `${member.fullname} ${member.userid}`.toLowerCase().includes(keyword);
+      return `${member.fullname} ${member.nickname || ""} ${member.userid}`.toLowerCase().includes(keyword);
     })
     .slice(0, 6);
 });
@@ -1449,6 +1675,35 @@ const handleAvatarSelected = async (event) => {
   }
 };
 
+const handleGroupImageSelected = async (event, field) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file || !activeConversationId.value || activeConversation.value?.type !== "group") return;
+
+  try {
+    const uploadRes = await chatApi.uploadFiles([{ file, relativePath: file.name }]);
+    const attachment = uploadRes.data?.attachments?.[0];
+    if (!attachment?.fileUrl) {
+      ElMessage.error("Không tải được ảnh.");
+      return;
+    }
+
+    const payload = {
+      avatar: activeConversation.value.avatar || "",
+      background: activeConversation.value.background || "",
+      [field]: attachment.fileUrl,
+    };
+    const res = await chatApi.updateConversationSettings(activeConversationId.value, payload);
+    await loadConversations(false);
+    if (res.data?.conversation) {
+      await selectConversation(res.data.conversation);
+    }
+    ElMessage.success(field === "avatar" ? "Đã cập nhật ảnh đại diện nhóm." : "Đã cập nhật ảnh nền hội thoại.");
+  } catch (error) {
+    showApiError(error);
+  }
+};
+
 const loadConversations = async (selectFirst = false) => {
   try {
     loadingConversations.value = true;
@@ -1479,6 +1734,8 @@ const loadConversations = async (selectFirst = false) => {
 
 const selectConversation = async (conversation) => {
   activeConversationId.value = conversation.id;
+  membersExpanded.value = false;
+  cancelReply();
   await loadMessages(conversation.id, true);
   markConversationRead(conversation.id);
 };
@@ -1656,8 +1913,36 @@ const removeMemberFromGroup = async (member) => {
   }
 };
 
+const openNicknameDialog = (member) => {
+  if (!activeConversationId.value || !member?.userid) return;
+  nicknameTarget.value = member;
+  nicknameValue.value = member.nickname || "";
+  nicknameDialogVisible.value = true;
+};
+
+const submitNickname = async () => {
+  if (!activeConversationId.value || !nicknameTarget.value?.userid) return;
+
+  try {
+    await chatApi.updateConversationMemberNickname(
+      activeConversationId.value,
+      nicknameTarget.value.userid,
+      nicknameValue.value,
+    );
+    nicknameDialogVisible.value = false;
+    const conversationId = activeConversationId.value;
+    await loadConversations(false);
+    if (conversationId) {
+      await loadMessages(conversationId, false);
+    }
+    ElMessage.success(nicknameValue.value ? "Đã lưu biệt danh." : "Đã xóa biệt danh.");
+  } catch (error) {
+    showApiError(error);
+  }
+};
+
 const updateMentionState = () => {
-  if (linkMode.value || !activeConversation.value) {
+  if (!activeConversation.value) {
     closeMentionMenu();
     return;
   }
@@ -1728,7 +2013,7 @@ const insertMention = async (member) => {
   const input = composerInputRef.value;
   const cursor = input?.selectionStart ?? composerText.value.length;
   const start = mentionStartIndex.value >= 0 ? mentionStartIndex.value : cursor;
-  const mentionText = `@${member.fullname || member.userid} `;
+  const mentionText = `@${displayName(member) || member.userid} `;
   composerText.value = `${composerText.value.slice(0, start)}${mentionText}${composerText.value.slice(cursor)}`;
   closeMentionMenu();
 
@@ -1792,7 +2077,6 @@ const startVoiceRecording = async () => {
 
   try {
     preparingRecording.value = true;
-    closeLinkMode();
     const stream = await window.navigator.mediaDevices.getUserMedia({ audio: true });
     recordingStream = stream;
     if (componentUnmounted) {
@@ -2038,26 +2322,55 @@ const removePendingAttachment = (fileUrl) => {
   );
 };
 
-const toggleLinkMode = () => {
-  linkMode.value = !linkMode.value;
-  if (linkMode.value) {
-    pendingAttachments.value = [];
-  } else {
-    linkValue.value = "";
-  }
+const startReply = (message) => {
+  replyingTo.value = toMessageReference(message);
+  nextTick(() => composerInputRef.value?.focus());
 };
 
-const closeLinkMode = () => {
-  linkMode.value = false;
-  linkValue.value = "";
+const cancelReply = () => {
+  replyingTo.value = null;
+};
+
+const openForwardDialog = (message) => {
+  forwardingMessage.value = message;
+  forwardTargetConversationId.value = conversations.value.find((conversation) => conversation.id !== activeConversationId.value)?.id
+    || activeConversationId.value;
+  forwardDialogVisible.value = true;
+};
+
+const submitForward = async () => {
+  if (!forwardingMessage.value || !forwardTargetConversationId.value || sending.value) return;
+
+  const message = forwardingMessage.value;
+  try {
+    sending.value = true;
+    const res = await chatApi.sendMessage(forwardTargetConversationId.value, {
+      type: message.type,
+      content: message.content || "",
+      forwardedFromMessageId: message.id,
+      attachments: cloneAttachments(message.attachments || []),
+    });
+    forwardDialogVisible.value = false;
+    forwardingMessage.value = null;
+    if (forwardTargetConversationId.value === activeConversationId.value && res.data?.message) {
+      messages.value.push(res.data.message);
+      await scrollToBottom();
+    }
+    await loadConversations(false);
+    ElMessage.success("Đã chuyển tiếp tin nhắn.");
+  } catch (error) {
+    showApiError(error);
+  } finally {
+    sending.value = false;
+  }
 };
 
 const sendCurrentMessage = async () => {
   if (!activeConversationId.value || sending.value || uploading.value || isRecording.value) return;
 
-  const content = linkMode.value ? linkValue.value.trim() : composerText.value.trim();
+  const content = composerText.value.trim();
   const hasAttachments = pendingAttachments.value.length > 0;
-  const type = linkMode.value ? "link" : hasAttachments ? pendingAttachmentType.value : "text";
+  const type = !hasAttachments && isLinkMessageContent(content) ? "link" : hasAttachments ? pendingAttachmentType.value : "text";
 
   if (!content && !hasAttachments) {
     ElMessage.warning("Tin nhắn đang trống.");
@@ -2069,14 +2382,15 @@ const sendCurrentMessage = async () => {
     const res = await chatApi.sendMessage(activeConversationId.value, {
       type,
       content,
+      replyToMessageId: replyingTo.value?.id || 0,
       attachments: pendingAttachments.value,
     });
     if (res.data?.message) {
       messages.value.push(res.data.message);
     }
     composerText.value = "";
+    cancelReply();
     pendingAttachments.value = [];
-    closeLinkMode();
     await loadConversations(false);
     await scrollToBottom();
   } catch (error) {
@@ -2100,6 +2414,15 @@ const scrollToBottom = async () => {
   window.setTimeout(scroll, 120);
 };
 
+const scrollToMessage = async (messageId) => {
+  await nextTick();
+  const target = document.getElementById(`message-${messageId}`);
+  if (!target) return;
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.classList.add("highlight");
+  window.setTimeout(() => target.classList.remove("highlight"), 1400);
+};
+
 const handleLogout = () => {
   disconnectRealtime();
   removePushListeners();
@@ -2111,6 +2434,32 @@ const handleLogout = () => {
 };
 
 const isOwnMessage = (message) => message.senderUserid === currentUserid;
+
+const toMessageReference = (message = {}) => ({
+  id: message.id,
+  senderUserid: message.senderUserid,
+  senderName: message.senderName,
+  type: message.type,
+  content: message.content || "",
+});
+
+const cloneAttachments = (attachments = []) =>
+  attachments.map((attachment) => ({
+    fileName: attachment.fileName,
+    fileUrl: attachment.fileUrl,
+    fileSize: attachment.fileSize,
+    mimeType: attachment.mimeType,
+    relativePath: attachment.relativePath,
+  }));
+
+const messageReferencePreview = (message = {}) => {
+  if (message.content) return message.content;
+  if (message.type === "voice") return "Voice chat";
+  if (message.type === "folder") return "Thư mục đính kèm";
+  if (message.type === "file") return "Tệp đính kèm";
+  if (message.type === "link") return "Liên kết";
+  return "Tin nhắn";
+};
 
 const messageTextParts = (content = "") => {
   const labels = mentionLabels();
@@ -2154,7 +2503,7 @@ const mentionLabels = () => {
   const seen = new Set();
 
   members.forEach((member) => {
-    [`@${member.fullname}`, `@${member.userid}`].forEach((label) => {
+    [`@${displayName(member)}`, `@${member.fullname}`, `@${member.userid}`].forEach((label) => {
       const normalized = label.trim();
       if (normalized.length <= 1 || seen.has(normalized.toLowerCase())) return;
       seen.add(normalized.toLowerCase());
@@ -2187,6 +2536,11 @@ const isAudioAttachment = (attachment) => {
   const mimeType = (attachment.mimeType || "").toLowerCase();
   if (mimeType.startsWith("video/")) return false;
   return mimeType.startsWith("audio/") || ["mp3", "wav", "m4a", "aac", "flac", "ogg", "oga", "webm"].includes(fileExt(attachment));
+};
+
+const isVideoAttachment = (attachment) => {
+  const mimeType = (attachment.mimeType || "").toLowerCase();
+  return mimeType.startsWith("video/") || ["mp4", "mov", "avi", "mkv", "webm"].includes(fileExt(attachment));
 };
 
 const fileExt = (attachment) => {
@@ -2230,6 +2584,22 @@ const fileKindLabel = (attachment, messageType = "file") => {
   return labels[kind] || "Tệp";
 };
 
+const fileBadge = (attachment, messageType = "file") => {
+  const kind = fileKind(attachment, messageType);
+  if (kind === "folder") return "";
+  if (kind === "voice") return "VOC";
+  if (kind === "audio") return "AUD";
+  if (kind === "video") return "VID";
+  if (kind === "image") return "IMG";
+  if (kind === "archive") return "ZIP";
+  if (kind === "word") return "DOC";
+  if (kind === "excel") return "XLS";
+  if (kind === "ppt") return "PPT";
+  if (kind === "code") return "CODE";
+  if (kind === "pdf") return "PDF";
+  return fileExt(attachment).slice(0, 4).toUpperCase();
+};
+
 const fileIcon = (attachment, messageType = "file") => {
   const kind = fileKind(attachment, messageType);
   const icons = {
@@ -2237,8 +2607,10 @@ const fileIcon = (attachment, messageType = "file") => {
     audio: FileAudio,
     code: FileCode,
     excel: FileSpreadsheet,
-    folder: FolderUp,
+    file: File,
+    folder: Folder,
     image: FileImage,
+    pdf: FileText,
     ppt: Presentation,
     video: FileVideo,
     voice: FileAudio,
@@ -2248,6 +2620,8 @@ const fileIcon = (attachment, messageType = "file") => {
 };
 
 const folderNameFromPath = (path = "") => path.split("/").filter(Boolean)[0] || "";
+
+const displayName = (user = {}) => user.nickname || user.fullname || user.userid || "";
 
 const initials = (name = "") => {
   const words = name.trim().split(/\s+/).filter(Boolean);
@@ -2292,10 +2666,20 @@ const formatBytes = (bytes = 0) => {
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 };
 
+const downloadFileName = (attachment = {}) => attachment.fileName || attachment.relativePath?.split("/").pop() || "";
+
 const safeLink = (value) => {
   if (/^https?:\/\//i.test(value)) return value;
   return `https://${value}`;
 };
+
+const isLinkMessageContent = (value = "") => {
+  const content = value.trim();
+  if (!content || /\s/.test(content)) return false;
+  return /^(https?:\/\/)?([\w-]+\.)+[\w-]{2,}(\/\S*)?$/i.test(content);
+};
+
+const cssUrl = (value = "") => value.replace(/["\\]/g, "\\$&");
 
 const showApiError = (error) => {
   const code = error?.response?.data?.error;
@@ -2309,6 +2693,14 @@ const showApiError = (error) => {
 
 <style scoped>
 .chat-shell {
+  --brand: #0891b2;
+  --brand-dark: #0e7490;
+  --brand-focus: #22d3ee;
+  --brand-soft: #cffafe;
+  --brand-softest: #ecfeff;
+  --brand-border: #a5f3fc;
+  --brand-tint: rgba(8, 145, 178, 0.12);
+  --brand-overlay: rgba(236, 254, 255, 0.92);
   width: 100vw;
   height: 100vh;
   display: grid;
@@ -2341,10 +2733,10 @@ a {
   align-content: center;
   justify-items: center;
   gap: 8px;
-  border: 2px dashed #0068ff;
+  border: 2px dashed var(--brand);
   border-radius: 8px;
-  background: rgba(230, 242, 255, 0.92);
-  color: #0056d6;
+  background: var(--brand-overlay);
+  color: var(--brand-dark);
   pointer-events: none;
 }
 
@@ -2396,7 +2788,7 @@ a {
 }
 
 .app-rail {
-  background: #0068ff;
+  background: var(--brand);
   color: #ffffff;
   display: flex;
   flex-direction: column;
@@ -2487,7 +2879,7 @@ a {
 
 .eyebrow {
   margin: 0 0 2px;
-  color: #0068ff;
+  color: var(--brand);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
@@ -2522,19 +2914,18 @@ a {
 }
 
 .icon-button.primary {
-  background: #0068ff;
+  background: var(--brand);
   color: #ffffff;
 }
 
 .icon-button:hover,
 .tool-button:hover {
-  background: #dbeafe;
-  color: #0056d6;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
 }
 
 .search-box,
 .quick-start,
-.link-compose,
 .chip-input {
   display: flex;
   align-items: center;
@@ -2554,7 +2945,6 @@ a {
 
 .search-box input,
 .quick-start input,
-.link-compose input,
 .chip-input input,
 .dialog-form input {
   min-width: 0;
@@ -2579,7 +2969,7 @@ a {
   display: grid;
   place-items: center;
   border-radius: 8px;
-  background: #0068ff;
+  background: var(--brand);
   color: #ffffff;
   cursor: pointer;
   flex: 0 0 auto;
@@ -2628,11 +3018,11 @@ a {
 }
 
 .conversation-item:hover {
-  background: #f2f7ff;
+  background: var(--brand-softest);
 }
 
 .conversation-item.active {
-  background: #e5f0ff;
+  background: var(--brand-soft);
 }
 
 .conversation-item.has-unread .conversation-name {
@@ -2656,7 +3046,7 @@ a {
   display: grid;
   place-items: center;
   border-radius: 8px;
-  background: linear-gradient(135deg, #0ea5e9, #2563eb);
+  background: linear-gradient(135deg, var(--brand-focus), var(--brand));
   color: #ffffff;
   box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.28);
 }
@@ -2671,8 +3061,8 @@ a {
   place-items: center;
   border-radius: 999px;
   background: #ffffff;
-  border: 1px solid #bfd7ff;
-  color: #0056d6;
+  border: 1px solid var(--brand-border);
+  color: var(--brand-dark);
   font-size: 11px;
   font-weight: 800;
 }
@@ -2743,7 +3133,7 @@ a {
 }
 
 .user-result:hover {
-  background: #f2f7ff;
+  background: var(--brand-softest);
 }
 
 .user-result-main {
@@ -2771,15 +3161,15 @@ a {
   height: 32px;
   border-radius: 8px;
   padding: 0 10px;
-  background: #0068ff;
+  background: var(--brand);
   color: #ffffff;
   cursor: pointer;
   font-weight: 800;
 }
 
 .result-action.ghost {
-  background: #e5f0ff;
-  color: #0056d6;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
 }
 
 .list-state,
@@ -2870,6 +3260,8 @@ a {
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 20px 28px;
+  background-position: center;
+  background-size: cover;
 }
 
 .message-state,
@@ -2926,6 +3318,10 @@ a {
   align-items: flex-end;
 }
 
+.message-row.highlight .message-bubble {
+  box-shadow: 0 0 0 3px var(--brand-tint), 0 1px 1px rgba(15, 23, 42, 0.04);
+}
+
 .message-row.own {
   justify-content: flex-end;
 }
@@ -2960,8 +3356,78 @@ a {
 }
 
 .message-row.own .message-bubble {
-  background: #dbebff;
-  border-color: #c4ddff;
+  background: var(--brand-soft);
+  border-color: var(--brand-border);
+}
+
+.reply-reference {
+  width: 100%;
+  display: grid;
+  gap: 2px;
+  margin-bottom: 7px;
+  padding: 7px 8px;
+  border-left: 3px solid var(--brand);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #243044;
+  cursor: pointer;
+  text-align: left;
+}
+
+.reply-reference strong,
+.reply-compose strong {
+  font-size: 12px;
+  color: var(--brand-dark);
+}
+
+.reply-reference span,
+.reply-compose span,
+.forward-preview span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #637083;
+  font-size: 12px;
+}
+
+.forwarded-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.message-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+  opacity: 0.62;
+  transition: opacity 0.15s ease;
+}
+
+.message-stack:hover .message-actions {
+  opacity: 1;
+}
+
+.message-actions button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #64748b;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+  cursor: pointer;
+}
+
+.message-actions button:hover {
+  color: var(--brand-dark);
+  background: var(--brand-softest);
 }
 
 .message-text {
@@ -2970,9 +3436,9 @@ a {
 }
 
 .message-text .mention {
-  color: #0056d6;
+  color: var(--brand-dark);
   font-weight: 800;
-  background: rgba(0, 104, 255, 0.1);
+  background: var(--brand-tint);
   border-radius: 6px;
   padding: 1px 3px;
 }
@@ -2981,7 +3447,7 @@ a {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #0056d6;
+  color: var(--brand-dark);
   word-break: break-all;
 }
 
@@ -3070,16 +3536,36 @@ a {
 .attachment-icon {
   width: 38px;
   height: 38px;
+  position: relative;
   display: grid;
   place-items: center;
   border-radius: 8px;
-  background: #eaf3ff;
-  color: #0068ff;
+  background: var(--brand-softest);
+  color: var(--brand);
+}
+
+.attachment-badge,
+.shared-file-icon small {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  min-width: 23px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  background: #ffffff;
+  border: 1px solid currentColor;
+  color: inherit;
+  font-size: 8px;
+  font-weight: 900;
+  line-height: 1;
+  padding: 0 3px;
 }
 
 .attachment-item.word .attachment-icon {
-  background: #eaf2ff;
-  color: #2563eb;
+  background: var(--brand-softest);
+  color: var(--brand);
 }
 
 .attachment-item.excel .attachment-icon {
@@ -3129,13 +3615,79 @@ a {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  color: #0056d6;
+  color: var(--brand-dark);
 }
 
 .composer {
   border-top: 1px solid #dce3ee;
   padding: 10px 14px 12px;
   flex: 0 0 auto;
+}
+
+.reply-compose,
+.forward-preview {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--brand-softest);
+  color: var(--brand-dark);
+}
+
+.reply-compose > div {
+  min-width: 0;
+  display: grid;
+}
+
+.reply-compose button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.forward-preview {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.forward-conversation-list {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.forward-conversation {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: #f5f7fb;
+  color: #172033;
+  cursor: pointer;
+  text-align: left;
+}
+
+.forward-conversation.selected {
+  background: var(--brand-soft);
+  box-shadow: inset 0 0 0 1px var(--brand-focus);
+}
+
+.forward-conversation span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pending-files {
@@ -3153,8 +3705,8 @@ a {
   min-width: 0;
   max-width: 300px;
   border-radius: 8px;
-  background: #eef6ff;
-  color: #0056d6;
+  background: var(--brand-softest);
+  color: var(--brand-dark);
   padding: 6px 8px;
   font-size: 13px;
 }
@@ -3172,19 +3724,12 @@ a {
 
 .pending-file button,
 .chip button,
-.link-compose button,
 .section-title button {
   display: grid;
   place-items: center;
   background: transparent;
   color: inherit;
   cursor: pointer;
-}
-
-.link-compose {
-  height: 40px;
-  padding: 0 10px;
-  margin-bottom: 8px;
 }
 
 .voice-recording {
@@ -3272,7 +3817,7 @@ a {
 
 .mention-menu button:hover,
 .mention-menu button.selected {
-  background: #eaf3ff;
+  background: var(--brand-softest);
 }
 
 .mention-menu span {
@@ -3306,8 +3851,8 @@ a {
 }
 
 .tool-button.active {
-  background: #e5f0ff;
-  color: #0068ff;
+  background: var(--brand-soft);
+  color: var(--brand);
 }
 
 .tool-button.recording {
@@ -3336,18 +3881,17 @@ textarea {
 textarea:focus,
 .search-box:focus-within,
 .quick-start:focus-within,
-.link-compose:focus-within,
 .chip-input:focus-within,
 .dialog-form input:focus {
-  border-color: #7db4ff;
-  box-shadow: 0 0 0 3px rgba(0, 104, 255, 0.12);
+  border-color: var(--brand-focus);
+  box-shadow: 0 0 0 3px var(--brand-tint);
 }
 
 .send-button {
   width: 40px;
   height: 38px;
   border-radius: 8px;
-  background: #0068ff;
+  background: var(--brand);
   color: #ffffff;
 }
 
@@ -3371,6 +3915,60 @@ textarea:focus,
   padding-bottom: 18px;
   border-bottom: 1px solid #edf1f6;
   text-align: center;
+}
+
+.conversation-cover {
+  width: 100%;
+  aspect-ratio: 16 / 7;
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--brand-softest), #f5f7fb);
+}
+
+.conversation-cover img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.conversation-cover.empty {
+  border: 1px dashed var(--brand-border);
+}
+
+.conversation-avatar-editor {
+  position: relative;
+}
+
+.conversation-avatar-editor.with-cover {
+  margin-top: -34px;
+}
+
+.cover-upload-button,
+.avatar-upload-button.mini {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--brand-dark);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+  cursor: pointer;
+}
+
+.cover-upload-button {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+}
+
+.avatar-upload-button.mini {
+  position: absolute;
+  right: -4px;
+  bottom: 0;
+  padding: 0;
 }
 
 .profile-block h3 {
@@ -3402,6 +4000,22 @@ textarea:focus,
   gap: 8px;
 }
 
+.member-count-button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  background: transparent;
+  color: #172033;
+  cursor: pointer;
+  text-align: left;
+}
+
+.member-count-button svg {
+  color: var(--brand-dark);
+}
+
 .member-item {
   display: flex;
   align-items: center;
@@ -3422,19 +4036,28 @@ textarea:focus,
   white-space: nowrap;
 }
 
-.member-remove-button {
+.member-action-button {
   width: 30px;
   height: 30px;
   flex: 0 0 auto;
   display: grid;
   place-items: center;
   border-radius: 8px;
-  background: #fff1f2;
-  color: #e11d48;
+  background: var(--brand-softest);
+  color: var(--brand-dark);
   cursor: pointer;
 }
 
-.member-remove-button:hover {
+.member-action-button:hover {
+  background: var(--brand-soft);
+}
+
+.member-action-button.danger {
+  background: #fff1f2;
+  color: #e11d48;
+}
+
+.member-action-button.danger:hover {
   background: #ffe4e6;
 }
 
@@ -3446,6 +4069,81 @@ textarea:focus,
   padding: 8px;
   border-radius: 8px;
   background: #f5f7fb;
+}
+
+.shared-files a > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shared-media-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.shared-media-grid a {
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #f5f7fb;
+  color: var(--brand);
+}
+
+.shared-media-grid img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.shared-file-icon {
+  width: 28px;
+  height: 28px;
+  position: relative;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--brand-softest);
+  color: var(--brand);
+}
+
+.shared-file-icon.excel {
+  background: #e7f7ed;
+  color: #16803d;
+}
+
+.shared-file-icon.ppt {
+  background: #fff0e8;
+  color: #d45a16;
+}
+
+.shared-file-icon.pdf {
+  background: #ffecec;
+  color: #dc2626;
+}
+
+.shared-file-icon.archive,
+.shared-file-icon.folder {
+  background: #fff7dd;
+  color: #b77900;
+}
+
+.shared-file-icon.audio,
+.shared-file-icon.voice,
+.shared-file-icon.video,
+.shared-file-icon.code {
+  background: #f0edff;
+  color: #6d4aff;
+}
+
+.shared-file-icon.link {
+  background: var(--brand-softest);
+  color: var(--brand-dark);
 }
 
 .dialog-form {
@@ -3472,8 +4170,8 @@ textarea:focus,
   gap: 7px;
   border-radius: 8px;
   padding: 0 12px;
-  background: #e5f0ff;
-  color: #0056d6;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
   cursor: pointer;
   font-weight: 700;
 }
@@ -3546,9 +4244,9 @@ textarea:focus,
 }
 
 .picker-list button.selected {
-  background: #e5f0ff;
-  color: #0056d6;
-  box-shadow: inset 0 0 0 1px #7db4ff;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+  box-shadow: inset 0 0 0 1px var(--brand-focus);
 }
 
 .picker-list span {
@@ -3573,7 +4271,7 @@ textarea:focus,
 }
 
 .dialog-button.primary {
-  background: #0068ff;
+  background: var(--brand);
   color: #ffffff;
 }
 
@@ -3583,8 +4281,8 @@ textarea:focus,
 
 :deep(.el-avatar) {
   flex: 0 0 auto;
-  background: #dbeafe;
-  color: #0056d6;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
   font-weight: 800;
 }
 

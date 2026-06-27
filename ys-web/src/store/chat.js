@@ -42,12 +42,20 @@ export const createGroupConversation = (name, memberUserids) => {
   return api.post("/chat/conversations/group", { name, memberUserids });
 };
 
+export const updateConversationSettings = (conversationId, payload) => {
+  return api.put(`/chat/conversations/${conversationId}/settings`, payload);
+};
+
 export const addConversationMembers = (conversationId, userids) => {
   return api.post(`/chat/conversations/${conversationId}/members`, { userids });
 };
 
 export const removeConversationMember = (conversationId, userid) => {
   return api.delete(`/chat/conversations/${conversationId}/members/${encodeURIComponent(userid)}`);
+};
+
+export const updateConversationMemberNickname = (conversationId, userid, nickname) => {
+  return api.put(`/chat/conversations/${conversationId}/members/${encodeURIComponent(userid)}/nickname`, { nickname });
 };
 
 export const getMessages = (conversationId) => {
@@ -107,8 +115,10 @@ export default {
   getConversations,
   createDirectConversation,
   createGroupConversation,
+  updateConversationSettings,
   addConversationMembers,
   removeConversationMember,
+  updateConversationMemberNickname,
   getMessages,
   sendMessage,
   uploadFiles,
