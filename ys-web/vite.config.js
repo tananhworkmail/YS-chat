@@ -10,7 +10,7 @@ import { ElementPlusResolver } from "unplugin-vue-components/resolvers";
 const apkMimeType = "application/vnd.android.package-archive";
 const apkDownloadHeaders = {
   "Content-Type": apkMimeType,
-  "Content-Disposition": "attachment; filename=YSChat.apk; filename*=UTF-8''YSChat.apk",
+  "Content-Disposition": "attachment; filename=\"YS Chat.apk\"; filename*=UTF-8''YS%20Chat.apk",
   "Content-Transfer-Encoding": "binary",
   "X-Content-Type-Options": "nosniff",
   "Cache-Control": "no-store",

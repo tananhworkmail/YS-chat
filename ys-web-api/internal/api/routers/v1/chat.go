@@ -12,6 +12,7 @@ func ChatRouter(router *gin.RouterGroup) {
 	chat.Use(middlewares.AuthRequired())
 
 	chat.GET("/users", controllers.Chat.SearchUsers)
+	chat.GET("/search", controllers.Chat.Search)
 	chat.GET("/contacts", controllers.Chat.ListContacts)
 	chat.POST("/contacts", controllers.Chat.AddContact)
 	chat.GET("/realtime", controllers.Chat.Realtime)
@@ -25,5 +26,8 @@ func ChatRouter(router *gin.RouterGroup) {
 	chat.DELETE("/conversations/:id/members/:userid", controllers.Chat.RemoveMember)
 	chat.GET("/conversations/:id/messages", controllers.Chat.ListMessages)
 	chat.POST("/conversations/:id/messages", controllers.Chat.SendMessage)
+	chat.POST("/conversations/:id/polls", controllers.Chat.CreatePoll)
+	chat.POST("/messages/:id/poll/votes", controllers.Chat.VotePoll)
+	chat.POST("/messages/:id/poll/close", controllers.Chat.ClosePoll)
 	chat.POST("/uploads", controllers.Chat.UploadFiles)
 }

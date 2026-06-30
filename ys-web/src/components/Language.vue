@@ -1,12 +1,12 @@
 <template>
   <el-dialog
-    :title="$t('menu.dialogTitle')"
+    :title="$t('home.language.tooltip')"
     v-model="dialogVisible"
     width="400px"
   >
     <el-select
       v-model="selectedLocale"
-      placeholder="Select language"
+      :placeholder="$t('home.language.label')"
       style="width: 100%"
     >
       <el-option
@@ -18,9 +18,9 @@
     </el-select>
 
    <template #footer class="dialog-footer">
-      <el-button @click="cancel">{{ $t("menu.cancel") }}</el-button>
+      <el-button @click="cancel">{{ $t("home.actions.cancel") }}</el-button>
       <el-button type="primary" @click="apply">{{
-        $t("menu.apply")
+        $t("home.actions.apply")
       }}</el-button>
     </template>
   </el-dialog>
@@ -37,7 +37,7 @@ const selectedLocale = ref(locale.value);
 const languages = [
   { label: "Tiếng Việt", value: "vi" },
   { label: "English", value: "en" },
-  { label: "中文", value: "zhcn" },
+  { label: "中文", value: "cn" },
 ];
 
 // Functions to control dialog
@@ -52,6 +52,7 @@ const cancel = () => {
 
 const apply = () => {
   locale.value = selectedLocale.value;
+  localStorage.setItem("locale", selectedLocale.value);
   dialogVisible.value = false;
 };
 

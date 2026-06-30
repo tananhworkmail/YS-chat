@@ -2,32 +2,90 @@
 
 #app {
   max-width: auto;
-  /* margin: 0 auto; */
-  /* padding: 1rem; */
   font-weight: normal;
 }
 
 a,
 .green {
   text-decoration: none;
-  color: hsla(160, 100%, 37%, 1);
-  transition: 0.4s;
-  padding: 3px;
+  color: var(--ys-brand);
+  transition: color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 @media (hover: hover) {
   a:hover {
-    background-color: hsla(160, 100%, 37%, 0.2);
+    color: var(--ys-brand-dark);
   }
 }
-/* 
-@media (min-width: 1024px) {
-  body {
-    display: flex;
-    place-items: center;
-  }
 
-  #app {
+button,
+a,
+.el-button,
+.el-input__wrapper,
+.el-dialog,
+.el-avatar {
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    color 0.18s ease,
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
 
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 3px var(--ys-focus-ring);
+}
+
+.el-button:hover,
+button:not(:disabled):hover {
+  transform: translateY(-1px);
+}
+
+.el-button:active,
+button:not(:disabled):active {
+  transform: translateY(0);
+}
+
+.el-dialog {
+  overflow: hidden;
+  box-shadow: 0 26px 70px rgba(15, 23, 42, 0.22) !important;
+  animation: ys-pop 0.24s ease both;
+}
+
+.el-message,
+.el-message-box {
+  border-radius: 8px !important;
+  box-shadow: 0 20px 54px rgba(15, 23, 42, 0.18) !important;
+}
+
+::selection {
+  color: #083344;
+  background: #a5f3fc;
+}
+
+@keyframes ys-pop {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
   }
-} */
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+}

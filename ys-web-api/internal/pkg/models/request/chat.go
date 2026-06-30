@@ -39,6 +39,19 @@ type SendChatMessageRequest struct {
 	Attachments            []ChatAttachmentInput `json:"attachments"`
 }
 
+type CreatePollRequest struct {
+	Question           string   `json:"question" binding:"required"`
+	Options            []string `json:"options" binding:"required"`
+	AllowCustomOptions bool     `json:"allowCustomOptions"`
+	AllowMultiple      bool     `json:"allowMultiple"`
+	ShowVoters         bool     `json:"showVoters"`
+}
+
+type VotePollRequest struct {
+	OptionIDs    []uint64 `json:"optionIds"`
+	CustomOption string   `json:"customOption"`
+}
+
 type ChatAttachmentInput struct {
 	FileName     string `json:"fileName"`
 	FileURL      string `json:"fileUrl"`

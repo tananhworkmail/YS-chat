@@ -40,6 +40,15 @@ func (h *ChatController) SearchUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"users": users})
 }
 
+func (h *ChatController) Search(c *gin.Context) {
+	results, err := services.ChatServiceInstance.Search(currentUserid(c), c.Query("keyword"), c.Query("scope"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"results": results})
+}
+
 func (h *ChatController) ListContacts(c *gin.Context) {
 	contacts, err := services.ChatServiceInstance.ListContacts(currentUserid(c))
 	if err != nil {
@@ -217,12 +226,17 @@ func (h *ChatController) ListMessages(c *gin.Context) {
 		return
 	}
 
-	messages, err := services.ChatServiceInstance.ListMessages(currentUserid(c), conversationID)
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	beforeID, _ := strconv.ParseUint(c.DefaultQuery("beforeId", "0"), 10, 64)
+	messages, hasMore, err := services.ChatServiceInstance.ListMessages(currentUserid(c), conversationID, limit, beforeID)
 	if err != nil {
 		writeChatError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"messages": messages})
+	c.JSON(http.StatusOK, gin.H{
+		"messages": messages,
+		"hasMore":  hasMore,
+	})
 }
 
 func (h *ChatController) SendMessage(c *gin.Context) {
@@ -238,6 +252,60 @@ func (h *ChatController) SendMessage(c *gin.Context) {
 	}
 
 	message, err := services.ChatServiceInstance.SendMessage(currentUserid(c), conversationID, req)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": message})
+}
+
+func (h *ChatController) CreatePoll(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+
+	var req request.CreatePollRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+
+	message, err := services.ChatServiceInstance.CreatePoll(currentUserid(c), conversationID, req)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": message})
+}
+
+func (h *ChatController) VotePoll(c *gin.Context) {
+	messageID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+
+	var req request.VotePollRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+
+	message, err := services.ChatServiceInstance.VotePoll(currentUserid(c), messageID, req)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": message})
+}
+
+func (h *ChatController) ClosePoll(c *gin.Context) {
+	messageID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+
+	message, err := services.ChatServiceInstance.ClosePoll(currentUserid(c), messageID)
 	if err != nil {
 		writeChatError(c, err)
 		return
@@ -317,7 +385,7 @@ func writeChatError(c *gin.Context, err error) {
 	switch err.Error() {
 	case services.ErrChatNoPermission, services.ErrChatOnlyOwnerCanManageMembers:
 		status = http.StatusForbidden
-	case services.ErrChatConversationNotFound, services.ErrChatUserNotFound, services.ErrChatMemberNotFound:
+	case services.ErrChatConversationNotFound, services.ErrChatUserNotFound, services.ErrChatMemberNotFound, services.ErrChatPollNotFound:
 		status = http.StatusNotFound
 	case services.ErrSystem:
 		status = http.StatusInternalServerError

@@ -1,7 +1,12 @@
 <template>
   <div
     class="chat-shell"
-    :class="{ 'has-active': activeConversationId, 'is-dragging': isDragging }"
+    :class="{
+      'has-active': activeConversationId && panelMode !== 'contacts',
+      'show-directory': panelMode === 'contacts',
+      'show-info': infoPanelOpen,
+      'is-dragging': isDragging,
+    }"
     @dragenter.prevent="onDragEnter"
     @dragover.prevent="onDragOver"
     @dragleave.prevent="onDragLeave"
@@ -9,8 +14,8 @@
   >
     <div v-if="isDragging" class="drop-overlay">
       <UploadCloud :size="42" />
-      <strong>Thả tệp hoặc thư mục vào đây</strong>
-      <span>Hệ thống sẽ giữ nguyên cấu trúc thư mục khi trình duyệt cho phép.</span>
+      <strong>{{ homeT("drag.title") }}</strong>
+      <span>{{ homeT("drag.description") }}</span>
     </div>
 
     <div class="notification-stack">
@@ -34,16 +39,16 @@
 
     <nav class="app-rail">
       <div class="rail-logo">
-        <img src="@/assets/Logo.png" alt="YS" />
+        <BrandLogo size="sm" />
       </div>
 
       <div class="rail-actions">
-        <el-tooltip content="Tin nhắn" placement="right">
+        <el-tooltip :content="homeT('rail.chats')" placement="right">
           <button class="rail-button" :class="{ active: panelMode === 'chats' }" type="button" @click="setPanelMode('chats')">
             <MessageCircle :size="22" />
           </button>
         </el-tooltip>
-        <el-tooltip content="Danh bạ" placement="right">
+        <el-tooltip :content="homeT('rail.contacts')" placement="right">
           <button class="rail-button" :class="{ active: panelMode === 'contacts' }" type="button" @click="setPanelMode('contacts')">
             <Users :size="22" />
           </button>
@@ -51,14 +56,37 @@
       </div>
 
       <div class="rail-bottom">
-        <el-tooltip content="Cài đặt hồ sơ" placement="right">
+        <el-dropdown class="rail-dropdown" trigger="click" placement="right-start" @command="changeLocale">
+          <button
+            class="rail-button language-rail-button"
+            type="button"
+            :aria-label="homeT('language.tooltip')"
+            :title="homeT('language.tooltip')"
+          >
+            <Languages :size="21" />
+            <span>{{ currentLangCode }}</span>
+          </button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item
+                v-for="language in languageOptions"
+                :key="language.value"
+                :command="language.value"
+                :disabled="locale === language.value"
+              >
+                {{ language.label }}
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-tooltip :content="homeT('rail.profile')" placement="right">
           <button class="rail-button profile-rail-button" type="button" @click="openProfileDialog">
             <el-avatar :size="30" :src="currentUser.avatar || undefined">
               {{ initials(currentUser.fullname || currentUser.userid) }}
             </el-avatar>
           </button>
         </el-tooltip>
-        <el-tooltip content="Đăng xuất" placement="right">
+        <el-tooltip :content="homeT('rail.logout')" placement="right">
           <button class="rail-button" type="button" @click="handleLogout">
             <LogOut :size="22" />
           </button>
@@ -73,12 +101,12 @@
           <h1>{{ panelTitle }}</h1>
         </div>
         <div class="panel-actions">
-          <el-tooltip content="Thêm liên hệ" placement="bottom">
+          <el-tooltip :content="homeT('actions.addContact')" placement="bottom">
             <button class="icon-button" type="button" @click="openContactDialog">
               <UserPlus :size="20" />
             </button>
           </el-tooltip>
-          <el-tooltip content="Tạo nhóm" placement="bottom">
+          <el-tooltip :content="homeT('actions.createGroup')" placement="bottom">
             <button class="icon-button primary" type="button" @click="openGroupDialog">
               <Users :size="20" />
             </button>
@@ -88,14 +116,37 @@
 
       <div class="search-box">
         <Search :size="18" />
-        <input v-model="searchKeyword" type="search" placeholder="Tìm theo tên hoặc số thẻ" />
+        <input
+          v-if="panelMode === 'contacts'"
+          v-model="contactSearchKeyword"
+          type="search"
+          :placeholder="homeT('search.placeholder')"
+        />
+        <input v-else v-model="searchKeyword" type="search" :placeholder="homeT('search.chatPlaceholder')" />
+        <button v-if="hasPanelSearchText" class="search-clear-button" type="button" :title="homeT('search.clear')" @click="clearPanelSearch">
+          <X :size="15" />
+        </button>
       </div>
 
-      <div v-if="hasSearchKeyword" class="search-results">
-        <section v-if="filteredConversations.length" class="result-section">
-          <div class="result-title">Hội thoại</div>
+      <nav v-if="panelMode !== 'contacts' && hasSearchKeyword" class="search-scope-tabs" :aria-label="homeT('search.scopeLabel')">
+        <button
+          v-for="option in searchScopeOptions"
+          :key="option.value"
+          type="button"
+          :class="{ active: searchScope === option.value }"
+          @click="searchScope = option.value"
+        >
+          {{ homeT(option.labelKey) }}
+        </button>
+      </nav>
+
+      <div v-if="panelMode !== 'contacts' && hasSearchKeyword" class="search-results">
+        <div v-if="searchingChat" class="list-state compact">{{ homeT("search.searching") }}</div>
+
+        <section v-if="shouldShowSearchSection('contacts') && visibleFilteredConversations.length" class="result-section">
+          <div class="result-title">{{ homeT("search.conversations") }}</div>
           <button
-            v-for="conversation in filteredConversations"
+            v-for="conversation in visibleFilteredConversations"
             :key="conversation.id"
             class="conversation-item"
             :class="{
@@ -105,13 +156,21 @@
             type="button"
             @click="selectConversation(conversation)"
           >
-            <div v-if="conversation.type === 'group' && !conversation.avatar" class="conversation-avatar group">
-              <Users :size="22" />
-              <span>{{ conversation.memberCount }}</span>
+            <div class="avatar-presence-wrap">
+              <div v-if="conversation.type === 'group' && !conversation.avatar" class="conversation-avatar group">
+                <Users :size="22" />
+                <span>{{ conversation.memberCount }}</span>
+              </div>
+              <el-avatar v-else class="conversation-avatar" :size="44" :src="conversation.avatar || undefined">
+                {{ initials(conversation.name) }}
+              </el-avatar>
+              <span
+                v-if="conversationPresenceUser(conversation)"
+                class="presence-dot"
+                :class="{ online: isUserOnline(conversationPresenceUser(conversation)) }"
+                :title="presenceLabel(conversationPresenceUser(conversation))"
+              ></span>
             </div>
-            <el-avatar v-else class="conversation-avatar" :size="44" :src="conversation.avatar || undefined">
-              {{ initials(conversation.name) }}
-            </el-avatar>
             <div class="conversation-main">
               <div class="conversation-top">
                 <span class="conversation-name">{{ conversation.name }}</span>
@@ -125,78 +184,142 @@
               <p>{{ lastMessagePreview(conversation) }}</p>
             </div>
           </button>
+          <button
+            v-if="isAllSearchScope && filteredConversations.length > searchPreviewLimit"
+            class="view-all-search"
+            type="button"
+            @click="searchScope = 'contacts'"
+          >
+            {{ homeT("search.viewAll") }}
+          </button>
         </section>
 
-        <section class="result-section">
-          <div class="result-title">Người dùng</div>
-          <div v-if="searchingUsers" class="list-state compact">Đang tìm...</div>
-          <template v-else-if="searchedUsers.length">
-            <div v-for="user in searchedUsers" :key="user.userid" class="user-result">
-              <el-avatar :size="40" :src="user.avatar || undefined">
-                {{ initials(user.fullname || user.userid) }}
+        <section v-if="shouldShowSearchSection('contacts') && visibleChatSearchContacts.length" class="result-section">
+          <div class="result-title">{{ homeT("search.contacts") }}</div>
+          <div v-for="contact in visibleChatSearchContacts" :key="contact.userid" class="user-result">
+            <div class="avatar-presence-wrap">
+              <el-avatar :size="40" :src="contact.avatar || undefined">
+                {{ initials(displayName(contact)) }}
               </el-avatar>
-              <div class="user-result-main">
-                <strong>{{ user.fullname || user.userid }}</strong>
-                <span>{{ user.userid }}</span>
-              </div>
-              <button
-                v-if="user.isContact"
-                class="result-action ghost"
-                type="button"
-                @click="startDirectChat(user.userid)"
-              >
-                Nhắn tin
-              </button>
-              <button
-                v-else
-                class="result-action"
-                type="button"
-                @click="addContactFromUser(user)"
-              >
-                Thêm
-              </button>
+              <span
+                v-if="shouldShowPresence(contact)"
+                class="presence-dot"
+                :class="{ online: isUserOnline(contact) }"
+                :title="presenceLabel(contact)"
+              ></span>
             </div>
-          </template>
+            <div class="user-result-main">
+              <strong>{{ displayName(contact) }}</strong>
+              <span>{{ contact.userid }}</span>
+            </div>
+            <button class="result-action ghost" type="button" @click="startDirectChat(contact.userid)">
+              {{ homeT("actions.message") }}
+            </button>
+          </div>
+          <button
+            v-if="isAllSearchScope && chatSearchContacts.length > searchPreviewLimit"
+            class="view-all-search"
+            type="button"
+            @click="searchScope = 'contacts'"
+          >
+            {{ homeT("search.viewAll") }}
+          </button>
         </section>
 
-        <div v-if="!searchingUsers && !filteredConversations.length && !searchedUsers.length" class="empty-list">
+        <section v-if="shouldShowSearchSection('messages') && visibleChatSearchMessages.length" class="result-section">
+          <div class="result-title">{{ homeT("search.messages") }}</div>
+          <button
+            v-for="message in visibleChatSearchMessages"
+            :key="`message-${message.id}`"
+            class="search-hit"
+            type="button"
+            @click="openSearchMessage(message)"
+          >
+            <div class="search-hit-icon">
+              <MessageCircle :size="18" />
+            </div>
+            <div class="search-hit-main">
+              <strong>{{ conversationNameById(message.conversationId) }}</strong>
+              <span>{{ message.senderName }} · {{ formatTime(message.createdAt) }}</span>
+              <p>{{ messageSearchPreview(message) }}</p>
+            </div>
+          </button>
+          <button
+            v-if="isAllSearchScope && chatSearchMessages.length > searchPreviewLimit"
+            class="view-all-search"
+            type="button"
+            @click="searchScope = 'messages'"
+          >
+            {{ homeT("search.viewAll") }}
+          </button>
+        </section>
+
+        <section v-if="shouldShowSearchSection('files') && visibleChatSearchFiles.length" class="result-section">
+          <div class="result-title">{{ homeT("search.files") }}</div>
+          <button
+            v-for="result in visibleChatSearchFiles"
+            :key="`file-${result.message.id}-${result.attachment.id || result.attachment.fileUrl}`"
+            class="search-hit"
+            type="button"
+            @click="openSearchMessage(result.message)"
+          >
+            <div class="search-hit-icon" :class="fileKind(result.attachment, result.message.type)">
+              <component :is="fileIcon(result.attachment, result.message.type)" :size="18" />
+            </div>
+            <div class="search-hit-main">
+              <strong>{{ result.attachment.relativePath || result.attachment.fileName }}</strong>
+              <span>
+                {{ conversationNameById(result.message.conversationId) }} ·
+                {{ fileKindLabel(result.attachment, result.message.type) }} ·
+                {{ formatBytes(result.attachment.fileSize) }}
+              </span>
+              <p>{{ result.message.senderName }} · {{ formatTime(result.message.createdAt) }}</p>
+            </div>
+          </button>
+          <button
+            v-if="isAllSearchScope && chatSearchFiles.length > searchPreviewLimit"
+            class="view-all-search"
+            type="button"
+            @click="searchScope = 'files'"
+          >
+            {{ homeT("search.viewAll") }}
+          </button>
+        </section>
+
+        <div v-if="!searchingChat && !hasVisibleSearchResults" class="empty-list">
           <Search :size="28" />
-          <span>Không tìm thấy kết quả</span>
+          <span>{{ homeT("search.noResults") }}</span>
         </div>
       </div>
 
       <template v-else-if="panelMode === 'contacts'">
-        <div v-if="loadingContacts" class="list-state">Đang tải danh bạ...</div>
-        <div v-else-if="contacts.length === 0" class="empty-list">
-          <Users :size="28" />
-          <span>Danh bạ chưa có liên hệ</span>
-        </div>
-        <div v-else class="conversation-list contact-list">
+        <nav class="contact-menu" :aria-label="homeT('rail.contacts')">
           <button
-            v-for="contact in contacts"
-            :key="contact.userid"
-            class="conversation-item contact-item"
+            class="contact-menu-item"
+            :class="{ active: contactSection === 'friends' }"
             type="button"
-            @click="startDirectChat(contact.userid)"
+            @click="contactSection = 'friends'"
           >
-            <el-avatar class="conversation-avatar" :size="44" :src="contact.avatar || undefined">
-              {{ initials(contact.fullname || contact.userid) }}
-            </el-avatar>
-            <div class="conversation-main">
-              <div class="conversation-top">
-                <span class="conversation-name">{{ contact.fullname || contact.userid }}</span>
-              </div>
-              <p>{{ contact.userid }}</p>
-            </div>
+            <UserRound :size="19" />
+            <span>{{ homeT("contacts.friendsList") }}</span>
           </button>
-        </div>
+          <button
+            class="contact-menu-item"
+            :class="{ active: contactSection === 'groups' }"
+            type="button"
+            @click="contactSection = 'groups'"
+          >
+            <Users :size="19" />
+            <span>{{ homeT("contacts.groupsList") }}</span>
+          </button>
+        </nav>
       </template>
 
       <template v-else>
-        <div v-if="loadingConversations" class="list-state">Đang tải...</div>
+        <div v-if="loadingConversations" class="list-state">{{ homeT("chat.loadingConversations") }}</div>
         <div v-else-if="filteredConversations.length === 0" class="empty-list">
           <MessageCircle :size="28" />
-          <span>Chưa có hội thoại</span>
+          <span>{{ homeT("chat.noConversations") }}</span>
         </div>
 
         <div v-else class="conversation-list">
@@ -211,13 +334,21 @@
             type="button"
             @click="selectConversation(conversation)"
           >
-            <div v-if="conversation.type === 'group' && !conversation.avatar" class="conversation-avatar group">
-              <Users :size="22" />
-              <span>{{ conversation.memberCount }}</span>
+            <div class="avatar-presence-wrap">
+              <div v-if="conversation.type === 'group' && !conversation.avatar" class="conversation-avatar group">
+                <Users :size="22" />
+                <span>{{ conversation.memberCount }}</span>
+              </div>
+              <el-avatar v-else class="conversation-avatar" :size="44" :src="conversation.avatar || undefined">
+                {{ initials(conversation.name) }}
+              </el-avatar>
+              <span
+                v-if="conversationPresenceUser(conversation)"
+                class="presence-dot"
+                :class="{ online: isUserOnline(conversationPresenceUser(conversation)) }"
+                :title="presenceLabel(conversationPresenceUser(conversation))"
+              ></span>
             </div>
-            <el-avatar v-else class="conversation-avatar" :size="44" :src="conversation.avatar || undefined">
-              {{ initials(conversation.name) }}
-            </el-avatar>
             <div class="conversation-main">
               <div class="conversation-top">
                 <span class="conversation-name">{{ conversation.name }}</span>
@@ -236,59 +367,252 @@
     </aside>
 
     <main class="chat-pane">
-      <template v-if="activeConversation">
+      <template v-if="panelMode === 'contacts'">
+        <section class="directory-pane">
+          <header class="directory-header">
+            <div class="directory-title">
+              <UserRound v-if="contactSection === 'friends'" :size="22" />
+              <Users v-else :size="22" />
+              <h2>{{ contactDirectoryTitle }}</h2>
+            </div>
+          </header>
+
+          <div class="directory-content">
+            <div class="directory-section-title">{{ contactDirectoryCountLabel }}</div>
+
+            <div class="directory-tabs">
+              <button
+                :class="{ active: contactSection === 'friends' }"
+                type="button"
+                @click="contactSection = 'friends'"
+              >
+                {{ homeT("contacts.friends") }}
+              </button>
+              <button
+                :class="{ active: contactSection === 'groups' }"
+                type="button"
+                @click="contactSection = 'groups'"
+              >
+                {{ homeT("contacts.groups") }}
+              </button>
+            </div>
+
+            <div class="directory-search">
+              <Search :size="18" />
+              <input
+                v-model="contactSearchKeyword"
+                type="search"
+                :placeholder="contactSection === 'friends' ? homeT('contacts.findFriend') : homeT('contacts.findGroup')"
+              />
+            </div>
+
+            <template v-if="contactSection === 'friends'">
+              <div v-if="loadingContacts" class="list-state">{{ homeT("contacts.loadingFriends") }}</div>
+              <div v-else-if="!groupedDirectoryContacts.length" class="empty-list">
+                <Users :size="28" />
+                <span>{{ homeT("contacts.emptyFriends") }}</span>
+              </div>
+              <div v-else class="directory-list">
+                <section
+                  v-for="group in groupedDirectoryContacts"
+                  :key="group.letter"
+                  class="directory-letter-group"
+                >
+                  <h3>{{ group.letter }}</h3>
+                  <button
+                    v-for="contact in group.items"
+                    :key="contact.userid"
+                    class="directory-item"
+                    type="button"
+                    @click="startDirectChat(contact.userid)"
+                  >
+                    <div class="avatar-presence-wrap">
+                      <el-avatar :size="42" :src="contact.avatar || undefined">
+                        {{ initials(displayName(contact)) }}
+                      </el-avatar>
+                      <span
+                        v-if="shouldShowPresence(contact)"
+                        class="presence-dot"
+                        :class="{ online: isUserOnline(contact) }"
+                        :title="presenceLabel(contact)"
+                      ></span>
+                    </div>
+                    <span>
+                      <strong>{{ displayName(contact) }}</strong>
+                      <small>{{ contact.userid }}</small>
+                    </span>
+                  </button>
+                </section>
+              </div>
+            </template>
+
+            <template v-else>
+              <div v-if="loadingConversations" class="list-state">{{ homeT("contacts.loadingGroups") }}</div>
+              <div v-else-if="!filteredDirectoryGroups.length" class="empty-list">
+                <Users :size="28" />
+                <span>{{ homeT("contacts.emptyGroups") }}</span>
+              </div>
+              <div v-else class="directory-list">
+                <button
+                  v-for="group in filteredDirectoryGroups"
+                  :key="group.id"
+                  class="directory-item"
+                  type="button"
+                  @click="openGroupFromDirectory(group)"
+                >
+                  <div v-if="!group.avatar" class="directory-group-avatar">
+                    <Users :size="21" />
+                    <em>{{ group.memberCount }}</em>
+                  </div>
+                  <el-avatar v-else :size="42" :src="group.avatar">
+                    {{ initials(group.name) }}
+                  </el-avatar>
+                  <span>
+                    <strong>{{ group.name }}</strong>
+                    <small>{{ group.memberCount }} {{ homeT("chat.members") }}</small>
+                  </span>
+                </button>
+              </div>
+            </template>
+          </div>
+        </section>
+      </template>
+
+      <template v-else-if="activeConversation">
         <header class="chat-header">
           <button class="mobile-back" type="button" @click="activeConversationId = null">
             <ChevronLeft :size="22" />
           </button>
-          <el-avatar :size="44" :src="activeConversation.avatar || undefined">
-            {{ initials(activeConversation.name) }}
-          </el-avatar>
+          <div class="avatar-presence-wrap">
+            <el-avatar :size="44" :src="activeConversation.avatar || undefined">
+              {{ initials(activeConversation.name) }}
+            </el-avatar>
+            <span
+              v-if="conversationPresenceUser(activeConversation)"
+              class="presence-dot"
+              :class="{ online: isUserOnline(conversationPresenceUser(activeConversation)) }"
+              :title="presenceLabel(conversationPresenceUser(activeConversation))"
+            ></span>
+          </div>
           <div class="chat-title">
             <h2>{{ activeConversation.name }}</h2>
-            <span>{{ activeConversation.memberCount }} thành viên</span>
+            <span>{{ activeConversation.memberCount }} {{ homeT("chat.members") }}</span>
           </div>
-          <div v-if="activeConversation.type === 'group'" class="chat-actions">
-            <el-tooltip content="Thêm thành viên" placement="bottom">
+          <div class="conversation-search">
+            <Search :size="16" />
+            <input
+              v-model="conversationSearchKeyword"
+              type="search"
+              :placeholder="homeT('chat.searchPlaceholder')"
+            />
+            <span v-if="conversationSearchKeyword.trim()" class="conversation-search-count">
+              {{ conversationSearchPositionLabel }}
+            </span>
+            <button
+              v-if="conversationSearchKeyword.trim()"
+              type="button"
+              :disabled="!conversationSearchMatches.length"
+              :title="homeT('chat.previousSearchResult')"
+              @click="goToConversationSearchResult(-1)"
+            >
+              <ChevronUp :size="15" />
+            </button>
+            <button
+              v-if="conversationSearchKeyword.trim()"
+              type="button"
+              :disabled="!conversationSearchMatches.length"
+              :title="homeT('chat.nextSearchResult')"
+              @click="goToConversationSearchResult(1)"
+            >
+              <ChevronDown :size="15" />
+            </button>
+            <button
+              v-if="conversationSearchKeyword.trim()"
+              type="button"
+              :title="homeT('search.clear')"
+              @click="clearConversationSearch"
+            >
+              <X :size="15" />
+            </button>
+          </div>
+          <div class="chat-actions">
+            <el-tooltip v-if="activeConversation.type === 'group'" :content="homeT('chat.addMember')" placement="bottom">
               <button class="icon-button" type="button" @click="openAddMemberDialog">
                 <UserPlus :size="20" />
+              </button>
+            </el-tooltip>
+            <el-tooltip :content="homeT('chat.info')" placement="bottom">
+              <button class="icon-button" type="button" @click="infoPanelOpen = true">
+                <Info :size="20" />
               </button>
             </el-tooltip>
           </div>
         </header>
 
-        <section ref="messageListRef" class="message-list" :style="messageListStyle">
-          <div v-if="loadingMessages" class="message-state">Đang tải tin nhắn...</div>
+        <div v-if="activePinnedMessage" class="pinned-message-bar">
+          <button class="pinned-message-main" type="button" @click="scrollToMessage(activePinnedMessage.id)">
+            <Pin :size="15" />
+            <span>
+              <strong>{{ homeT("chat.pinnedMessage") }}</strong>
+              <em>{{ messageReferencePreview(activePinnedMessage) }}</em>
+            </span>
+          </button>
+          <button
+            class="pinned-message-remove"
+            type="button"
+            :title="homeT('chat.unpinMessage')"
+            @click="unpinActiveMessage"
+          >
+            <X :size="15" />
+          </button>
+        </div>
+
+        <section ref="messageListRef" class="message-list" :style="messageListStyle" @scroll="handleMessageListScroll">
+          <div v-if="loadingMessages" class="message-state">{{ homeT("chat.loadingMessages") }}</div>
           <div v-else-if="messages.length === 0" class="message-state">
             <MessageCircle :size="34" />
-            <span>Bắt đầu cuộc trò chuyện</span>
+            <span>{{ homeT("chat.startConversation") }}</span>
           </div>
 
+          <template v-else>
+          <div v-if="loadingOlderMessages" class="message-history-loader">
+            {{ homeT("chat.loadingOlderMessages") }}
+          </div>
           <div
             v-for="message in messages"
-            v-else
             :id="`message-${message.id}`"
             :key="message.id"
             class="message-row"
-            :class="{ own: isOwnMessage(message) }"
+            :class="{
+              own: isOwnMessage(message),
+              'system-message': message.type === 'system',
+              'poll-message': message.type === 'poll',
+              'search-match': isConversationSearchMatch(message.id),
+              'current-search-match': message.id === currentConversationSearchMessageId,
+              'pinned-message': isPinnedMessage(message),
+            }"
           >
-            <el-avatar
-              v-if="!isOwnMessage(message)"
-              :size="32"
-              :src="message.senderAvatar || undefined"
-            >
-              {{ initials(message.senderName) }}
-            </el-avatar>
+            <div v-if="!isOwnMessage(message) && !isCenteredMessage(message)" class="avatar-presence-wrap message-avatar-wrap">
+              <el-avatar :size="32" :src="message.senderAvatar || undefined">
+                {{ initials(message.senderName) }}
+              </el-avatar>
+              <span
+                class="presence-dot small"
+                :class="{ online: isUserOnline(presenceUserByUserid(message.senderUserid)) }"
+                :title="presenceLabel(presenceUserByUserid(message.senderUserid))"
+              ></span>
+            </div>
 
             <div class="message-stack">
               <span
-                v-if="activeConversation.type === 'group' && !isOwnMessage(message)"
+                v-if="activeConversation.type === 'group' && !isOwnMessage(message) && !isCenteredMessage(message)"
                 class="sender-name"
               >
                 {{ message.senderName }}
               </span>
 
-              <div class="message-bubble" :class="message.type">
+              <div class="message-content-row">
+                <div class="message-bubble" :class="message.type">
                 <button
                   v-if="message.replyTo"
                   class="reply-reference"
@@ -301,11 +625,15 @@
 
                 <div v-if="message.forwardedFrom" class="forwarded-label">
                   <Forward :size="13" />
-                  <span>Chuyển tiếp từ {{ message.forwardedFrom.senderName }}</span>
+                  <span>{{ homeT("chat.forwardedFrom", { name: message.forwardedFrom.senderName }) }}</span>
+                </div>
+
+                <div v-if="message.type === 'system'" class="system-notice">
+                  {{ message.content }}
                 </div>
 
                 <a
-                  v-if="message.type === 'link'"
+                  v-else-if="message.type === 'link'"
                   class="message-link"
                   :href="safeLink(message.content)"
                   target="_blank"
@@ -314,6 +642,82 @@
                   <Link2 :size="16" />
                   <span>{{ message.content }}</span>
                 </a>
+
+                <div v-else-if="message.type === 'poll' && message.poll" class="poll-card">
+                  <div class="poll-card-header">
+                    <ListChecks :size="17" />
+                    <span>
+                      <strong>{{ message.poll.question || message.content }}</strong>
+                      <em v-if="message.poll.isClosed">{{ homeT("poll.closed") }}</em>
+                    </span>
+                  </div>
+
+                  <div class="poll-options">
+                    <label
+                      v-for="option in message.poll.options || []"
+                      :key="option.id"
+                      class="poll-option"
+                      :class="{ selected: isPollOptionSelected(message, option), disabled: pollInteractionDisabled(message) }"
+                    >
+                      <input
+                        :type="message.poll.allowMultiple ? 'checkbox' : 'radio'"
+                        :name="`poll-${message.id}`"
+                        :checked="isPollOptionSelected(message, option)"
+                        :disabled="pollInteractionDisabled(message)"
+                        @change="votePollOption(message, option, $event)"
+                      />
+                      <span class="poll-option-main">
+                        <span class="poll-option-text">{{ option.text }}</span>
+                        <span v-if="message.poll.showVoters && option.voters?.length" class="poll-voters">
+                          {{ pollVoterNames(option) }}
+                        </span>
+                      </span>
+                      <span class="poll-option-count">{{ option.voteCount || 0 }}</span>
+                      <span class="poll-option-bar" :style="{ width: `${pollOptionPercent(message.poll, option)}%` }"></span>
+                    </label>
+                  </div>
+
+                  <form
+                    v-if="message.poll.allowCustomOptions"
+                    class="poll-custom-form"
+                    @submit.prevent="submitCustomPollOption(message)"
+                  >
+                    <input
+                      v-model.trim="pollCustomInputs[message.id]"
+                      type="text"
+                      maxlength="160"
+                      :placeholder="homeT('poll.customPlaceholder')"
+                      :disabled="pollInteractionDisabled(message)"
+                    />
+                    <button type="submit" :disabled="pollInteractionDisabled(message)">
+                      <Plus :size="16" />
+                    </button>
+                  </form>
+
+                  <div class="poll-footer">
+                    <small class="poll-meta">{{ pollMetaLabel(message.poll) }}</small>
+                    <span class="poll-footer-actions">
+                      <button
+                        class="poll-pin-button"
+                        type="button"
+                        @click="isPinnedMessage(message) ? unpinActiveMessage() : pinMessage(message)"
+                      >
+                        <Pin :size="14" />
+                        <span>{{ isPinnedMessage(message) ? homeT("chat.unpinMessage") : homeT("chat.pinMessage") }}</span>
+                      </button>
+                      <button
+                        v-if="canClosePoll(message)"
+                        class="poll-close-button"
+                        type="button"
+                        :disabled="Boolean(pollVotingMessageIds[message.id])"
+                        @click="closePoll(message)"
+                      >
+                        <X :size="14" />
+                        <span>{{ homeT("poll.close") }}</span>
+                      </button>
+                    </span>
+                  </div>
+                </div>
 
                 <p v-else-if="message.content" class="message-text">
                   <span
@@ -326,15 +730,32 @@
                 </p>
 
                 <div v-if="imageAttachments(message).length" class="image-grid">
-                  <a
+                  <div
                     v-for="attachment in imageAttachments(message)"
                     :key="attachment.id || attachment.fileUrl"
-                    :href="attachment.fileUrl"
-                    target="_blank"
-                    rel="noopener noreferrer"
+                    class="image-card"
                   >
-                    <img :src="attachment.fileUrl" :alt="attachment.fileName" loading="lazy" />
-                  </a>
+                    <a
+                      class="image-preview"
+                      :href="attachment.fileUrl"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                        <img :src="attachment.fileUrl" :alt="attachment.fileName" loading="lazy" decoding="async" />
+                    </a>
+                    <a
+                      class="image-download-button"
+                      :href="attachment.fileUrl"
+                      :download="downloadFileName(attachment)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      :title="homeT('chat.download')"
+                      :aria-label="homeT('chat.download')"
+                      @click.stop
+                    >
+                      <Download :size="16" />
+                    </a>
+                  </div>
                 </div>
 
                 <div v-if="voiceAttachments(message).length" class="voice-list">
@@ -353,7 +774,7 @@
                       :download="downloadFileName(attachment)"
                       target="_blank"
                       rel="noopener noreferrer"
-                      title="Tải về"
+                      :title="homeT('chat.download')"
                     >
                       <Download :size="16" />
                     </a>
@@ -387,7 +808,7 @@
                       :download="downloadFileName(attachment)"
                       target="_blank"
                       rel="noopener noreferrer"
-                      title="Tải về"
+                      :title="homeT('chat.download')"
                     >
                       <Download :size="16" />
                     </a>
@@ -396,27 +817,50 @@
 
                 <time>{{ formatTime(message.createdAt) }}</time>
               </div>
-              <div class="message-actions">
-                <el-tooltip content="Trả lời" placement="top">
-                  <button type="button" @click="startReply(message)">
+              <div v-if="!isCenteredMessage(message)" class="message-actions">
+                <el-tooltip :content="homeT('chat.reply')" placement="top">
+                  <button class="message-action-button" type="button" @click="startReply(message)">
                     <Reply :size="15" />
                   </button>
                 </el-tooltip>
-                <el-tooltip content="Chuyển tiếp" placement="top">
-                  <button type="button" @click="openForwardDialog(message)">
+                <el-tooltip :content="homeT('chat.forward')" placement="top">
+                  <button class="message-action-button" type="button" @click="openForwardDialog(message)">
                     <Forward :size="15" />
                   </button>
                 </el-tooltip>
+                <el-dropdown
+                  trigger="click"
+                  placement="top"
+                  @command="(command) => handleMessageOption(command, message)"
+                >
+                  <button class="message-action-button" type="button" :title="homeT('chat.moreActions')">
+                    <MoreHorizontal :size="16" />
+                  </button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item :command="isPinnedMessage(message) ? 'unpin' : 'pin'">
+                        <Pin :size="14" />
+                        <span>{{ isPinnedMessage(message) ? homeT("chat.unpinMessage") : homeT("chat.pinMessage") }}</span>
+                      </el-dropdown-item>
+                      <el-dropdown-item command="copy">
+                        <Copy :size="14" />
+                        <span>{{ homeT("chat.copyMessage") }}</span>
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+                </div>
               </div>
             </div>
           </div>
+          </template>
         </section>
 
         <footer class="composer">
           <div v-if="replyingTo" class="reply-compose">
             <Reply :size="17" />
             <div>
-              <strong>Trả lời {{ replyingTo.senderName }}</strong>
+              <strong>{{ homeT("chat.replyTo", { name: replyingTo.senderName }) }}</strong>
               <span>{{ messageReferencePreview(replyingTo) }}</span>
             </div>
             <button type="button" @click="cancelReply">
@@ -443,25 +887,30 @@
           <div v-if="isRecording" class="voice-recording">
             <span class="record-dot"></span>
             <strong>{{ recordingDurationLabel }}</strong>
-            <span>Dang ghi am</span>
-            <button type="button" aria-label="Huy ghi am" @click="cancelVoiceRecording">
+            <span>{{ homeT("chat.recording") }}</span>
+            <button type="button" :aria-label="homeT('chat.cancelRecording')" @click="cancelVoiceRecording">
               <X :size="16" />
             </button>
           </div>
 
           <div class="composer-body">
             <div class="composer-tools">
-              <el-tooltip content="Gửi tệp" placement="top">
+              <el-tooltip :content="homeT('chat.sendFile')" placement="top">
                 <button class="tool-button" type="button" :disabled="isRecording" @click="fileInputRef?.click()">
                   <Paperclip :size="20" />
                 </button>
               </el-tooltip>
-              <el-tooltip content="Gửi thư mục" placement="top">
+              <el-tooltip :content="homeT('chat.sendFolder')" placement="top">
                 <button class="tool-button" type="button" :disabled="isRecording" @click="folderInputRef?.click()">
                   <FolderUp :size="20" />
                 </button>
               </el-tooltip>
-              <el-tooltip :content="isRecording ? 'Dung va gui voice' : 'Ghi voice'" placement="top">
+              <el-tooltip v-if="activeConversation.type === 'group'" :content="homeT('chat.createPoll')" placement="top">
+                <button class="tool-button" type="button" :disabled="isRecording || sending" @click="openPollDialog">
+                  <ListChecks :size="20" />
+                </button>
+              </el-tooltip>
+              <el-tooltip :content="isRecording ? homeT('chat.stopSendVoice') : homeT('chat.recordVoice')" placement="top">
                 <button
                   class="tool-button voice-record-button"
                   :class="{ active: isRecording, recording: isRecording }"
@@ -498,7 +947,7 @@
                 ref="composerInputRef"
                 v-model="composerText"
                 rows="1"
-                placeholder="Nhập tin nhắn, dùng @ để tag tên"
+                :placeholder="homeT('chat.composerPlaceholder')"
                 @input="updateMentionState"
                 @click="updateMentionState"
                 @keyup="updateMentionState"
@@ -541,17 +990,134 @@
 
       <section v-else class="empty-chat">
         <div class="welcome-copy">
-          <img class="welcome-logo" src="@/assets/Logo.png" alt="YS Chat" />
-          <h2>Chào mừng đến với YS Chat</h2>
-          <p>Chọn một hội thoại ở danh sách bên trái để bắt đầu nhắn tin.</p>
+          <BrandLogo size="xl" />
+          <h2>{{ homeT("chat.welcomeTitle") }}</h2>
+          <p>{{ homeT("chat.welcomeText") }}</p>
         </div>
         <MessageCircle :size="44" />
-        <h2>Chọn một hội thoại</h2>
-        <p>Nhập số thẻ để chat riêng hoặc tạo nhóm nội bộ.</p>
+        <h2>{{ homeT("chat.chooseConversationTitle") }}</h2>
+        <p>{{ homeT("chat.chooseConversationText") }}</p>
       </section>
     </main>
 
-    <aside class="info-panel" v-if="activeConversation">
+    <button
+      v-if="activeConversation && panelMode !== 'contacts'"
+      class="info-backdrop"
+      type="button"
+      :aria-label="homeT('chat.closeInfo')"
+      @click="infoPanelOpen = false"
+    ></button>
+
+    <aside class="info-panel" v-if="activeConversation && panelMode !== 'contacts'">
+      <button class="info-panel-close" type="button" :aria-label="homeT('chat.closeInfo')" @click="infoPanelOpen = false">
+        <X :size="18" />
+      </button>
+      <template v-if="infoPanelView === 'storage'">
+        <section class="storage-view">
+          <header class="storage-header">
+            <button type="button" :aria-label="homeT('actions.back')" @click="closeStorageView">
+              <ChevronLeft :size="22" />
+            </button>
+            <h3>{{ homeT("info.storage") }}</h3>
+          </header>
+
+          <nav class="storage-tabs" :aria-label="homeT('info.storage')">
+            <button
+              v-for="tab in storageTabs"
+              :key="tab.value"
+              type="button"
+              :class="{ active: storageTab === tab.value }"
+              @click="storageTab = tab.value"
+            >
+              {{ homeT(tab.labelKey) }}
+            </button>
+          </nav>
+
+          <div class="storage-content">
+            <template v-if="activeStorageGroups.length">
+              <section v-for="group in activeStorageGroups" :key="group.key" class="storage-group">
+                <h4>{{ group.label }}</h4>
+
+                <div v-if="storageTab === 'media'" class="storage-media-grid">
+                  <div
+                    v-for="file in group.items"
+                    :key="file.fileUrl"
+                    class="shared-media-item"
+                  >
+                    <a
+                      class="shared-media-preview"
+                      :href="file.fileUrl"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <img v-if="isImageAttachment(file)" :src="file.fileUrl" :alt="file.fileName" loading="lazy" decoding="async" />
+                      <span v-else>
+                        <FileVideo :size="24" />
+                      </span>
+                    </a>
+                    <a
+                      class="shared-media-download"
+                      :href="file.fileUrl"
+                      :download="downloadFileName(file)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      :title="homeT('chat.download')"
+                      :aria-label="homeT('chat.download')"
+                      @click.stop
+                    >
+                      <Download :size="14" />
+                    </a>
+                  </div>
+                </div>
+
+                <div v-else-if="storageTab === 'polls'" class="storage-list">
+                  <button
+                    v-for="item in group.items"
+                    :key="`poll-${item.id}`"
+                    class="storage-list-item poll-storage-item"
+                    type="button"
+                    @click="goToStoredMessage(item)"
+                  >
+                    <span class="shared-file-icon poll">
+                      <ListChecks :size="16" />
+                    </span>
+                    <span>
+                      <strong>{{ item.poll?.question || item.content }}</strong>
+                      <em>{{ pollMetaLabel(item.poll || {}) }}<template v-if="item.poll?.isClosed"> · {{ homeT("poll.closed") }}</template></em>
+                    </span>
+                  </button>
+                </div>
+
+                <div v-else class="storage-list">
+                  <a
+                    v-for="item in group.items"
+                    :key="storageItemKey(item)"
+                    class="storage-list-item"
+                    :href="storageTab === 'links' ? safeLink(item.content) : item.fileUrl"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <span
+                      class="shared-file-icon"
+                      :class="storageTab === 'links' ? 'link' : fileKind(item, 'file')"
+                    >
+                      <Link2 v-if="storageTab === 'links'" :size="16" />
+                      <component :is="fileIcon(item, 'file')" v-else :size="16" />
+                      <small v-if="storageTab !== 'links' && fileBadge(item, 'file')">{{ fileBadge(item, 'file') }}</small>
+                    </span>
+                    <span>
+                      <strong>{{ storageTab === 'links' ? item.content : item.relativePath || item.fileName }}</strong>
+                      <em v-if="storageTab !== 'links'">{{ fileKindLabel(item, 'file') }} · {{ formatBytes(item.fileSize) }}</em>
+                    </span>
+                  </a>
+                </div>
+              </section>
+            </template>
+            <p v-else class="muted storage-empty">{{ activeStorageEmptyText }}</p>
+          </div>
+        </section>
+      </template>
+      <template v-else>
       <div class="profile-block">
         <div
           v-if="activeConversation.type === 'group'"
@@ -572,6 +1138,12 @@
           <el-avatar :size="72" :src="activeConversation.avatar || undefined">
           {{ initials(activeConversation.name) }}
           </el-avatar>
+          <span
+            v-if="conversationPresenceUser(activeConversation)"
+            class="presence-dot large"
+            :class="{ online: isUserOnline(conversationPresenceUser(activeConversation)) }"
+            :title="presenceLabel(conversationPresenceUser(activeConversation))"
+          ></span>
           <button
             v-if="isCurrentUserGroupOwner"
             class="avatar-upload-button mini"
@@ -596,12 +1168,12 @@
           type="file"
           @change="handleGroupImageSelected($event, 'background')"
         />
-        <span>{{ activeConversation.memberCount }} thành viên</span>
+        <span>{{ activeConversation.memberCount }} {{ homeT("chat.members") }}</span>
       </div>
 
       <section class="info-section">
         <div class="section-title">
-          <h4>Thành viên nhóm</h4>
+          <h4>{{ homeT("info.groupMembers") }}</h4>
           <button v-if="activeConversation.type === 'group'" type="button" @click="openAddMemberDialog">
             <UserPlus :size="16" />
           </button>
@@ -613,22 +1185,37 @@
           @click="membersExpanded = !membersExpanded"
         >
           <Users :size="20" />
-          <strong>{{ activeConversation.memberCount }} thành viên</strong>
+          <strong>{{ activeConversation.memberCount }} {{ homeT("chat.members") }}</strong>
         </button>
         <div v-if="activeConversation.type !== 'group' || membersExpanded" class="member-list">
           <div v-for="member in activeConversation.members" :key="member.userid" class="member-item">
-            <el-avatar :size="32" :src="member.avatar || undefined">
-              {{ initials(displayName(member)) }}
-            </el-avatar>
+            <div class="avatar-presence-wrap">
+              <el-avatar :size="32" :src="member.avatar || undefined">
+                {{ initials(displayName(member)) }}
+              </el-avatar>
+              <span
+                v-if="shouldShowPresence(member)"
+                class="presence-dot small"
+                :class="{ online: isUserOnline(member) }"
+                :title="presenceLabel(member)"
+              ></span>
+            </div>
             <div class="member-meta">
               <strong>{{ displayName(member) }}</strong>
               <span>{{ member.nickname && member.fullname ? `${member.fullname} · ${member.userid}` : member.userid }}</span>
+              <small
+                v-if="shouldShowPresence(member)"
+                class="presence-text"
+                :class="{ online: isUserOnline(member) }"
+              >
+                {{ presenceLabel(member) }}
+              </small>
             </div>
-            <el-tooltip content="Đặt biệt danh" placement="left">
+            <el-tooltip :content="homeT('info.setNickname')" placement="left">
               <button
                 class="member-action-button"
                 type="button"
-                :aria-label="`Đặt biệt danh cho ${member.fullname || member.userid}`"
+                :aria-label="homeT('info.setNicknameFor', { name: member.fullname || member.userid })"
                 @click="openNicknameDialog(member)"
               >
                 <Pencil :size="15" />
@@ -636,13 +1223,13 @@
             </el-tooltip>
             <el-tooltip
               v-if="isCurrentUserGroupOwner && member.userid !== currentUserid"
-              content="Xóa thành viên"
+              :content="homeT('info.removeMember')"
               placement="left"
             >
               <button
                 class="member-action-button danger"
                 type="button"
-                :aria-label="`Xóa ${member.fullname || member.userid} khỏi nhóm`"
+                :aria-label="homeT('info.removeMemberFromGroup', { name: member.fullname || member.userid })"
                 @click="removeMemberFromGroup(member)"
               >
                 <Trash2 :size="15" />
@@ -652,30 +1239,94 @@
         </div>
       </section>
 
-      <section class="info-section">
+      <section v-if="activeConversation.type === 'group'" class="info-section">
         <div class="section-title">
-          <h4>Ảnh / Video</h4>
-        </div>
-        <div v-if="sharedMedia.length" class="shared-media-grid">
-          <a
-            v-for="file in sharedMedia"
-            :key="file.fileUrl"
-            :href="file.fileUrl"
-            target="_blank"
-            rel="noopener noreferrer"
+          <h4>{{ homeT("info.polls") }}</h4>
+          <button
+            v-if="allSharedPolls.length > sharedPreviewLimit"
+            class="section-text-button"
+            type="button"
+            @click="openStorageView('polls')"
           >
-            <img v-if="isImageAttachment(file)" :src="file.fileUrl" :alt="file.fileName" loading="lazy" />
-            <span v-else>
-              <FileVideo :size="22" />
-            </span>
-          </a>
+            {{ homeT("info.viewAll") }}
+          </button>
         </div>
-        <p v-else class="muted">Chưa có media</p>
+        <div v-if="sharedPolls.length" class="shared-files shared-polls">
+          <button
+            v-for="pollMessage in sharedPolls"
+            :key="pollMessage.id"
+            type="button"
+            @click="goToStoredMessage(pollMessage)"
+          >
+            <span class="shared-file-icon poll">
+              <ListChecks :size="16" />
+            </span>
+            <span>
+              <strong>{{ pollMessage.poll?.question || pollMessage.content }}</strong>
+              <em>{{ pollMetaLabel(pollMessage.poll || {}) }}<template v-if="pollMessage.poll?.isClosed"> · {{ homeT("poll.closed") }}</template></em>
+            </span>
+          </button>
+        </div>
+        <p v-else class="muted">{{ homeT("info.noPolls") }}</p>
       </section>
 
       <section class="info-section">
         <div class="section-title">
-          <h4>File / Folder</h4>
+          <h4>{{ homeT("info.media") }}</h4>
+          <button
+            v-if="allSharedMedia.length > sharedPreviewLimit"
+            class="section-text-button"
+            type="button"
+            @click="openStorageView('media')"
+          >
+            {{ homeT("info.viewAll") }}
+          </button>
+        </div>
+        <div v-if="sharedMedia.length" class="shared-media-grid">
+          <div
+            v-for="file in sharedMedia"
+            :key="file.fileUrl"
+            class="shared-media-item"
+          >
+            <a
+              class="shared-media-preview"
+              :href="file.fileUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <img v-if="isImageAttachment(file)" :src="file.fileUrl" :alt="file.fileName" loading="lazy" decoding="async" />
+              <span v-else>
+                <FileVideo :size="22" />
+              </span>
+            </a>
+            <a
+              class="shared-media-download"
+              :href="file.fileUrl"
+              :download="downloadFileName(file)"
+              target="_blank"
+              rel="noopener noreferrer"
+              :title="homeT('chat.download')"
+              :aria-label="homeT('chat.download')"
+              @click.stop
+            >
+              <Download :size="14" />
+            </a>
+          </div>
+        </div>
+        <p v-else class="muted">{{ homeT("info.noMedia") }}</p>
+      </section>
+
+      <section class="info-section">
+        <div class="section-title">
+          <h4>{{ homeT("info.files") }}</h4>
+          <button
+            v-if="allSharedDocuments.length > sharedPreviewLimit"
+            class="section-text-button"
+            type="button"
+            @click="openStorageView('files')"
+          >
+            {{ homeT("info.viewAll") }}
+          </button>
         </div>
         <div v-if="sharedDocuments.length" class="shared-files">
           <a
@@ -692,12 +1343,20 @@
             <span>{{ file.relativePath || file.fileName }}</span>
           </a>
         </div>
-        <p v-else class="muted">Chưa có tệp</p>
+        <p v-else class="muted">{{ homeT("info.noFiles") }}</p>
       </section>
 
       <section class="info-section">
         <div class="section-title">
-          <h4>Link</h4>
+          <h4>{{ homeT("info.links") }}</h4>
+          <button
+            v-if="allSharedLinks.length > sharedPreviewLimit"
+            class="section-text-button"
+            type="button"
+            @click="openStorageView('links')"
+          >
+            {{ homeT("info.viewAll") }}
+          </button>
         </div>
         <div v-if="sharedLinks.length" class="shared-files">
           <a
@@ -713,11 +1372,12 @@
             <span>{{ link.content }}</span>
           </a>
         </div>
-        <p v-else class="muted">Chưa có link</p>
+        <p v-else class="muted">{{ homeT("info.noLinks") }}</p>
       </section>
+      </template>
     </aside>
 
-    <el-dialog v-model="profileDialogVisible" title="Cài đặt hồ sơ" width="460px" class="chat-dialog">
+    <el-dialog v-model="profileDialogVisible" :title="homeT('profile.title')" width="460px" class="chat-dialog">
       <div class="profile-settings">
         <div class="avatar-editor">
           <el-avatar :size="84" :src="profileForm.avatar || undefined">
@@ -725,7 +1385,7 @@
           </el-avatar>
           <button class="avatar-upload-button" type="button" @click="avatarInputRef?.click()">
             <Camera :size="17" />
-            Đổi ảnh
+            {{ homeT("profile.changePhoto") }}
           </button>
           <input
             ref="avatarInputRef"
@@ -736,42 +1396,72 @@
           />
         </div>
 
+        <div class="dialog-form language-form">
+          <label>{{ homeT("language.label") }}</label>
+          <div class="language-selector">
+            <button
+              v-for="language in languageOptions"
+              :key="language.value"
+              :class="{ active: locale === language.value }"
+              type="button"
+              @click="changeLocale(language.value)"
+            >
+              <span>{{ language.short }}</span>
+              <strong>{{ language.label }}</strong>
+            </button>
+          </div>
+        </div>
+
         <div class="dialog-form">
-          <label>Số thẻ</label>
+          <label>{{ homeT("profile.userid") }}</label>
           <input v-model="profileForm.userid" disabled type="text" />
 
-          <label>Họ tên hiển thị</label>
-          <input v-model.trim="profileForm.fullname" type="text" placeholder="Nhập họ tên" />
+          <label>{{ homeT("profile.displayName") }}</label>
+          <input v-model.trim="profileForm.fullname" type="text" :placeholder="homeT('profile.displayNamePlaceholder')" />
           <button class="dialog-button primary full-width" type="button" @click="saveProfile">
-            Lưu hồ sơ
+            {{ homeT("profile.saveProfile") }}
           </button>
         </div>
 
-        <div class="dialog-form password-form">
-          <label>Mật khẩu hiện tại</label>
-          <input v-model="passwordForm.currentPassword" type="password" placeholder="Nhập mật khẩu hiện tại" />
-
-          <label>Mật khẩu mới</label>
-          <input v-model="passwordForm.newPassword" type="password" placeholder="Ít nhất 6 ký tự" />
-
-          <label>Xác nhận mật khẩu mới</label>
-          <input v-model="passwordForm.confirmPassword" type="password" placeholder="Nhập lại mật khẩu mới" />
-
-          <button class="dialog-button primary full-width" type="button" @click="savePassword">
-            Đổi mật khẩu
+        <div class="dialog-form password-action-form">
+          <button class="password-open-button" type="button" @click="openPasswordDialog">
+            <KeyRound :size="17" />
+            <span>{{ homeT("profile.changePassword") }}</span>
           </button>
         </div>
       </div>
     </el-dialog>
 
-    <el-dialog v-model="contactDialogVisible" title="Thêm liên hệ" width="460px" class="chat-dialog">
+    <el-dialog v-model="passwordDialogVisible" :title="homeT('profile.changePassword')" width="420px" class="chat-dialog">
+      <div class="dialog-form password-dialog-form">
+        <label>{{ homeT("profile.currentPassword") }}</label>
+        <input v-model="passwordForm.currentPassword" type="password" :placeholder="homeT('profile.currentPasswordPlaceholder')" />
+
+        <label>{{ homeT("profile.newPassword") }}</label>
+        <input v-model="passwordForm.newPassword" type="password" :placeholder="homeT('profile.newPasswordPlaceholder')" />
+
+        <label>{{ homeT("profile.confirmNewPassword") }}</label>
+        <input v-model="passwordForm.confirmPassword" type="password" :placeholder="homeT('profile.confirmNewPasswordPlaceholder')" />
+      </div>
+
+      <template #footer>
+        <button class="dialog-button ghost" type="button" @click="passwordDialogVisible = false">
+          {{ homeT("actions.cancel") }}
+        </button>
+        <button class="dialog-button primary" type="button" @click="savePassword">
+          {{ homeT("profile.changePassword") }}
+        </button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="contactDialogVisible" :title="homeT('dialogs.addContactTitle')" width="460px" class="chat-dialog">
       <div class="dialog-form">
-        <label>Số thẻ</label>
+        <label>{{ homeT("profile.userid") }}</label>
         <div class="chip-input">
           <input
             v-model.trim="contactUserid"
             type="text"
-            placeholder="Nhập số thẻ cần thêm"
+            :placeholder="homeT('dialogs.addContactPlaceholder')"
             @keydown.enter.prevent="submitAddContact"
           />
           <button type="button" @click="submitAddContact">
@@ -779,12 +1469,20 @@
           </button>
         </div>
 
-        <div v-if="contactLookupLoading" class="list-state compact">Đang tìm...</div>
+        <div v-if="contactLookupLoading" class="list-state compact">{{ homeT("search.searching") }}</div>
         <div v-else-if="contactLookupUsers.length" class="lookup-list">
           <div v-for="user in contactLookupUsers" :key="user.userid" class="user-result">
-            <el-avatar :size="40" :src="user.avatar || undefined">
-              {{ initials(user.fullname || user.userid) }}
-            </el-avatar>
+            <div class="avatar-presence-wrap">
+              <el-avatar :size="40" :src="user.avatar || undefined">
+                {{ initials(user.fullname || user.userid) }}
+              </el-avatar>
+              <span
+                v-if="shouldShowPresence(user)"
+                class="presence-dot"
+                :class="{ online: isUserOnline(user) }"
+                :title="presenceLabel(user)"
+              ></span>
+            </div>
             <div class="user-result-main">
               <strong>{{ user.fullname || user.userid }}</strong>
               <span>{{ user.userid }}</span>
@@ -795,7 +1493,7 @@
               type="button"
               @click="startDirectChat(user.userid)"
             >
-              Nhắn tin
+              {{ homeT("actions.message") }}
             </button>
             <button
               v-else
@@ -803,7 +1501,7 @@
               type="button"
               @click="addContactFromUser(user)"
             >
-              Thêm
+              {{ homeT("actions.add") }}
             </button>
           </div>
         </div>
@@ -811,25 +1509,25 @@
 
       <template #footer>
         <button class="dialog-button ghost" type="button" @click="contactDialogVisible = false">
-          Hủy
+          {{ homeT("actions.cancel") }}
         </button>
         <button class="dialog-button primary" type="button" @click="submitAddContact">
-          Thêm liên hệ
+          {{ homeT("actions.addContact") }}
         </button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="groupDialogVisible" title="Tạo nhóm chat" width="480px" class="chat-dialog">
+    <el-dialog v-model="groupDialogVisible" :title="homeT('dialogs.createGroupTitle')" width="480px" class="chat-dialog">
       <div class="dialog-form">
-        <label>Tên nhóm</label>
-        <input v-model.trim="groupName" type="text" placeholder="Ví dụ: Phòng IT" />
+        <label>{{ homeT("dialogs.groupName") }}</label>
+        <input v-model.trim="groupName" type="text" :placeholder="homeT('dialogs.groupNamePlaceholder')" />
 
-        <label>Thêm thành viên bằng số thẻ</label>
+        <label>{{ homeT("dialogs.addByUserid") }}</label>
         <div class="chip-input">
           <input
             v-model.trim="groupMemberInput"
             type="text"
-            placeholder="Nhập số thẻ"
+            :placeholder="homeT('dialogs.useridPlaceholder')"
             @keydown.enter.prevent="addGroupMemberChip"
           />
           <button type="button" @click="addGroupMemberChip">
@@ -847,7 +1545,7 @@
         </div>
 
         <div v-if="contacts.length" class="contact-picker">
-          <label>Chọn từ danh bạ</label>
+          <label>{{ homeT("dialogs.pickFromContacts") }}</label>
           <div class="picker-list">
             <button
               v-for="contact in contacts"
@@ -856,9 +1554,17 @@
               type="button"
               @click="toggleGroupMember(contact.userid)"
             >
-              <el-avatar :size="28" :src="contact.avatar || undefined">
-                {{ initials(contact.fullname || contact.userid) }}
-              </el-avatar>
+              <div class="avatar-presence-wrap">
+                <el-avatar :size="28" :src="contact.avatar || undefined">
+                  {{ initials(contact.fullname || contact.userid) }}
+                </el-avatar>
+                <span
+                  v-if="shouldShowPresence(contact)"
+                  class="presence-dot mini"
+                  :class="{ online: isUserOnline(contact) }"
+                  :title="presenceLabel(contact)"
+                ></span>
+              </div>
               <span>{{ contact.fullname || contact.userid }}</span>
             </button>
           </div>
@@ -867,22 +1573,22 @@
 
       <template #footer>
         <button class="dialog-button ghost" type="button" @click="groupDialogVisible = false">
-          Hủy
+          {{ homeT("actions.cancel") }}
         </button>
         <button class="dialog-button primary" type="button" @click="createGroup">
-          Tạo nhóm
+          {{ homeT("actions.createGroup") }}
         </button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="addMemberDialogVisible" title="Thêm thành viên" width="420px" class="chat-dialog">
+    <el-dialog v-model="addMemberDialogVisible" :title="homeT('dialogs.addMemberTitle')" width="420px" class="chat-dialog">
       <div class="dialog-form">
-        <label>Số thẻ thành viên</label>
+        <label>{{ homeT("dialogs.memberUserid") }}</label>
         <div class="chip-input">
           <input
             v-model.trim="addMemberInput"
             type="text"
-            placeholder="Nhập số thẻ"
+            :placeholder="homeT('dialogs.useridPlaceholder')"
             @keydown.enter.prevent="addMemberChip"
           />
           <button type="button" @click="addMemberChip">
@@ -900,7 +1606,7 @@
         </div>
 
         <div v-if="contacts.length" class="contact-picker">
-          <label>Chọn từ danh bạ</label>
+          <label>{{ homeT("dialogs.pickFromContacts") }}</label>
           <div class="picker-list">
             <button
               v-for="contact in contacts"
@@ -909,9 +1615,17 @@
               type="button"
               @click="toggleAddMember(contact.userid)"
             >
-              <el-avatar :size="28" :src="contact.avatar || undefined">
-                {{ initials(contact.fullname || contact.userid) }}
-              </el-avatar>
+              <div class="avatar-presence-wrap">
+                <el-avatar :size="28" :src="contact.avatar || undefined">
+                  {{ initials(contact.fullname || contact.userid) }}
+                </el-avatar>
+                <span
+                  v-if="shouldShowPresence(contact)"
+                  class="presence-dot mini"
+                  :class="{ online: isUserOnline(contact) }"
+                  :title="presenceLabel(contact)"
+                ></span>
+              </div>
               <span>{{ contact.fullname || contact.userid }}</span>
             </button>
           </div>
@@ -920,40 +1634,101 @@
 
       <template #footer>
         <button class="dialog-button ghost" type="button" @click="addMemberDialogVisible = false">
-          Hủy
+          {{ homeT("actions.cancel") }}
         </button>
         <button class="dialog-button primary" type="button" @click="submitAddMembers">
-          Thêm
+          {{ homeT("actions.add") }}
         </button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="nicknameDialogVisible" title="Đặt biệt danh" width="420px" class="chat-dialog">
+    <el-dialog v-model="nicknameDialogVisible" :title="homeT('dialogs.nicknameTitle')" width="420px" class="chat-dialog">
       <div class="dialog-form">
-        <label>Thành viên</label>
+        <label>{{ homeT("dialogs.member") }}</label>
         <input :value="nicknameTarget?.fullname || nicknameTarget?.userid || ''" disabled type="text" />
 
-        <label>Biệt danh</label>
+        <label>{{ homeT("dialogs.nickname") }}</label>
         <input
           v-model.trim="nicknameValue"
           type="text"
           maxlength="80"
-          placeholder="Nhập biệt danh, để trống để xóa"
+          :placeholder="homeT('dialogs.nicknamePlaceholder')"
           @keydown.enter.prevent="submitNickname"
         />
       </div>
 
       <template #footer>
         <button class="dialog-button ghost" type="button" @click="nicknameDialogVisible = false">
-          Hủy
+          {{ homeT("actions.cancel") }}
         </button>
         <button class="dialog-button primary" type="button" @click="submitNickname">
-          Lưu
+          {{ homeT("actions.save") }}
         </button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="forwardDialogVisible" title="Chuyển tiếp tin nhắn" width="440px" class="chat-dialog">
+    <el-dialog v-model="pollDialogVisible" :title="homeT('poll.createTitle')" width="480px" class="chat-dialog poll-dialog">
+      <div class="dialog-form">
+        <label>{{ homeT("poll.question") }}</label>
+        <input
+          v-model.trim="pollForm.question"
+          type="text"
+          maxlength="500"
+          :placeholder="homeT('poll.questionPlaceholder')"
+          @keydown.enter.prevent="submitPoll"
+        />
+
+        <label>{{ homeT("poll.options") }}</label>
+        <div class="poll-option-editor">
+          <div v-for="(_, index) in pollForm.options" :key="index" class="poll-option-input">
+            <input
+              v-model.trim="pollForm.options[index]"
+              type="text"
+              maxlength="160"
+              :placeholder="homeT('poll.optionPlaceholder', { number: index + 1 })"
+            />
+            <button
+              type="button"
+              :disabled="pollForm.options.length <= 2"
+              :aria-label="homeT('poll.removeOption')"
+              @click="removePollOption(index)"
+            >
+              <X :size="15" />
+            </button>
+          </div>
+          <button v-if="pollForm.options.length < 20" class="poll-add-option" type="button" @click="addPollOption">
+            <Plus :size="15" />
+            <span>{{ homeT("poll.addOption") }}</span>
+          </button>
+        </div>
+
+        <div class="poll-settings">
+          <label>
+            <input v-model="pollForm.allowCustomOptions" type="checkbox" />
+            <span>{{ homeT("poll.allowCustomOptions") }}</span>
+          </label>
+          <label>
+            <input v-model="pollForm.allowMultiple" type="checkbox" />
+            <span>{{ homeT("poll.allowMultiple") }}</span>
+          </label>
+          <label>
+            <input v-model="pollForm.showVoters" type="checkbox" />
+            <span>{{ homeT("poll.showVoters") }}</span>
+          </label>
+        </div>
+      </div>
+
+      <template #footer>
+        <button class="dialog-button ghost" type="button" @click="pollDialogVisible = false">
+          {{ homeT("actions.cancel") }}
+        </button>
+        <button class="dialog-button primary" type="button" :disabled="pollSubmitting" @click="submitPoll">
+          {{ homeT("poll.create") }}
+        </button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="forwardDialogVisible" :title="homeT('dialogs.forwardTitle')" width="440px" class="chat-dialog">
       <div class="forward-preview">
         <Forward :size="17" />
         <span>{{ forwardingMessage ? messageReferencePreview(forwardingMessage) : "" }}</span>
@@ -976,10 +1751,10 @@
 
       <template #footer>
         <button class="dialog-button ghost" type="button" @click="forwardDialogVisible = false">
-          Hủy
+          {{ homeT("actions.cancel") }}
         </button>
         <button class="dialog-button primary" type="button" @click="submitForward">
-          Chuyển tiếp
+          {{ homeT("actions.forward") }}
         </button>
       </template>
     </el-dialog>
@@ -989,13 +1764,18 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import dayjs from "dayjs";
 import { Capacitor } from "@capacitor/core";
 import { PushNotifications } from "@capacitor/push-notifications";
+import BrandLogo from "@/components/BrandLogo.vue";
 import {
   Camera,
   ChevronLeft,
+  ChevronDown,
+  ChevronUp,
+  Copy,
   Download,
   File,
   FileArchive,
@@ -1008,12 +1788,18 @@ import {
   Folder,
   FolderUp,
   Forward,
+  Info,
+  KeyRound,
   Link2,
+  ListChecks,
+  Languages,
   LogOut,
   MessageCircle,
   Mic,
+  MoreHorizontal,
   Paperclip,
   Pencil,
+  Pin,
   Plus,
   Presentation,
   Reply,
@@ -1023,13 +1809,16 @@ import {
   Trash2,
   UploadCloud,
   UserPlus,
+  UserRound,
   Users,
   X,
 } from "lucide-vue-next";
 import chatApi from "@/store/chat";
 
 const router = useRouter();
+const { t, locale } = useI18n();
 const enableNativePush = import.meta.env.VITE_ENABLE_PUSH === "true";
+const fallbackRefreshMs = 60 * 1000;
 const currentUserid = localStorage.getItem("userid") || "";
 const currentUser = ref({
   userid: currentUserid,
@@ -1041,21 +1830,29 @@ const conversations = ref([]);
 const contacts = ref([]);
 const messages = ref([]);
 const panelMode = ref("chats");
+const contactSection = ref("friends");
 const activeConversationId = ref(null);
 const lastMessageIds = ref({});
 const readState = ref({});
 const unreadCounts = ref({});
+const pinnedMessages = ref({});
 const toastNotifications = ref([]);
 const loadingConversations = ref(false);
 const loadingContacts = ref(false);
 const loadingMessages = ref(false);
+const loadingOlderMessages = ref(false);
+const messagesHasMore = ref(false);
 const sending = ref(false);
 const uploading = ref(false);
 const isDragging = ref(false);
 const dragDepth = ref(0);
 const searchKeyword = ref("");
-const searchedUsers = ref([]);
-const searchingUsers = ref(false);
+const searchScope = ref("all");
+const contactSearchKeyword = ref("");
+const chatSearchResults = ref({ contacts: [], messages: [], files: [] });
+const searchingChat = ref(false);
+const conversationSearchKeyword = ref("");
+const conversationSearchIndex = ref(0);
 const composerText = ref("");
 const mentionActive = ref(false);
 const mentionQuery = ref("");
@@ -1065,6 +1862,17 @@ const replyingTo = ref(null);
 const forwardDialogVisible = ref(false);
 const forwardingMessage = ref(null);
 const forwardTargetConversationId = ref(null);
+const pollDialogVisible = ref(false);
+const pollSubmitting = ref(false);
+const pollForm = ref({
+  question: "",
+  options: ["", ""],
+  allowCustomOptions: false,
+  allowMultiple: false,
+  showVoters: true,
+});
+const pollVotingMessageIds = ref({});
+const pollCustomInputs = ref({});
 const pendingAttachments = ref([]);
 const pendingAttachmentType = ref("file");
 const isRecording = ref(false);
@@ -1086,6 +1894,10 @@ const contactUserid = ref("");
 const contactLookupUsers = ref([]);
 const contactLookupLoading = ref(false);
 const profileDialogVisible = ref(false);
+const passwordDialogVisible = ref(false);
+const infoPanelOpen = ref(false);
+const infoPanelView = ref("details");
+const storageTab = ref("media");
 const profileForm = ref({ userid: currentUserid, fullname: "", avatar: "" });
 const passwordForm = ref({ currentPassword: "", newPassword: "", confirmPassword: "" });
 const messageListRef = ref(null);
@@ -1100,6 +1912,7 @@ let searchTimer = null;
 let contactLookupTimer = null;
 let realtimeSocket = null;
 let realtimeReconnectTimer = null;
+let backgroundSyncPromise = null;
 let pushListenersRegistered = false;
 let pushListenerHandles = [];
 let searchRequestId = 0;
@@ -1113,31 +1926,52 @@ let recordingStartedAt = 0;
 let discardRecording = false;
 const readStateStorageKey = `ys_chat_read_state_${currentUserid}`;
 const unreadStorageKey = `ys_chat_unread_counts_${currentUserid}`;
+const pinnedMessagesStorageKey = `ys_chat_pinned_messages_${currentUserid}`;
 
-const errorText = {
-  CHAT_USER_NOT_FOUND: "Không tìm thấy số thẻ này.",
-  CHAT_CONVERSATION_NOT_FOUND: "Không tìm thấy hội thoại.",
-  CHAT_NO_PERMISSION: "Bạn không có quyền trong hội thoại này.",
-  CHAT_EMPTY_MESSAGE: "Tin nhắn đang trống.",
-  CHAT_INVALID_MESSAGE_TYPE: "Loại tin nhắn không hợp lệ.",
-  CHAT_GROUP_NEEDS_MEMBER: "Nhóm cần ít nhất một thành viên khác.",
-  CHAT_CANNOT_ADD_DIRECT_MEMBER: "Chat cá nhân không thể thêm thành viên. Vui lòng tạo nhóm mới.",
-  CHAT_CANNOT_REMOVE_DIRECT_MEMBER: "Chat cá nhân không thể xóa thành viên.",
-  CHAT_ONLY_OWNER_CAN_MANAGE_MEMBERS: "Chỉ chủ nhóm mới có thể xóa thành viên.",
-  CHAT_MEMBER_NOT_FOUND: "Thành viên không còn trong nhóm.",
-  INVALID_CREDENTIALS: "Mật khẩu hiện tại không đúng.",
-  INVALID_INPUT: "Dữ liệu chưa hợp lệ.",
-  UNAUTHORIZED: "Phiên đăng nhập đã hết hạn.",
-  SYSTEM_ERROR: "Hệ thống đang lỗi, vui lòng thử lại.",
+const languageOptions = [
+  { value: "vi", label: "Tiếng Việt", short: "VI" },
+  { value: "en", label: "English", short: "EN" },
+  { value: "cn", label: "中文", short: "简" },
+];
+
+const searchScopeOptions = [
+  { value: "all", labelKey: "search.scopes.all" },
+  { value: "contacts", labelKey: "search.scopes.contacts" },
+  { value: "messages", labelKey: "search.scopes.messages" },
+  { value: "files", labelKey: "search.scopes.files" },
+];
+const searchPreviewLimit = 3;
+const sharedPreviewLimit = 12;
+const messagePageSize = 50;
+let messageRequestId = 0;
+const storageTabs = [
+  { value: "media", labelKey: "info.media" },
+  { value: "files", labelKey: "info.files" },
+  { value: "links", labelKey: "info.links" },
+  { value: "polls", labelKey: "info.polls" },
+];
+
+const homeT = (key, params) => t(`home.${key}`, params);
+const sortLocale = computed(() => (locale.value === "cn" ? "zh-Hans" : locale.value));
+const currentLangCode = computed(() =>
+  languageOptions.find((language) => language.value === locale.value)?.short || "VI",
+);
+
+const changeLocale = (lang) => {
+  if (!languageOptions.some((language) => language.value === lang)) return;
+  locale.value = lang;
+  localStorage.setItem("locale", lang);
 };
 
 const activeConversation = computed(() =>
   conversations.value.find((conversation) => conversation.id === activeConversationId.value),
 );
+const activePinnedMessage = computed(() => pinnedMessages.value[String(activeConversationId.value)] || null);
 
-const panelTitle = computed(() => (panelMode.value === "contacts" ? "Danh bạ" : "Tin nhắn"));
+const panelTitle = computed(() => (panelMode.value === "contacts" ? homeT("rail.contacts") : homeT("rail.chats")));
 
 const hasSearchKeyword = computed(() => searchKeyword.value.trim().length > 0);
+const isAllSearchScope = computed(() => searchScope.value === "all");
 
 const filteredConversations = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase();
@@ -1149,6 +1983,104 @@ const filteredConversations = computed(() => {
       .toLowerCase();
     return `${conversation.name} ${memberText}`.toLowerCase().includes(keyword);
   });
+});
+
+const hasPanelSearchText = computed(() =>
+  panelMode.value === "contacts"
+    ? contactSearchKeyword.value.trim().length > 0
+    : searchKeyword.value.trim().length > 0,
+);
+
+const chatSearchContacts = computed(() => chatSearchResults.value.contacts || []);
+const chatSearchMessages = computed(() => chatSearchResults.value.messages || []);
+const chatSearchFiles = computed(() => {
+  const keyword = normalizeDirectoryText(searchKeyword.value);
+  return (chatSearchResults.value.files || []).flatMap((message) =>
+    (message.attachments || [])
+      .filter((attachment) => {
+        if (!keyword) return true;
+        return normalizeDirectoryText(`${attachment.fileName} ${attachment.relativePath}`).includes(keyword);
+      })
+      .map((attachment) => ({ message, attachment })),
+  );
+});
+const searchPreviewItems = (items) => (isAllSearchScope.value ? items.slice(0, searchPreviewLimit) : items);
+const visibleFilteredConversations = computed(() => searchPreviewItems(filteredConversations.value));
+const visibleChatSearchContacts = computed(() => searchPreviewItems(chatSearchContacts.value));
+const visibleChatSearchMessages = computed(() => searchPreviewItems(chatSearchMessages.value));
+const visibleChatSearchFiles = computed(() => searchPreviewItems(chatSearchFiles.value));
+
+const hasVisibleSearchResults = computed(() => {
+  if (shouldShowSearchSection("contacts") && (filteredConversations.value.length || chatSearchContacts.value.length)) {
+    if (searchScope.value !== "all") return filteredConversations.value.length > 0 || chatSearchContacts.value.length > 0;
+    return true;
+  }
+  if (shouldShowSearchSection("messages") && chatSearchMessages.value.length) return true;
+  if (shouldShowSearchSection("files") && chatSearchFiles.value.length) return true;
+  return false;
+});
+
+const conversationSearchMatches = computed(() => {
+  const keyword = normalizeDirectoryText(conversationSearchKeyword.value);
+  if (!keyword) return [];
+  return messages.value.filter((message) => messageMatchesKeyword(message, keyword));
+});
+
+const currentConversationSearchMessageId = computed(() =>
+  conversationSearchMatches.value[conversationSearchIndex.value]?.id || 0,
+);
+
+const conversationSearchPositionLabel = computed(() => {
+  if (!conversationSearchKeyword.value.trim()) return "";
+  const total = conversationSearchMatches.value.length;
+  if (!total) return `0/0`;
+  return `${conversationSearchIndex.value + 1}/${total}`;
+});
+
+const directoryGroups = computed(() =>
+  conversations.value
+    .filter((conversation) => conversation.type === "group")
+    .slice()
+    .sort((first, second) => (first.name || "").localeCompare(second.name || "", sortLocale.value)),
+);
+
+const filteredDirectoryContacts = computed(() => {
+  const keyword = normalizeDirectoryText(contactSearchKeyword.value);
+  if (!keyword) return contacts.value;
+  return contacts.value.filter((contact) =>
+    normalizeDirectoryText(`${displayName(contact)} ${contact.userid}`).includes(keyword),
+  );
+});
+
+const groupedDirectoryContacts = computed(() => {
+  const groups = new Map();
+  filteredDirectoryContacts.value.forEach((contact) => {
+    const letter = directoryLetter(displayName(contact));
+    if (!groups.has(letter)) groups.set(letter, []);
+    groups.get(letter).push(contact);
+  });
+
+  return Array.from(groups, ([letter, items]) => ({ letter, items }));
+});
+
+const filteredDirectoryGroups = computed(() => {
+  const keyword = normalizeDirectoryText(contactSearchKeyword.value);
+  if (!keyword) return directoryGroups.value;
+  return directoryGroups.value.filter((group) => {
+    const memberText = (group.members || [])
+      .map((member) => `${displayName(member)} ${member.userid}`)
+      .join(" ");
+    return normalizeDirectoryText(`${group.name} ${memberText}`).includes(keyword);
+  });
+});
+
+const contactDirectoryTitle = computed(() =>
+  contactSection.value === "groups" ? homeT("contacts.groupsList") : homeT("contacts.friendsList"),
+);
+
+const contactDirectoryCountLabel = computed(() => {
+  if (contactSection.value === "groups") return homeT("contacts.countGroups", { count: filteredDirectoryGroups.value.length });
+  return homeT("contacts.countFriends", { count: filteredDirectoryContacts.value.length });
 });
 
 const messageListStyle = computed(() => {
@@ -1163,25 +2095,66 @@ const sharedAttachments = computed(() =>
   messages.value.flatMap((message) => message.attachments || []).reverse(),
 );
 
-const sharedMedia = computed(() =>
+const allSharedMedia = computed(() =>
   sharedAttachments.value
-    .filter((attachment) => isImageAttachment(attachment) || isVideoAttachment(attachment))
-    .slice(0, 12),
+    .filter((attachment) => isImageAttachment(attachment) || isVideoAttachment(attachment)),
 );
 
-const sharedDocuments = computed(() =>
+const sharedMedia = computed(() => allSharedMedia.value.slice(0, sharedPreviewLimit));
+
+const allSharedDocuments = computed(() =>
   sharedAttachments.value
-    .filter((attachment) => !isImageAttachment(attachment) && !isVideoAttachment(attachment) && !isAudioAttachment(attachment))
-    .slice(0, 12),
+    .filter((attachment) => !isImageAttachment(attachment) && !isVideoAttachment(attachment) && !isAudioAttachment(attachment)),
 );
 
-const sharedLinks = computed(() =>
+const sharedDocuments = computed(() => allSharedDocuments.value.slice(0, sharedPreviewLimit));
+
+const allSharedLinks = computed(() =>
   messages.value
     .filter((message) => message.type === "link" && message.content)
     .slice()
-    .reverse()
-    .slice(0, 12),
+    .reverse(),
 );
+
+const sharedLinks = computed(() => allSharedLinks.value.slice(0, sharedPreviewLimit));
+
+const allSharedPolls = computed(() =>
+  messages.value
+    .filter((message) => message.type === "poll" && message.poll)
+    .slice()
+    .sort((first, second) => messageSortValue(second) - messageSortValue(first)),
+);
+
+const sharedPolls = computed(() => allSharedPolls.value.slice(0, sharedPreviewLimit));
+
+const activeStorageGroups = computed(() => {
+  if (storageTab.value === "media") return groupStorageItems(allSharedMedia.value, (item) => item.createdAt);
+  if (storageTab.value === "files") return groupStorageItems(allSharedDocuments.value, (item) => item.createdAt);
+  if (storageTab.value === "polls") return groupStorageItems(allSharedPolls.value, (item) => item.poll?.updatedAt || item.createdAt);
+  return groupStorageItems(allSharedLinks.value, (item) => item.createdAt);
+});
+
+const activeStorageEmptyText = computed(() => {
+  if (storageTab.value === "media") return homeT("info.noMedia");
+  if (storageTab.value === "files") return homeT("info.noFiles");
+  if (storageTab.value === "polls") return homeT("info.noPolls");
+  return homeT("info.noLinks");
+});
+
+const openStorageView = (type) => {
+  storageTab.value = type;
+  infoPanelView.value = "storage";
+};
+
+const closeStorageView = () => {
+  infoPanelView.value = "details";
+};
+
+const goToStoredMessage = async (message) => {
+  if (!message?.id) return;
+  infoPanelView.value = "details";
+  await scrollToMessage(message.id);
+};
 
 const recordingDurationLabel = computed(() => formatDuration(recordingDuration.value));
 
@@ -1191,6 +2164,33 @@ const isCurrentUserGroupOwner = computed(() => {
     (member) => member.userid === currentUserid && member.role === "owner",
   );
 });
+
+const shouldShowPresence = (user = {}) => Boolean(user.userid && user.userid !== currentUserid);
+const isUserOnline = (user = {}) => Boolean(user.isOnline);
+const presenceLabel = (user = {}) => homeT(isUserOnline(user) ? "presence.online" : "presence.offline");
+
+const conversationPresenceUser = (conversation = {}) => {
+  if (conversation.type !== "direct") return null;
+  return (conversation.members || []).find((member) => member.userid !== currentUserid) || null;
+};
+
+const presenceUserByUserid = (userid) =>
+  activeConversation.value?.members?.find((member) => member.userid === userid) || { userid, isOnline: false };
+
+const applyPresence = (userid, isOnline) => {
+  const updateUser = (user) => (user?.userid === userid ? { ...user, isOnline } : user);
+
+  contacts.value = contacts.value.map(updateUser);
+  chatSearchResults.value = {
+    ...chatSearchResults.value,
+    contacts: (chatSearchResults.value.contacts || []).map(updateUser),
+  };
+  contactLookupUsers.value = contactLookupUsers.value.map(updateUser);
+  conversations.value = conversations.value.map((conversation) => ({
+    ...conversation,
+    members: (conversation.members || []).map(updateUser),
+  }));
+};
 
 const mentionSuggestions = computed(() => {
   if (!activeConversation.value || !mentionActive.value) return [];
@@ -1208,40 +2208,61 @@ const mentionSuggestions = computed(() => {
 onMounted(async () => {
   readState.value = loadStoredObject(readStateStorageKey);
   unreadCounts.value = loadStoredObject(unreadStorageKey);
+  pinnedMessages.value = loadStoredObject(pinnedMessagesStorageKey);
   await loadProfile();
   await loadContacts();
   await loadConversations(false);
   connectRealtime();
   await initPushNotifications();
-  refreshTimer = window.setInterval(async () => {
-    await loadConversations(false);
-    if (activeConversationId.value) {
-      await loadMessages(activeConversationId.value, false);
-    }
-  }, 5000);
+  document.addEventListener("visibilitychange", syncAfterVisibilityReturn);
+  window.addEventListener("online", syncAfterNetworkReturn);
 });
 
 onBeforeUnmount(() => {
   componentUnmounted = true;
-  if (refreshTimer) window.clearInterval(refreshTimer);
+  stopFallbackRefresh();
   if (searchTimer) window.clearTimeout(searchTimer);
   if (contactLookupTimer) window.clearTimeout(contactLookupTimer);
+  document.removeEventListener("visibilitychange", syncAfterVisibilityReturn);
+  window.removeEventListener("online", syncAfterNetworkReturn);
   cancelVoiceRecording();
   disconnectRealtime();
   removePushListeners();
 });
 
-watch(searchKeyword, (value) => {
+watch([searchKeyword, searchScope], ([value, scope]) => {
   if (searchTimer) window.clearTimeout(searchTimer);
   const keyword = value.trim();
   if (!keyword) {
-    searchedUsers.value = [];
-    searchingUsers.value = false;
+    searchRequestId += 1;
+    chatSearchResults.value = { contacts: [], messages: [], files: [] };
+    searchingChat.value = false;
+    if (scope !== "all") searchScope.value = "all";
     return;
   }
 
-  searchingUsers.value = true;
-  searchTimer = window.setTimeout(() => searchUsersRealtime(keyword), 250);
+  searchingChat.value = true;
+  searchTimer = window.setTimeout(() => searchChatRealtime(keyword, scope), 250);
+});
+
+watch(conversationSearchKeyword, async () => {
+  conversationSearchIndex.value = 0;
+  await nextTick();
+  if (currentConversationSearchMessageId.value) {
+    await scrollToMessage(currentConversationSearchMessageId.value);
+  }
+});
+
+watch(conversationSearchMatches, (matches) => {
+  if (conversationSearchIndex.value >= matches.length) {
+    conversationSearchIndex.value = Math.max(0, matches.length - 1);
+  }
+});
+
+watch(activeConversationId, () => {
+  conversationSearchKeyword.value = "";
+  conversationSearchIndex.value = 0;
+  infoPanelView.value = "details";
 });
 
 watch(contactUserid, (value) => {
@@ -1271,6 +2292,10 @@ const persistReadState = () => {
 
 const persistUnreadCounts = () => {
   localStorage.setItem(unreadStorageKey, JSON.stringify(unreadCounts.value));
+};
+
+const persistPinnedMessages = () => {
+  localStorage.setItem(pinnedMessagesStorageKey, JSON.stringify(pinnedMessages.value));
 };
 
 const unreadCount = (conversationId) => Number(unreadCounts.value[conversationId] || 0);
@@ -1355,12 +2380,14 @@ const openNotification = async (notification) => {
 };
 
 const notificationPreview = (message) => {
+  if (message.type === "system") return message.content || homeT("previews.system");
   const sender = message.senderName ? `${message.senderName}: ` : "";
-  if (message.type === "voice") return `${sender}Voice chat`;
-  if (message.type === "file") return `${sender}Đã gửi tệp`;
-  if (message.type === "folder") return `${sender}Đã gửi thư mục`;
-  if (message.type === "link") return `${sender}Đã gửi liên kết`;
-  return `${sender}${message.content || "Tin nhắn mới"}`;
+  if (message.type === "voice") return `${sender}${homeT("previews.voice")}`;
+  if (message.type === "file") return `${sender}${homeT("previews.sentFile")}`;
+  if (message.type === "folder") return `${sender}${homeT("previews.sentFolder")}`;
+  if (message.type === "link") return `${sender}${homeT("previews.sentLink")}`;
+  if (message.type === "poll") return `${sender}${message.content || homeT("previews.poll")}`;
+  return `${sender}${message.content || homeT("previews.newMessage")}`;
 };
 
 const connectRealtime = () => {
@@ -1369,20 +2396,27 @@ const connectRealtime = () => {
   try {
     realtimeSocket = new WebSocket(chatApi.getRealtimeUrl());
   } catch {
+    startFallbackRefresh();
     scheduleRealtimeReconnect();
     return;
   }
+
+  realtimeSocket.onopen = () => {
+    stopFallbackRefresh();
+    void syncChatSnapshot();
+  };
 
   realtimeSocket.onmessage = (event) => {
     try {
       handleRealtimeEvent(JSON.parse(event.data));
     } catch {
-      // Ignore malformed realtime frames; the periodic refresh remains the fallback.
+      // Ignore malformed realtime frames; reconnect and focused-window sync remain the fallback.
     }
   };
 
   realtimeSocket.onclose = () => {
     realtimeSocket = null;
+    startFallbackRefresh();
     scheduleRealtimeReconnect();
   };
 
@@ -1412,19 +2446,71 @@ const disconnectRealtime = () => {
   }
 };
 
+const startFallbackRefresh = () => {
+  if (componentUnmounted || refreshTimer) return;
+  refreshTimer = window.setInterval(() => {
+    void syncChatSnapshot();
+  }, fallbackRefreshMs);
+};
+
+const stopFallbackRefresh = () => {
+  if (!refreshTimer) return;
+  window.clearInterval(refreshTimer);
+  refreshTimer = null;
+};
+
+const syncChatSnapshot = async () => {
+  if (backgroundSyncPromise) return backgroundSyncPromise;
+
+  backgroundSyncPromise = (async () => {
+    await loadConversations(false, { silent: true });
+    if (activeConversationId.value) {
+      await loadMessages(activeConversationId.value, false);
+    }
+  })().finally(() => {
+    backgroundSyncPromise = null;
+  });
+
+  return backgroundSyncPromise;
+};
+
+const syncAfterVisibilityReturn = () => {
+  if (document.visibilityState !== "visible") return;
+  connectRealtime();
+  void syncChatSnapshot();
+};
+
+const syncAfterNetworkReturn = () => {
+  connectRealtime();
+  void syncChatSnapshot();
+};
+
 const handleRealtimeEvent = async (event) => {
+  if (event?.type === "chat.presence.changed" && event.userid) {
+    applyPresence(event.userid, Boolean(event.isOnline));
+    return;
+  }
+
+  if (event?.type === "chat.poll.updated" && event.message?.id) {
+    if (event.message.conversationId === activeConversationId.value) {
+      upsertMessage(event.message);
+      await scrollToBottom();
+    }
+    return;
+  }
+
   if (event?.type !== "chat.message.created" || !event.message?.id) return;
 
   const message = event.message;
   if (message.conversationId === activeConversationId.value) {
     const exists = messages.value.some((item) => item.id === message.id);
     if (!exists) {
-      messages.value.push(message);
+      messages.value = sortMessagesForDisplay([...messages.value, message]);
       await scrollToBottom();
     }
   }
 
-  await loadConversations(false);
+  await loadConversations(false, { silent: true });
 };
 
 const initPushNotifications = async () => {
@@ -1476,10 +2562,65 @@ const openConversationById = async (conversationId) => {
   }
 };
 
+const shouldShowSearchSection = (section) => searchScope.value === "all" || searchScope.value === section;
+
+const clearPanelSearch = () => {
+  if (panelMode.value === "contacts") {
+    contactSearchKeyword.value = "";
+    return;
+  }
+  searchKeyword.value = "";
+  searchScope.value = "all";
+  chatSearchResults.value = { contacts: [], messages: [], files: [] };
+};
+
+const clearConversationSearch = () => {
+  conversationSearchKeyword.value = "";
+  conversationSearchIndex.value = 0;
+};
+
+const conversationNameById = (conversationId) =>
+  conversations.value.find((conversation) => conversation.id === conversationId)?.name || homeT("search.conversation");
+
+const messageSearchPreview = (message = {}) => message.content || messageReferencePreview(message);
+
+const openSearchMessage = async (message) => {
+  if (!message?.conversationId) return;
+  await openConversationById(message.conversationId);
+  if (!messages.value.some((item) => item.id === message.id)) {
+    messages.value = [...messages.value, message].sort((first, second) => first.id - second.id);
+  }
+  await scrollToMessage(message.id);
+};
+
+const goToConversationSearchResult = async (direction) => {
+  const matches = conversationSearchMatches.value;
+  if (!matches.length) return;
+  const nextIndex = (conversationSearchIndex.value + direction + matches.length) % matches.length;
+  conversationSearchIndex.value = nextIndex;
+  await scrollToMessage(matches[nextIndex].id);
+};
+
+const isConversationSearchMatch = (messageId) =>
+  conversationSearchMatches.value.some((message) => message.id === messageId);
+
+const messageMatchesKeyword = (message = {}, keyword) => {
+  const text = normalizeDirectoryText(`${message.senderName} ${message.content}`);
+  if (text.includes(keyword)) return true;
+  return (message.attachments || []).some((attachment) =>
+    normalizeDirectoryText(`${attachment.fileName} ${attachment.relativePath}`).includes(keyword),
+  );
+};
+
 const setPanelMode = (mode) => {
   panelMode.value = mode;
+  infoPanelOpen.value = false;
   if (mode === "contacts") {
+    searchKeyword.value = "";
     loadContacts();
+    loadConversations(false);
+  } else {
+    contactSearchKeyword.value = "";
   }
 };
 
@@ -1492,7 +2633,7 @@ const withContactState = (user) => ({
 
 const sortUsers = (users) =>
   [...users].sort((first, second) =>
-    (first.fullname || first.userid || "").localeCompare(second.fullname || second.userid || "", "vi"),
+    (first.fullname || first.userid || "").localeCompare(second.fullname || second.userid || "", sortLocale.value),
   );
 
 const loadContacts = async () => {
@@ -1500,7 +2641,10 @@ const loadContacts = async () => {
     loadingContacts.value = true;
     const res = await chatApi.getContacts();
     contacts.value = sortUsers((res.data?.contacts || []).map((contact) => ({ ...contact, isContact: true })));
-    searchedUsers.value = searchedUsers.value.map(withContactState);
+    chatSearchResults.value = {
+      ...chatSearchResults.value,
+      contacts: (chatSearchResults.value.contacts || []).map(withContactState),
+    };
     contactLookupUsers.value = contactLookupUsers.value.map(withContactState);
   } catch (error) {
     showApiError(error);
@@ -1509,16 +2653,21 @@ const loadContacts = async () => {
   }
 };
 
-const searchUsersRealtime = async (keyword) => {
+const searchChatRealtime = async (keyword, scope) => {
   const requestId = ++searchRequestId;
   try {
-    const res = await chatApi.searchUsers(keyword);
-    if (requestId !== searchRequestId || keyword !== searchKeyword.value.trim()) return;
-    searchedUsers.value = (res.data?.users || []).map(withContactState);
+    const res = await chatApi.searchChat(keyword, scope);
+    if (requestId !== searchRequestId || keyword !== searchKeyword.value.trim() || scope !== searchScope.value) return;
+    const results = res.data?.results || {};
+    chatSearchResults.value = {
+      contacts: (results.contacts || []).map(withContactState),
+      messages: results.messages || [],
+      files: results.files || [],
+    };
   } catch (error) {
     if (requestId === searchRequestId) showApiError(error);
   } finally {
-    if (requestId === searchRequestId) searchingUsers.value = false;
+    if (requestId === searchRequestId) searchingChat.value = false;
   }
 };
 
@@ -1546,9 +2695,12 @@ const upsertContact = (contact) => {
   const nextContact = { ...contact, isContact: true };
   const withoutCurrent = contacts.value.filter((item) => item.userid !== nextContact.userid);
   contacts.value = sortUsers([...withoutCurrent, nextContact]);
-  searchedUsers.value = searchedUsers.value.map((user) =>
-    user.userid === nextContact.userid ? { ...user, isContact: true } : user,
-  );
+  chatSearchResults.value = {
+    ...chatSearchResults.value,
+    contacts: (chatSearchResults.value.contacts || []).map((user) =>
+      user.userid === nextContact.userid ? { ...user, isContact: true } : user,
+    ),
+  };
   contactLookupUsers.value = contactLookupUsers.value.map((user) =>
     user.userid === nextContact.userid ? { ...user, isContact: true } : user,
   );
@@ -1557,18 +2709,18 @@ const upsertContact = (contact) => {
 const addContactByUserid = async (userid) => {
   const contactUseridValue = String(userid || "").trim();
   if (!contactUseridValue) {
-    ElMessage.warning("Vui lòng nhập số thẻ.");
+    ElMessage.warning(homeT("messages.enterUserid"));
     return null;
   }
   if (contactUseridValue === currentUserid) {
-    ElMessage.warning("Không thể tự thêm chính mình vào danh bạ.");
+    ElMessage.warning(homeT("messages.cannotAddSelf"));
     return null;
   }
 
   const res = await chatApi.addContact(contactUseridValue);
   const contact = res.data?.contact;
   upsertContact(contact);
-  ElMessage.success("Đã thêm liên hệ.");
+  ElMessage.success(homeT("messages.contactAdded"));
   return contact;
 };
 
@@ -1587,6 +2739,7 @@ const submitAddContact = async () => {
     contactDialogVisible.value = false;
     contactUserid.value = "";
     panelMode.value = "contacts";
+    contactSection.value = "friends";
   } catch (error) {
     showApiError(error);
   }
@@ -1618,12 +2771,18 @@ const openProfileDialog = async () => {
   profileDialogVisible.value = true;
   profileForm.value = { ...currentUser.value };
   passwordForm.value = { currentPassword: "", newPassword: "", confirmPassword: "" };
+  passwordDialogVisible.value = false;
   await loadProfile();
+};
+
+const openPasswordDialog = () => {
+  passwordForm.value = { currentPassword: "", newPassword: "", confirmPassword: "" };
+  passwordDialogVisible.value = true;
 };
 
 const saveProfile = async () => {
   if (!profileForm.value.fullname.trim()) {
-    ElMessage.warning("Vui lòng nhập họ tên hiển thị.");
+    ElMessage.warning(homeT("messages.enterDisplayName"));
     return;
   }
 
@@ -1631,7 +2790,7 @@ const saveProfile = async () => {
     const res = await chatApi.updateProfile(profileForm.value.fullname.trim());
     applyProfile(res.data?.user);
     await loadConversations(false);
-    ElMessage.success("Đã cập nhật hồ sơ.");
+    ElMessage.success(homeT("messages.profileUpdated"));
   } catch (error) {
     showApiError(error);
   }
@@ -1639,22 +2798,23 @@ const saveProfile = async () => {
 
 const savePassword = async () => {
   if (!passwordForm.value.currentPassword || !passwordForm.value.newPassword) {
-    ElMessage.warning("Vui lòng nhập đầy đủ mật khẩu.");
+    ElMessage.warning(homeT("messages.enterPasswords"));
     return;
   }
   if (passwordForm.value.newPassword.length < 6) {
-    ElMessage.warning("Mật khẩu mới phải có ít nhất 6 ký tự.");
+    ElMessage.warning(homeT("messages.passwordMinLength"));
     return;
   }
   if (passwordForm.value.newPassword !== passwordForm.value.confirmPassword) {
-    ElMessage.warning("Mật khẩu xác nhận không khớp.");
+    ElMessage.warning(homeT("messages.passwordMismatch"));
     return;
   }
 
   try {
     await chatApi.changePassword(passwordForm.value.currentPassword, passwordForm.value.newPassword);
     passwordForm.value = { currentPassword: "", newPassword: "", confirmPassword: "" };
-    ElMessage.success("Đã đổi mật khẩu.");
+    passwordDialogVisible.value = false;
+    ElMessage.success(homeT("messages.passwordChanged"));
   } catch (error) {
     showApiError(error);
   }
@@ -1669,7 +2829,7 @@ const handleAvatarSelected = async (event) => {
     const res = await chatApi.uploadAvatar(file);
     applyProfile(res.data?.user);
     await loadConversations(false);
-    ElMessage.success("Đã cập nhật ảnh đại diện.");
+    ElMessage.success(homeT("messages.avatarUpdated"));
   } catch (error) {
     showApiError(error);
   }
@@ -1684,7 +2844,7 @@ const handleGroupImageSelected = async (event, field) => {
     const uploadRes = await chatApi.uploadFiles([{ file, relativePath: file.name }]);
     const attachment = uploadRes.data?.attachments?.[0];
     if (!attachment?.fileUrl) {
-      ElMessage.error("Không tải được ảnh.");
+      ElMessage.error(homeT("messages.imageUploadFailed"));
       return;
     }
 
@@ -1698,15 +2858,16 @@ const handleGroupImageSelected = async (event, field) => {
     if (res.data?.conversation) {
       await selectConversation(res.data.conversation);
     }
-    ElMessage.success(field === "avatar" ? "Đã cập nhật ảnh đại diện nhóm." : "Đã cập nhật ảnh nền hội thoại.");
+    ElMessage.success(field === "avatar" ? homeT("messages.groupAvatarUpdated") : homeT("messages.groupBackgroundUpdated"));
   } catch (error) {
     showApiError(error);
   }
 };
 
-const loadConversations = async (selectFirst = false) => {
+const loadConversations = async (selectFirst = false, options = {}) => {
+  const silent = Boolean(options.silent);
   try {
-    loadingConversations.value = true;
+    if (!silent) loadingConversations.value = true;
     const res = await chatApi.getConversations();
     const nextConversations = res.data?.conversations || [];
     const isInitialLoad = Object.keys(lastMessageIds.value).length === 0;
@@ -1719,6 +2880,7 @@ const loadConversations = async (selectFirst = false) => {
     if (!activeStillExists) {
       activeConversationId.value = null;
       messages.value = [];
+      messagesHasMore.value = false;
     }
     if (selectFirst && !activeConversationId.value && conversations.value.length) {
       await selectConversation(conversations.value[0]);
@@ -1728,24 +2890,75 @@ const loadConversations = async (selectFirst = false) => {
   } catch (error) {
     showApiError(error);
   } finally {
-    loadingConversations.value = false;
+    if (!silent) loadingConversations.value = false;
   }
 };
 
 const selectConversation = async (conversation) => {
   activeConversationId.value = conversation.id;
+  infoPanelOpen.value = false;
   membersExpanded.value = false;
   cancelReply();
   await loadMessages(conversation.id, true);
   markConversationRead(conversation.id);
 };
 
-const loadMessages = async (conversationId, shouldScroll = true) => {
+const openGroupFromDirectory = async (conversation) => {
+  panelMode.value = "chats";
+  searchKeyword.value = "";
+  contactSearchKeyword.value = "";
+  await selectConversation(conversation);
+};
+
+const messageSortValue = (message = {}) => {
+  const createdAt = dayjs(message.createdAt).valueOf() || 0;
+  if (message.type !== "poll") return createdAt;
+  const pollUpdatedAt = dayjs(message.poll?.updatedAt).valueOf() || 0;
+  return Math.max(createdAt, pollUpdatedAt);
+};
+
+const messageSortRank = (message = {}) => {
+  if (message.type === "poll") return 2;
+  if (message.type === "system") return 1;
+  return 0;
+};
+
+const sortMessagesForDisplay = (messageList = []) =>
+  messageList.slice().sort((first, second) => {
+    const timeDiff = messageSortValue(first) - messageSortValue(second);
+    if (timeDiff !== 0) return timeDiff;
+    const rankDiff = messageSortRank(first) - messageSortRank(second);
+    if (rankDiff !== 0) return rankDiff;
+    return first.id - second.id;
+  });
+
+const mergeMessageLists = (currentMessages = [], nextMessages = []) => {
+  const mergedById = new Map();
+  currentMessages.forEach((message) => mergedById.set(message.id, message));
+  nextMessages.forEach((message) => mergedById.set(message.id, message));
+  return sortMessagesForDisplay(Array.from(mergedById.values()));
+};
+
+const loadMessages = async (conversationId, shouldScroll = true, options = {}) => {
+  const replaceMessages = options.replace ?? shouldScroll;
+  const requestId = replaceMessages ? ++messageRequestId : messageRequestId;
   try {
-    loadingMessages.value = shouldScroll;
-    const res = await chatApi.getMessages(conversationId);
-    if (conversationId !== activeConversationId.value) return;
-    messages.value = res.data?.messages || [];
+    if (shouldScroll) loadingMessages.value = true;
+    const res = await chatApi.getMessages(conversationId, { limit: messagePageSize });
+    if (requestId !== messageRequestId || conversationId !== activeConversationId.value) return;
+
+    const nextMessages = res.data?.messages || [];
+    const responseHasMore = Boolean(res.data?.hasMore);
+    if (replaceMessages || messages.value.length === 0) {
+      messages.value = sortMessagesForDisplay(nextMessages);
+      messagesHasMore.value = responseHasMore;
+    } else {
+      messages.value = mergeMessageLists(messages.value, nextMessages);
+      if (messages.value.length <= nextMessages.length) {
+        messagesHasMore.value = responseHasMore;
+      }
+    }
+
     if (conversationId === activeConversationId.value) {
       markConversationRead(conversationId);
     }
@@ -1753,18 +2966,57 @@ const loadMessages = async (conversationId, shouldScroll = true) => {
   } catch (error) {
     showApiError(error);
   } finally {
-    loadingMessages.value = false;
+    if (requestId === messageRequestId && shouldScroll) loadingMessages.value = false;
   }
+};
+
+const loadOlderMessages = async () => {
+  if (!activeConversationId.value || !messagesHasMore.value || loadingOlderMessages.value || loadingMessages.value) return;
+  if (!messages.value.length) return;
+
+  const conversationId = activeConversationId.value;
+  const beforeId = messages.value[0].id;
+  const listEl = messageListRef.value;
+  const previousScrollHeight = listEl?.scrollHeight || 0;
+
+  try {
+    loadingOlderMessages.value = true;
+    const res = await chatApi.getMessages(conversationId, {
+      limit: messagePageSize,
+      beforeId,
+    });
+    if (conversationId !== activeConversationId.value) return;
+
+    const olderMessages = res.data?.messages || [];
+    if (olderMessages.length) {
+      messages.value = mergeMessageLists(olderMessages, messages.value);
+      await nextTick();
+      if (listEl) {
+        listEl.scrollTop += listEl.scrollHeight - previousScrollHeight;
+      }
+    }
+    messagesHasMore.value = Boolean(res.data?.hasMore);
+  } catch (error) {
+    showApiError(error);
+  } finally {
+    loadingOlderMessages.value = false;
+  }
+};
+
+const handleMessageListScroll = () => {
+  const listEl = messageListRef.value;
+  if (!listEl || listEl.scrollTop > 80) return;
+  void loadOlderMessages();
 };
 
 const startDirectChat = async (userid) => {
   const targetUserid = String(userid || "").trim();
   if (!targetUserid) {
-    ElMessage.warning("Nhập số thẻ cần chat.");
+    ElMessage.warning(homeT("messages.enterChatUserid"));
     return;
   }
   if (targetUserid === currentUserid) {
-    ElMessage.warning("Không thể tự chat với chính mình.");
+    ElMessage.warning(homeT("messages.cannotChatSelf"));
     return;
   }
 
@@ -1814,7 +3066,7 @@ const toggleGroupMember = (userid) => {
 const createGroup = async () => {
   addGroupMemberChip();
   if (!groupName.value) {
-    ElMessage.warning("Nhập tên nhóm.");
+    ElMessage.warning(homeT("messages.enterGroupName"));
     return;
   }
 
@@ -1831,7 +3083,7 @@ const createGroup = async () => {
 const openAddMemberDialog = async () => {
   if (!activeConversationId.value) return;
   if (activeConversation.value?.type !== "group") {
-    ElMessage.warning("Chỉ nhóm chat mới có thể thêm thành viên.");
+    ElMessage.warning(homeT("messages.groupOnlyAddMembers"));
     return;
   }
   addMemberDialogVisible.value = true;
@@ -1868,7 +3120,7 @@ const toggleAddMember = (userid) => {
 const submitAddMembers = async () => {
   addMemberChip();
   if (!activeConversationId.value || addMemberUserids.value.length === 0) {
-    ElMessage.warning("Nhập số thẻ thành viên.");
+    ElMessage.warning(homeT("messages.enterMemberUserid"));
     return;
   }
 
@@ -1884,7 +3136,7 @@ const submitAddMembers = async () => {
 const removeMemberFromGroup = async (member) => {
   if (!activeConversationId.value || !member?.userid) return;
   if (!isCurrentUserGroupOwner.value) {
-    ElMessage.warning("Chỉ chủ nhóm mới có thể xóa thành viên.");
+    ElMessage.warning(homeT("messages.ownerOnlyRemoveMembers"));
     return;
   }
   if (member.userid === currentUserid) return;
@@ -1892,11 +3144,11 @@ const removeMemberFromGroup = async (member) => {
   const memberName = member.fullname || member.userid;
   try {
     await ElMessageBox.confirm(
-      `Xóa ${memberName} khỏi nhóm này?`,
-      "Xóa thành viên",
+      homeT("messages.removeMemberConfirm", { name: memberName }),
+      homeT("messages.removeMemberTitle"),
       {
-        confirmButtonText: "Xóa",
-        cancelButtonText: "Hủy",
+        confirmButtonText: homeT("actions.remove"),
+        cancelButtonText: homeT("actions.cancel"),
         type: "warning",
       },
     );
@@ -1907,7 +3159,7 @@ const removeMemberFromGroup = async (member) => {
   try {
     await chatApi.removeConversationMember(activeConversationId.value, member.userid);
     await loadConversations(false);
-    ElMessage.success("Đã xóa thành viên.");
+    ElMessage.success(homeT("messages.memberRemoved"));
   } catch (error) {
     showApiError(error);
   }
@@ -1935,7 +3187,7 @@ const submitNickname = async () => {
     if (conversationId) {
       await loadMessages(conversationId, false);
     }
-    ElMessage.success(nicknameValue.value ? "Đã lưu biệt danh." : "Đã xóa biệt danh.");
+    ElMessage.success(nicknameValue.value ? homeT("messages.nicknameSaved") : homeT("messages.nicknameRemoved"));
   } catch (error) {
     showApiError(error);
   }
@@ -2042,9 +3294,9 @@ const prepareAndUploadFiles = async (fileItems, type) => {
     pendingAttachmentType.value = type;
 
     if (type === "folder" && !composerText.value) {
-      composerText.value = folderNameFromPath(fileItems[0].relativePath) || "Thư mục";
+      composerText.value = folderNameFromPath(fileItems[0].relativePath) || homeT("fileKinds.folder");
     }
-    ElMessage.success(`Đã tải ${fileItems.length} tệp lên.`);
+    ElMessage.success(homeT("messages.filesUploaded", { count: fileItems.length }));
   } catch (error) {
     showApiError(error);
   } finally {
@@ -2062,16 +3314,16 @@ const toggleVoiceRecording = () => {
 
 const startVoiceRecording = async () => {
   if (!activeConversationId.value) {
-    ElMessage.warning("Vui long chon hoi thoai truoc khi ghi voice.");
+    ElMessage.warning(homeT("messages.selectConversationBeforeVoice"));
     return;
   }
   if (preparingRecording.value || isRecording.value || sending.value || uploading.value) return;
   if (pendingAttachments.value.length) {
-    ElMessage.warning("Vui long gui hoac xoa tep dang cho truoc khi ghi voice.");
+    ElMessage.warning(homeT("messages.clearPendingBeforeVoice"));
     return;
   }
   if (!window.navigator?.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-    ElMessage.error("Trinh duyet nay chua ho tro ghi am.");
+    ElMessage.error(homeT("messages.recordingUnsupported"));
     return;
   }
 
@@ -2096,7 +3348,7 @@ const startVoiceRecording = async () => {
       }
     };
     recorder.onerror = () => {
-      ElMessage.error("Khong the ghi am.");
+      ElMessage.error(homeT("messages.recordingFailed"));
       cancelVoiceRecording();
     };
     recorder.onstop = () => finalizeVoiceRecording(recorder.mimeType || mimeType);
@@ -2108,7 +3360,7 @@ const startVoiceRecording = async () => {
     recordingTimer = window.setInterval(updateRecordingDuration, 250);
   } catch {
     releaseRecordingStream();
-    ElMessage.error("Khong the truy cap micro.");
+    ElMessage.error(homeT("messages.microphoneAccessFailed"));
   } finally {
     preparingRecording.value = false;
   }
@@ -2135,14 +3387,14 @@ const finalizeVoiceRecording = async (mimeType) => {
 
   if (shouldDiscard) return;
   if (!chunks.length) {
-    ElMessage.warning("Voice dang trong.");
+    ElMessage.warning(homeT("messages.emptyVoice"));
     return;
   }
 
   const blobType = mimeType || chunks[0]?.type || "audio/webm";
   const blob = new Blob(chunks, { type: blobType });
   if (!blob.size) {
-    ElMessage.warning("Voice dang trong.");
+    ElMessage.warning(homeT("messages.emptyVoice"));
     return;
   }
 
@@ -2160,7 +3412,7 @@ const sendVoiceMessage = async (file) => {
     const uploadRes = await chatApi.uploadFiles([{ file, relativePath: file.name }]);
     const attachments = uploadRes.data?.attachments || [];
     if (!attachments.length) {
-      ElMessage.error("Khong the tai voice len.");
+      ElMessage.error(homeT("messages.voiceUploadFailed"));
       return;
     }
 
@@ -2251,7 +3503,7 @@ const handleDrop = async (event) => {
   isDragging.value = false;
 
   if (!activeConversationId.value) {
-    ElMessage.warning("Chọn hội thoại trước khi gửi tệp.");
+    ElMessage.warning(homeT("messages.selectConversationBeforeFile"));
     return;
   }
 
@@ -2331,7 +3583,259 @@ const cancelReply = () => {
   replyingTo.value = null;
 };
 
+const isPinnedMessage = (message = {}) => activePinnedMessage.value?.id === message.id;
+
+const pinMessage = (message = {}) => {
+  if (!activeConversationId.value || !message.id) return;
+  pinnedMessages.value = {
+    ...pinnedMessages.value,
+    [String(activeConversationId.value)]: {
+      ...toMessageReference(message),
+      createdAt: message.createdAt,
+    },
+  };
+  persistPinnedMessages();
+  ElMessage.success(homeT("messages.messagePinned"));
+};
+
+const unpinActiveMessage = () => {
+  if (!activeConversationId.value) return;
+  const nextPinnedMessages = { ...pinnedMessages.value };
+  delete nextPinnedMessages[String(activeConversationId.value)];
+  pinnedMessages.value = nextPinnedMessages;
+  persistPinnedMessages();
+  ElMessage.success(homeT("messages.messageUnpinned"));
+};
+
+const handleMessageOption = (command, message) => {
+  if (command === "pin") {
+    pinMessage(message);
+    return;
+  }
+  if (command === "unpin") {
+    unpinActiveMessage();
+    return;
+  }
+  if (command === "copy") {
+    void copyMessage(message);
+  }
+};
+
+const copyMessage = async (message = {}) => {
+  const text = copyableMessageText(message);
+  if (!text) {
+    ElMessage.warning(homeT("messages.noMessageToCopy"));
+    return;
+  }
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+    }
+    ElMessage.success(homeT("messages.messageCopied"));
+  } catch {
+    ElMessage.error(homeT("messages.copyFailed"));
+  }
+};
+
+const resetPollForm = () => {
+  pollForm.value = {
+    question: "",
+    options: ["", ""],
+    allowCustomOptions: false,
+    allowMultiple: false,
+    showVoters: true,
+  };
+};
+
+const openPollDialog = () => {
+  if (activeConversation.value?.type !== "group") {
+    ElMessage.warning(homeT("messages.groupOnlyPoll"));
+    return;
+  }
+  resetPollForm();
+  pollDialogVisible.value = true;
+};
+
+const addPollOption = () => {
+  if (pollForm.value.options.length >= 20) return;
+  pollForm.value.options.push("");
+};
+
+const removePollOption = (index) => {
+  if (pollForm.value.options.length <= 2) return;
+  pollForm.value.options.splice(index, 1);
+};
+
+const normalizedPollOptions = () =>
+  pollForm.value.options
+    .map((option) => option.trim())
+    .filter(Boolean);
+
+const submitPoll = async () => {
+  if (!activeConversationId.value || pollSubmitting.value) return;
+  if (activeConversation.value?.type !== "group") {
+    ElMessage.warning(homeT("messages.groupOnlyPoll"));
+    return;
+  }
+
+  const question = pollForm.value.question.trim();
+  const options = normalizedPollOptions();
+  if (!question) {
+    ElMessage.warning(homeT("messages.enterPollQuestion"));
+    return;
+  }
+  if (new Set(options.map((option) => option.toLowerCase())).size !== options.length) {
+    ElMessage.warning(homeT("messages.duplicatePollOption"));
+    return;
+  }
+  if (options.length < 2) {
+    ElMessage.warning(homeT("messages.enterPollOptions"));
+    return;
+  }
+
+  try {
+    pollSubmitting.value = true;
+    const res = await chatApi.createPoll(activeConversationId.value, {
+      question,
+      options,
+      allowCustomOptions: pollForm.value.allowCustomOptions,
+      allowMultiple: pollForm.value.allowMultiple,
+      showVoters: pollForm.value.showVoters,
+    });
+    if (res.data?.message) {
+      upsertMessage(res.data.message);
+    }
+    pollDialogVisible.value = false;
+    resetPollForm();
+    await loadConversations(false);
+    await scrollToBottom();
+  } catch (error) {
+    showApiError(error);
+  } finally {
+    pollSubmitting.value = false;
+  }
+};
+
+const setPollVoting = (messageId, isVoting) => {
+  const next = { ...pollVotingMessageIds.value };
+  if (isVoting) {
+    next[messageId] = true;
+  } else {
+    delete next[messageId];
+  }
+  pollVotingMessageIds.value = next;
+};
+
+const upsertMessage = (message) => {
+  if (!message?.id) return;
+  const index = messages.value.findIndex((item) => item.id === message.id);
+  if (index >= 0) {
+    messages.value.splice(index, 1, message);
+    messages.value = sortMessagesForDisplay(messages.value);
+    return;
+  }
+  messages.value = sortMessagesForDisplay([...messages.value, message]);
+};
+
+const submitPollVote = async (message, optionIds, customOption = "") => {
+  if (!message?.id || pollInteractionDisabled(message)) return;
+
+  try {
+    setPollVoting(message.id, true);
+    const res = await chatApi.votePoll(message.id, { optionIds, customOption });
+    if (res.data?.message) {
+      upsertMessage(res.data.message);
+    }
+  } catch (error) {
+    showApiError(error);
+  } finally {
+    setPollVoting(message.id, false);
+  }
+};
+
+const closePoll = async (message) => {
+  if (!canClosePoll(message) || pollVotingMessageIds.value[message.id]) return;
+
+  try {
+    setPollVoting(message.id, true);
+    const res = await chatApi.closePoll(message.id);
+    if (res.data?.message) {
+      upsertMessage(res.data.message);
+    }
+  } catch (error) {
+    showApiError(error);
+  } finally {
+    setPollVoting(message.id, false);
+  }
+};
+
+const votePollOption = (message, option, event) => {
+  if (!message?.poll || !option?.id) return;
+  const selected = new Set(message.poll.myOptionIds || []);
+  if (message.poll.allowMultiple) {
+    if (event?.target?.checked) {
+      selected.add(option.id);
+    } else {
+      selected.delete(option.id);
+    }
+  } else {
+    selected.clear();
+    selected.add(option.id);
+  }
+  void submitPollVote(message, Array.from(selected));
+};
+
+const submitCustomPollOption = (message) => {
+  const customOption = String(pollCustomInputs.value[message.id] || "").trim();
+  if (!customOption) return;
+  const optionIds = message.poll?.allowMultiple ? [...(message.poll.myOptionIds || [])] : [];
+  pollCustomInputs.value = { ...pollCustomInputs.value, [message.id]: "" };
+  void submitPollVote(message, optionIds, customOption);
+};
+
+const isPollOptionSelected = (message = {}, option = {}) =>
+  (message.poll?.myOptionIds || []).includes(option.id);
+
+const pollInteractionDisabled = (message = {}) =>
+  Boolean(message.poll?.isClosed || pollVotingMessageIds.value[message.id]);
+
+const canClosePoll = (message = {}) =>
+  message.type === "poll" && message.poll?.createdBy === currentUserid && !message.poll?.isClosed;
+
+const pollOptionPercent = (poll = {}, option = {}) => {
+  const totalOptionVotes = (poll.options || []).reduce((total, item) => total + Number(item.voteCount || 0), 0);
+  if (!totalOptionVotes) return 0;
+  return Math.round((Number(option.voteCount || 0) / totalOptionVotes) * 100);
+};
+
+const pollVoterNames = (option = {}) =>
+  (option.voters || [])
+    .map((voter) => voter.fullname || voter.userid)
+    .filter(Boolean)
+    .join(", ");
+
+const pollMetaLabel = (poll = {}) => {
+  const voteCount = Number(poll.totalVotes || 0);
+  const mode = poll.allowMultiple ? homeT("poll.multipleChoice") : homeT("poll.singleChoice");
+  return `${homeT("poll.voteCount", { count: voteCount })} · ${mode}`;
+};
+
 const openForwardDialog = (message) => {
+  if (message?.type === "poll" || message?.type === "system") {
+    ElMessage.warning(homeT("messages.pollForwardUnsupported"));
+    return;
+  }
   forwardingMessage.value = message;
   forwardTargetConversationId.value = conversations.value.find((conversation) => conversation.id !== activeConversationId.value)?.id
     || activeConversationId.value;
@@ -2357,7 +3861,7 @@ const submitForward = async () => {
       await scrollToBottom();
     }
     await loadConversations(false);
-    ElMessage.success("Đã chuyển tiếp tin nhắn.");
+    ElMessage.success(homeT("messages.messageForwarded"));
   } catch (error) {
     showApiError(error);
   } finally {
@@ -2373,7 +3877,7 @@ const sendCurrentMessage = async () => {
   const type = !hasAttachments && isLinkMessageContent(content) ? "link" : hasAttachments ? pendingAttachmentType.value : "text";
 
   if (!content && !hasAttachments) {
-    ElMessage.warning("Tin nhắn đang trống.");
+    ElMessage.warning(homeT("messages.emptyMessage"));
     return;
   }
 
@@ -2435,6 +3939,8 @@ const handleLogout = () => {
 
 const isOwnMessage = (message) => message.senderUserid === currentUserid;
 
+const isCenteredMessage = (message = {}) => message.type === "system" || message.type === "poll";
+
 const toMessageReference = (message = {}) => ({
   id: message.id,
   senderUserid: message.senderUserid,
@@ -2452,13 +3958,29 @@ const cloneAttachments = (attachments = []) =>
     relativePath: attachment.relativePath,
   }));
 
+const copyableMessageText = (message = {}) => {
+  const content = String(message.content || "").trim();
+  if (content) return content;
+
+  const attachmentText = (message.attachments || [])
+    .map((attachment) => {
+      return attachment.relativePath || attachment.fileName || "";
+    })
+    .filter(Boolean)
+    .join("\n");
+
+  return attachmentText || messageReferencePreview(message);
+};
+
 const messageReferencePreview = (message = {}) => {
+  if (message.type === "system") return message.content || homeT("previews.system");
+  if (message.type === "poll") return message.content || homeT("previews.poll");
   if (message.content) return message.content;
-  if (message.type === "voice") return "Voice chat";
-  if (message.type === "folder") return "Thư mục đính kèm";
-  if (message.type === "file") return "Tệp đính kèm";
-  if (message.type === "link") return "Liên kết";
-  return "Tin nhắn";
+  if (message.type === "voice") return homeT("previews.voice");
+  if (message.type === "folder") return homeT("previews.folderAttachment");
+  if (message.type === "file") return homeT("previews.fileAttachment");
+  if (message.type === "link") return homeT("previews.link");
+  return homeT("previews.message");
 };
 
 const messageTextParts = (content = "") => {
@@ -2568,20 +4090,20 @@ const fileKind = (attachment, messageType = "file") => {
 const fileKindLabel = (attachment, messageType = "file") => {
   const kind = fileKind(attachment, messageType);
   const labels = {
-    archive: "Tệp nén",
-    audio: "Âm thanh",
-    code: "Mã nguồn",
+    archive: homeT("fileKinds.archive"),
+    audio: homeT("fileKinds.audio"),
+    code: homeT("fileKinds.code"),
     excel: "Excel",
-    file: fileExt(attachment).toUpperCase() || "Tệp",
-    folder: "Thư mục",
-    image: "Hình ảnh",
+    file: fileExt(attachment).toUpperCase() || homeT("fileKinds.file"),
+    folder: homeT("fileKinds.folder"),
+    image: homeT("fileKinds.image"),
     pdf: "PDF",
     ppt: "PowerPoint",
     video: "Video",
-    voice: "Voice chat",
+    voice: homeT("previews.voice"),
     word: "Word",
   };
-  return labels[kind] || "Tệp";
+  return labels[kind] || homeT("fileKinds.file");
 };
 
 const fileBadge = (attachment, messageType = "file") => {
@@ -2623,6 +4145,22 @@ const folderNameFromPath = (path = "") => path.split("/").filter(Boolean)[0] || 
 
 const displayName = (user = {}) => user.nickname || user.fullname || user.userid || "";
 
+function normalizeDirectoryText(value = "") {
+  return String(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "D")
+    .toLocaleLowerCase("vi")
+    .trim();
+}
+
+function directoryLetter(name = "") {
+  const normalized = normalizeDirectoryText(name);
+  const first = normalized.charAt(0).toUpperCase();
+  return /^[A-Z]$/.test(first) ? first : "#";
+}
+
 const initials = (name = "") => {
   const words = name.trim().split(/\s+/).filter(Boolean);
   if (!words.length) return "YS";
@@ -2635,12 +4173,14 @@ const initials = (name = "") => {
 
 const lastMessagePreview = (conversation) => {
   const message = conversation.lastMessage;
-  if (!message) return "Chưa có tin nhắn";
-  const prefix = message.senderUserid === currentUserid ? "Bạn: " : "";
-  if (message.type === "voice") return `${prefix}Voice chat`;
-  if (message.type === "file") return `${prefix}Tệp đính kèm`;
-  if (message.type === "folder") return `${prefix}Thư mục đính kèm`;
-  if (message.type === "link") return `${prefix}Liên kết`;
+  if (!message) return homeT("previews.noMessages");
+  const prefix = message.senderUserid === currentUserid ? homeT("previews.youPrefix") : "";
+  if (message.type === "voice") return `${prefix}${homeT("previews.voice")}`;
+  if (message.type === "file") return `${prefix}${homeT("previews.fileAttachment")}`;
+  if (message.type === "folder") return `${prefix}${homeT("previews.folderAttachment")}`;
+  if (message.type === "link") return `${prefix}${homeT("previews.link")}`;
+  if (message.type === "system") return message.content || homeT("previews.system");
+  if (message.type === "poll") return `${prefix}${message.content || homeT("previews.poll")}`;
   return `${prefix}${message.content || ""}`;
 };
 
@@ -2652,6 +4192,35 @@ const conversationTime = (conversation) => {
 };
 
 const formatTime = (time) => (time ? dayjs(time).format("HH:mm") : "");
+
+const storageDateLabel = (time) => {
+  const value = dayjs(time);
+  if (!value.isValid()) return homeT("info.unknownDate");
+  if (locale.value === "vi") return `Ngày ${value.format("D")} Tháng ${value.format("M")}`;
+  if (locale.value === "cn") return value.format("M月D日");
+  return value.format("MMMM D");
+};
+
+const groupStorageItems = (items = [], getDate = () => "") => {
+  const groups = new Map();
+  items.forEach((item) => {
+    const date = dayjs(getDate(item));
+    const key = date.isValid() ? date.format("YYYY-MM-DD") : "unknown";
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        label: date.isValid() ? storageDateLabel(date) : homeT("info.unknownDate"),
+        sort: date.isValid() ? date.valueOf() : 0,
+        items: [],
+      });
+    }
+    groups.get(key).items.push(item);
+  });
+
+  return Array.from(groups.values()).sort((first, second) => second.sort - first.sort);
+};
+
+const storageItemKey = (item = {}) => item.fileUrl || `${item.id}-${item.content || ""}`;
 
 const formatDuration = (seconds = 0) => {
   const minutes = Math.floor(seconds / 60);
@@ -2676,7 +4245,16 @@ const safeLink = (value) => {
 const isLinkMessageContent = (value = "") => {
   const content = value.trim();
   if (!content || /\s/.test(content)) return false;
-  return /^(https?:\/\/)?([\w-]+\.)+[\w-]{2,}(\/\S*)?$/i.test(content);
+  const hasProtocol = /^https?:\/\//i.test(content);
+
+  try {
+    const url = new URL(hasProtocol ? content : `https://${content}`);
+    if (!["http:", "https:"].includes(url.protocol)) return false;
+    if (!url.hostname) return false;
+    return hasProtocol || url.hostname.includes(".");
+  } catch {
+    return false;
+  }
 };
 
 const cssUrl = (value = "") => value.replace(/["\\]/g, "\\$&");
@@ -2687,7 +4265,12 @@ const showApiError = (error) => {
     handleLogout();
     return;
   }
-  ElMessage.error(errorText[code] || code || "Có lỗi xảy ra.");
+  if (code === "INVALID_CREDENTIALS") {
+    ElMessage.error(homeT("messages.invalidCurrentPassword"));
+    return;
+  }
+  const translated = code ? t(`api_errors.${code}`) : "";
+  ElMessage.error(translated && translated !== `api_errors.${code}` ? translated : code || homeT("messages.genericError"));
 };
 </script>
 
@@ -2788,7 +4371,7 @@ a {
 }
 
 .app-rail {
-  background: var(--brand);
+  background: linear-gradient(180deg, #0891b2 0%, #0e7490 100%);
   color: #ffffff;
   display: flex;
   flex-direction: column;
@@ -2801,14 +4384,14 @@ a {
   height: 44px;
   display: grid;
   place-items: center;
-  border-radius: 8px;
-  background: #ffffff;
 }
 
-.rail-logo img {
-  width: 34px;
-  height: 34px;
-  object-fit: contain;
+.rail-logo :deep(.brand-logo) {
+  box-shadow: none;
+}
+
+.rail-logo :deep(.brand-logo__crop) {
+  border-radius: 7px;
 }
 
 .rail-actions,
@@ -2844,9 +4427,34 @@ a {
   color: #ffffff;
 }
 
+.rail-dropdown {
+  display: grid;
+}
+
+.language-rail-button {
+  position: relative;
+}
+
+.language-rail-button span {
+  position: absolute;
+  right: 7px;
+  bottom: 6px;
+  min-width: 15px;
+  height: 13px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1;
+}
+
 .rail-button:hover,
 .rail-button.active {
   background: rgba(255, 255, 255, 0.18);
+  transform: translateY(-1px);
 }
 
 .profile-rail-button {
@@ -2955,6 +4563,50 @@ a {
   color: #172033;
 }
 
+.search-clear-button {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.search-clear-button:hover {
+  background: #dbeafe;
+  color: var(--brand-dark);
+}
+
+.search-scope-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 18px 10px;
+  border-bottom: 1px solid #edf1f6;
+  overflow-x: auto;
+  flex: 0 0 auto;
+}
+
+.search-scope-tabs button {
+  height: 30px;
+  padding: 0 3px;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #516173;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.search-scope-tabs button.active {
+  border-color: var(--brand);
+  color: var(--brand-dark);
+}
+
 .quick-start {
   margin: 0 18px 12px;
   height: 42px;
@@ -2989,6 +4641,37 @@ a {
   padding: 4px 8px 12px;
 }
 
+.contact-menu {
+  display: grid;
+  gap: 6px;
+  padding: 6px 8px 12px;
+}
+
+.contact-menu-item {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  border-radius: 8px;
+  background: transparent;
+  color: #26354b;
+  cursor: pointer;
+  text-align: left;
+  font-weight: 800;
+}
+
+.contact-menu-item svg {
+  color: var(--brand-dark);
+  flex: 0 0 auto;
+}
+
+.contact-menu-item:hover,
+.contact-menu-item.active {
+  background: var(--brand-soft);
+  color: #102033;
+}
+
 .result-section {
   display: grid;
   gap: 4px;
@@ -3003,6 +4686,22 @@ a {
   text-transform: uppercase;
 }
 
+.view-all-search {
+  width: calc(100% - 20px);
+  min-height: 34px;
+  margin: 2px 10px 8px;
+  border-radius: 8px;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.view-all-search:hover {
+  background: #d7fbff;
+}
+
 .conversation-item {
   width: 100%;
   min-height: 68px;
@@ -3015,14 +4714,18 @@ a {
   color: inherit;
   cursor: pointer;
   text-align: left;
+  transition: background-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
 }
 
 .conversation-item:hover {
   background: var(--brand-softest);
+  box-shadow: 0 8px 20px rgba(8, 145, 178, 0.08);
+  transform: translateX(2px);
 }
 
 .conversation-item.active {
   background: var(--brand-soft);
+  box-shadow: inset 3px 0 0 var(--brand);
 }
 
 .conversation-item.has-unread .conversation-name {
@@ -3037,6 +4740,59 @@ a {
 
 .conversation-avatar {
   flex: 0 0 auto;
+}
+
+.avatar-presence-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+}
+
+.presence-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  background: #94a3b8;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.08);
+}
+
+.presence-dot.online {
+  background: #22c55e;
+}
+
+.presence-dot.small {
+  width: 11px;
+  height: 11px;
+  border-width: 2px;
+}
+
+.presence-dot.mini {
+  width: 9px;
+  height: 9px;
+  border-width: 1.5px;
+}
+
+.presence-dot.large {
+  width: 16px;
+  height: 16px;
+  right: 4px;
+  bottom: 4px;
+}
+
+.presence-text {
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.presence-text.online {
+  color: #16a34a;
 }
 
 .conversation-avatar.group {
@@ -3130,10 +4886,13 @@ a {
   padding: 9px 10px;
   border-radius: 8px;
   background: transparent;
+  transition: background-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
 }
 
 .user-result:hover {
   background: var(--brand-softest);
+  box-shadow: 0 8px 20px rgba(8, 145, 178, 0.08);
+  transform: translateX(2px);
 }
 
 .user-result-main {
@@ -3172,6 +4931,85 @@ a {
   color: var(--brand-dark);
 }
 
+.search-hit {
+  width: 100%;
+  min-height: 58px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.search-hit:hover {
+  background: var(--brand-softest);
+}
+
+.search-hit-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+  flex: 0 0 auto;
+}
+
+.search-hit-icon.pdf {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.search-hit-icon.excel {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.search-hit-icon.word,
+.search-hit-icon.file {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.search-hit-icon.folder,
+.search-hit-icon.archive {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.search-hit-main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.search-hit-main strong,
+.search-hit-main span,
+.search-hit-main p {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-hit-main strong {
+  color: #172033;
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.search-hit-main span,
+.search-hit-main p {
+  color: #7b8798;
+  font-size: 12px;
+}
+
 .list-state,
 .empty-list,
 .message-state,
@@ -3193,6 +5031,189 @@ a {
   display: grid;
   justify-items: center;
   gap: 8px;
+}
+
+.directory-pane {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+}
+
+.directory-header {
+  height: 72px;
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  border-bottom: 1px solid #dce3ee;
+  flex: 0 0 auto;
+}
+
+.directory-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: #172033;
+}
+
+.directory-title svg {
+  color: var(--brand-dark);
+  flex: 0 0 auto;
+}
+
+.directory-title h2 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.directory-content {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 22px 28px;
+  overflow: hidden;
+}
+
+.directory-section-title {
+  color: #334155;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.directory-tabs {
+  display: none;
+}
+
+.directory-search {
+  height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px;
+  border-radius: 8px;
+  background: #f2f5f9;
+  border: 1px solid transparent;
+  color: #6b778c;
+}
+
+.directory-search input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #172033;
+}
+
+.directory-search:focus-within {
+  border-color: var(--brand-focus);
+  box-shadow: 0 0 0 3px var(--brand-tint);
+}
+
+.directory-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.directory-letter-group {
+  display: grid;
+  gap: 4px;
+  padding-bottom: 18px;
+}
+
+.directory-letter-group h3 {
+  margin: 0;
+  padding: 0 0 6px 14px;
+  color: #475569;
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1.2;
+}
+
+.directory-item {
+  width: 100%;
+  min-height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: transparent;
+  color: #172033;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.directory-item:hover {
+  background: var(--brand-softest);
+  box-shadow: 0 10px 22px rgba(8, 145, 178, 0.1);
+  transform: translateX(2px);
+}
+
+.directory-item > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.directory-item strong,
+.directory-item small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.directory-item strong {
+  font-size: 15px;
+  font-weight: 850;
+}
+
+.directory-item small {
+  color: #7b8798;
+  font-size: 12px;
+}
+
+.directory-group-avatar {
+  width: 42px;
+  height: 42px;
+  position: relative;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--brand-focus), var(--brand));
+  color: #ffffff;
+}
+
+.directory-group-avatar em {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  min-width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 1px solid var(--brand-border);
+  color: var(--brand-dark);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 900;
 }
 
 .chat-pane {
@@ -3249,9 +5270,132 @@ a {
   font-size: 13px;
 }
 
+.conversation-search {
+  min-width: 210px;
+  width: min(320px, 32vw);
+  height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px 0 10px;
+  border-radius: 8px;
+  background: #f2f5f9;
+  border: 1px solid transparent;
+  color: #64748b;
+}
+
+.conversation-search:focus-within {
+  border-color: var(--brand-focus);
+  box-shadow: 0 0 0 3px var(--brand-tint);
+}
+
+.conversation-search input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #172033;
+}
+
+.conversation-search button {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.conversation-search button:hover:not(:disabled) {
+  background: #e0f2fe;
+  color: var(--brand-dark);
+}
+
+.conversation-search button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.conversation-search-count {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
 .chat-actions {
   display: flex;
   gap: 8px;
+}
+
+.pinned-message-bar {
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 18px;
+  border-bottom: 1px solid #dce3ee;
+  background: #ffffff;
+  flex: 0 0 auto;
+}
+
+.pinned-message-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: var(--brand-softest);
+  color: var(--brand-dark);
+  cursor: pointer;
+  text-align: left;
+}
+
+.pinned-message-main > span {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.pinned-message-main strong,
+.pinned-message-main em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pinned-message-main strong {
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.pinned-message-main em {
+  color: #64748b;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.pinned-message-remove {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #f0f4fa;
+  color: #64748b;
+  cursor: pointer;
+}
+
+.pinned-message-remove:hover {
+  background: #e2e8f0;
+  color: #243044;
 }
 
 .message-list {
@@ -3262,6 +5406,18 @@ a {
   padding: 20px 28px;
   background-position: center;
   background-size: cover;
+}
+
+.message-history-loader {
+  width: fit-content;
+  margin: 0 auto 12px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
 }
 
 .message-state,
@@ -3287,10 +5443,7 @@ a {
   max-width: 420px;
 }
 
-.welcome-logo {
-  width: 86px;
-  height: 86px;
-  object-fit: contain;
+.welcome-copy :deep(.brand-logo) {
   margin-bottom: 4px;
 }
 
@@ -3316,14 +5469,34 @@ a {
   gap: 8px;
   margin: 0 0 12px;
   align-items: flex-end;
+  content-visibility: auto;
+  contain-intrinsic-size: 86px;
+  animation: messageEnter 0.22s ease both;
 }
 
 .message-row.highlight .message-bubble {
   box-shadow: 0 0 0 3px var(--brand-tint), 0 1px 1px rgba(15, 23, 42, 0.04);
 }
 
+.message-row.search-match .message-bubble {
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.48), 0 1px 1px rgba(15, 23, 42, 0.04);
+}
+
+.message-row.current-search-match .message-bubble {
+  box-shadow: 0 0 0 3px var(--brand-focus), 0 12px 26px rgba(8, 145, 178, 0.16);
+}
+
+.message-row.pinned-message .message-bubble {
+  box-shadow: 0 0 0 2px var(--brand-focus), 0 10px 24px rgba(8, 145, 178, 0.14);
+}
+
 .message-row.own {
   justify-content: flex-end;
+}
+
+.message-row.system-message,
+.message-row.poll-message {
+  justify-content: center;
 }
 
 .message-stack {
@@ -3335,6 +5508,29 @@ a {
 
 .message-row.own .message-stack {
   align-items: flex-end;
+}
+
+.message-row.system-message .message-stack,
+.message-row.poll-message .message-stack {
+  width: min(460px, 92%);
+  max-width: min(460px, 92%);
+  align-items: center;
+}
+
+.message-content-row {
+  max-width: 100%;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.message-row.own .message-content-row {
+  flex-direction: row-reverse;
+}
+
+.message-row.system-message .message-content-row,
+.message-row.poll-message .message-content-row {
+  justify-content: center;
 }
 
 .sender-name {
@@ -3353,11 +5549,51 @@ a {
   border: 1px solid #e2e8f0;
   box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
   overflow-wrap: anywhere;
+  transition: box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.message-stack:hover .message-bubble {
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.1);
+  transform: translateY(-1px);
 }
 
 .message-row.own .message-bubble {
   background: var(--brand-soft);
   border-color: var(--brand-border);
+}
+
+.message-row.poll-message .message-bubble,
+.message-row.system-message .message-bubble {
+  background: #ffffff;
+  border-color: #dce5f1;
+}
+
+.message-row.system-message .message-bubble {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.message-row.system-message:hover .message-bubble {
+  box-shadow: none;
+  transform: none;
+}
+
+.system-notice {
+  display: inline-flex;
+  max-width: 100%;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: #eef4f8;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.35;
+  text-align: center;
+  overflow-wrap: anywhere;
 }
 
 .reply-reference {
@@ -3404,16 +5640,26 @@ a {
 .message-actions {
   display: flex;
   gap: 4px;
-  margin-top: 4px;
-  opacity: 0.62;
-  transition: opacity 0.15s ease;
+  margin-bottom: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  flex: 0 0 auto;
 }
 
-.message-stack:hover .message-actions {
+.message-row:hover .message-actions,
+.message-row:focus-within .message-actions {
   opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
 }
 
-.message-actions button {
+.message-actions :deep(.el-dropdown) {
+  display: grid;
+}
+
+.message-actions .message-action-button {
   width: 28px;
   height: 28px;
   display: grid;
@@ -3425,7 +5671,7 @@ a {
   cursor: pointer;
 }
 
-.message-actions button:hover {
+.message-actions .message-action-button:hover {
   color: var(--brand-dark);
   background: var(--brand-softest);
 }
@@ -3451,6 +5697,203 @@ a {
   word-break: break-all;
 }
 
+.poll-card {
+  width: min(420px, 82vw);
+  display: grid;
+  gap: 10px;
+}
+
+.poll-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: #172033;
+}
+
+.poll-card-header svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--brand-dark);
+}
+
+.poll-card-header strong {
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.poll-card-header span {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.poll-card-header em {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: #edf2f7;
+  color: #64748b;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.poll-options {
+  display: grid;
+  gap: 7px;
+}
+
+.poll-option {
+  position: relative;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 1px solid #dce5f1;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.poll-option.selected {
+  border-color: var(--brand);
+  background: var(--brand-softest);
+}
+
+.poll-option.disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.poll-option input {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  accent-color: var(--brand);
+}
+
+.poll-option-main {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  flex: 1;
+}
+
+.poll-option-text {
+  min-width: 0;
+  color: #1f2d42;
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.poll-voters {
+  color: #64748b;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.poll-option-count {
+  position: relative;
+  z-index: 1;
+  color: #526173;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.poll-option-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  background: rgba(42, 157, 143, 0.14);
+  transition: width 0.2s ease;
+}
+
+.poll-custom-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 6px;
+}
+
+.poll-custom-form input {
+  min-width: 0;
+  height: 34px;
+  border: 1px solid #dce5f1;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #ffffff;
+  color: #1f2d42;
+}
+
+.poll-custom-form button {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--brand);
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.poll-custom-form button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.poll-meta {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.poll-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.poll-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.poll-close-button,
+.poll-pin-button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #fff1f2;
+  color: #be123c;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.poll-pin-button {
+  background: var(--brand-softest);
+  color: var(--brand-dark);
+}
+
+.poll-close-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .message-bubble time {
   display: block;
   margin-top: 4px;
@@ -3466,19 +5909,56 @@ a {
   margin-top: 4px;
 }
 
-.image-grid a {
-  display: block;
+.image-card {
+  position: relative;
   border-radius: 8px;
   overflow: hidden;
   background: #dce3ee;
   border: 1px solid rgba(0, 0, 0, 0.05);
 }
 
-.image-grid img {
+.image-preview {
+  display: block;
+}
+
+.image-preview img {
   width: 100%;
   height: 150px;
   display: block;
   object-fit: cover;
+}
+
+.image-download-button,
+.shared-media-download {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.74);
+  color: #ffffff;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.18);
+  opacity: 0.92;
+  transform: translateY(0);
+  transition: opacity 0.18s ease, transform 0.18s ease, background-color 0.18s ease;
+}
+
+.image-download-button {
+  top: 7px;
+  right: 7px;
+  width: 32px;
+  height: 32px;
+}
+
+.image-card:hover .image-download-button,
+.image-download-button:focus-visible,
+.shared-media-item:hover .shared-media-download,
+.shared-media-download:focus-visible {
+  opacity: 1;
+}
+
+.image-download-button:hover,
+.shared-media-download:hover {
+  background: var(--brand-dark);
 }
 
 .voice-list {
@@ -3893,6 +6373,7 @@ textarea:focus,
   border-radius: 8px;
   background: var(--brand);
   color: #ffffff;
+  box-shadow: 0 10px 20px rgba(8, 145, 178, 0.18);
 }
 
 .send-button:disabled {
@@ -3906,6 +6387,153 @@ textarea:focus,
   overflow-y: auto;
   border-left: 1px solid #dce3ee;
   padding: 20px 16px;
+}
+
+.info-backdrop,
+.info-panel-close {
+  display: none;
+}
+
+.storage-view {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  margin: -20px -16px;
+  background: #ffffff;
+}
+
+.storage-header {
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) 40px;
+  align-items: center;
+  padding: 0 12px;
+  border-bottom: 1px solid #dce3ee;
+}
+
+.storage-header button {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: transparent;
+  color: #243044;
+  cursor: pointer;
+}
+
+.storage-header button:hover {
+  background: #f0f4fa;
+}
+
+.storage-header h3 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #172033;
+  font-size: 17px;
+}
+
+.storage-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 0 12px;
+  border-bottom: 1px solid #edf1f6;
+}
+
+.storage-tabs button {
+  min-width: 0;
+  height: 44px;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #475569;
+  cursor: pointer;
+  font-weight: 850;
+}
+
+.storage-tabs button.active {
+  border-color: var(--brand);
+  color: var(--brand-dark);
+}
+
+.storage-content {
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 14px;
+}
+
+.storage-group {
+  display: grid;
+  gap: 10px;
+  padding-bottom: 22px;
+}
+
+.storage-group h4 {
+  margin: 0;
+  color: #334155;
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.storage-media-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.storage-list {
+  display: grid;
+  gap: 8px;
+}
+
+.storage-list-item {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px;
+  border-radius: 8px;
+  background: #f5f7fb;
+  color: #172033;
+  cursor: pointer;
+  text-align: left;
+}
+
+.storage-list-item:hover {
+  background: var(--brand-softest);
+}
+
+.storage-list-item > span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.storage-list-item strong,
+.storage-list-item em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storage-list-item strong {
+  font-size: 13px;
+}
+
+.storage-list-item em {
+  color: #7b8798;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.storage-empty {
+  padding-top: 24px;
+  text-align: center;
 }
 
 .profile-block {
@@ -3994,6 +6622,20 @@ textarea:focus,
   letter-spacing: 0;
 }
 
+.section-text-button {
+  border-radius: 8px;
+  padding: 5px 8px;
+  background: var(--brand-softest);
+  color: var(--brand-dark);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.section-text-button:hover {
+  background: var(--brand-soft);
+}
+
 .member-list,
 .shared-files {
   display: grid;
@@ -4061,7 +6703,8 @@ textarea:focus,
   background: #ffe4e6;
 }
 
-.shared-files a {
+.shared-files a,
+.shared-files button {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -4069,13 +6712,36 @@ textarea:focus,
   padding: 8px;
   border-radius: 8px;
   background: #f5f7fb;
+  color: #172033;
+  cursor: pointer;
+  text-align: left;
 }
 
-.shared-files a > span:last-child {
+.shared-files a > span:last-child,
+.shared-files button > span:last-child {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.shared-files button > span:last-child {
+  display: grid;
+  gap: 2px;
+}
+
+.shared-files button strong,
+.shared-files button em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shared-files button em {
+  color: #7b8798;
+  font-size: 12px;
+  font-style: normal;
 }
 
 .shared-media-grid {
@@ -4084,13 +6750,19 @@ textarea:focus,
   gap: 6px;
 }
 
-.shared-media-grid a {
+.shared-media-item {
+  position: relative;
   aspect-ratio: 1;
-  display: grid;
-  place-items: center;
   overflow: hidden;
   border-radius: 8px;
   background: #f5f7fb;
+}
+
+.shared-media-preview {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
   color: var(--brand);
 }
 
@@ -4098,6 +6770,13 @@ textarea:focus,
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+.shared-media-download {
+  top: 5px;
+  right: 5px;
+  width: 28px;
+  height: 28px;
 }
 
 .shared-file-icon {
@@ -4146,6 +6825,11 @@ textarea:focus,
   color: var(--brand-dark);
 }
 
+.shared-file-icon.poll {
+  background: #ecfdf5;
+  color: #047857;
+}
+
 .dialog-form {
   display: grid;
   gap: 10px;
@@ -4154,6 +6838,86 @@ textarea:focus,
 .profile-settings {
   display: grid;
   gap: 18px;
+}
+
+.language-form {
+  padding-bottom: 16px;
+  border-bottom: 1px solid #edf1f6;
+}
+
+.language-selector {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.language-selector button {
+  min-width: 0;
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: #f5f7fb;
+  color: #334155;
+  cursor: pointer;
+  text-align: left;
+}
+
+.language-selector button.active {
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+  box-shadow: inset 0 0 0 1px var(--brand-focus);
+}
+
+.language-selector span {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #ffffff;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.language-selector strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.password-action-form {
+  padding-top: 16px;
+  border-top: 1px solid #edf1f6;
+}
+
+.password-open-button {
+  width: 100%;
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+  cursor: pointer;
+  font-weight: 850;
+}
+
+.password-open-button:hover {
+  background: #d7fbff;
+}
+
+.password-dialog-form {
+  padding-top: 0;
 }
 
 .avatar-editor {
@@ -4195,6 +6959,68 @@ textarea:focus,
   border: 1px solid #dce3ee;
   border-radius: 8px;
   padding: 0 10px;
+}
+
+.poll-option-editor {
+  display: grid;
+  gap: 8px;
+}
+
+.poll-option-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 7px;
+}
+
+.poll-option-input input {
+  min-width: 0;
+  height: 38px;
+  border: 1px solid #dce3ee;
+  border-radius: 8px;
+  padding: 0 10px;
+}
+
+.poll-option-input button,
+.poll-add-option {
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: 8px;
+  background: #edf2f7;
+  color: #334155;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.poll-option-input button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.poll-add-option {
+  width: fit-content;
+  padding: 0 12px;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+}
+
+.poll-settings {
+  display: grid;
+  gap: 9px;
+  padding-top: 4px;
+}
+
+.poll-settings label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 700;
+}
+
+.poll-settings input {
+  accent-color: var(--brand);
 }
 
 .chip-input {
@@ -4279,6 +7105,17 @@ textarea:focus,
   border-radius: 8px;
 }
 
+@keyframes messageEnter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 :deep(.el-avatar) {
   flex: 0 0 auto;
   background: var(--brand-soft);
@@ -4306,25 +7143,102 @@ textarea:focus,
   }
 
   .info-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 13000;
+    width: min(336px, calc(100vw - 28px));
+    display: block;
+    transform: translateX(104%);
+    transition: transform 0.22s ease;
+    box-shadow: -24px 0 60px rgba(15, 23, 42, 0.22);
+  }
+
+  .chat-shell.show-info .info-panel {
+    transform: translateX(0);
+  }
+
+  .info-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 12900;
     display: none;
+    background: rgba(15, 23, 42, 0.32);
+    cursor: pointer;
+  }
+
+  .chat-shell.show-info .info-backdrop {
+    display: block;
+  }
+
+  .info-panel-close {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    width: 34px;
+    height: 34px;
+    margin: 0 0 8px auto;
+    display: grid;
+    place-items: center;
+    border-radius: 8px;
+    background: #f0f4fa;
+    color: #243044;
+    cursor: pointer;
   }
 }
 
 @media (max-width: 820px) {
   .chat-shell {
     grid-template-columns: 1fr;
+    height: 100dvh;
   }
 
-  .app-rail,
-  .info-panel {
+  .app-rail {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 12800;
+    height: calc(64px + env(safe-area-inset-bottom));
+    flex-direction: row;
+    justify-content: space-between;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+    box-shadow: 0 -14px 34px rgba(15, 23, 42, 0.18);
+  }
+
+  .rail-logo {
     display: none;
+  }
+
+  .rail-actions,
+  .rail-bottom {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+  }
+
+  .rail-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .language-rail-button span {
+    right: 6px;
+    bottom: 5px;
   }
 
   .conversation-panel,
   .chat-pane {
     grid-column: 1;
     grid-row: 1;
-    height: 100vh;
+    height: calc(100dvh - 64px - env(safe-area-inset-bottom));
+    padding-bottom: 0;
+  }
+
+  .chat-shell:not(.has-active) .chat-pane {
+    grid-column: 1;
   }
 
   .chat-pane {
@@ -4335,13 +7249,105 @@ textarea:focus,
     display: none;
   }
 
+  .chat-shell.has-active .app-rail {
+    display: none;
+  }
+
+  .chat-shell.has-active .conversation-panel,
+  .chat-shell.has-active .chat-pane {
+    height: 100dvh;
+  }
+
   .chat-shell.has-active .chat-pane {
     display: flex;
+  }
+
+  .chat-shell.show-directory .conversation-panel {
+    display: none;
+  }
+
+  .chat-shell.show-directory .chat-pane {
+    display: flex;
+  }
+
+  .panel-header {
+    height: 76px;
+    padding: 14px 14px 10px;
+  }
+
+  .panel-header h1 {
+    font-size: 21px;
+  }
+
+  .search-box {
+    margin: 0 14px 10px;
+  }
+
+  .directory-header {
+    height: 64px;
+    padding: 0 16px;
+  }
+
+  .directory-content {
+    padding: 16px 14px;
+  }
+
+  .directory-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .directory-tabs button {
+    height: 38px;
+    border-radius: 8px;
+    background: #f0f4fa;
+    color: #334155;
+    cursor: pointer;
+    font-weight: 800;
+  }
+
+  .directory-tabs button.active {
+    background: var(--brand-soft);
+    color: var(--brand-dark);
   }
 
   .mobile-back {
     display: grid;
     place-items: center;
+  }
+
+  .chat-header {
+    min-height: 64px;
+    height: auto;
+    flex-wrap: wrap;
+    gap: 9px;
+    padding: 8px 10px;
+  }
+
+  .chat-title h2 {
+    font-size: 15px;
+  }
+
+  .chat-title span {
+    font-size: 12px;
+  }
+
+  .chat-actions {
+    gap: 4px;
+  }
+
+  .conversation-search {
+    order: 5;
+    width: 100%;
+    min-width: 0;
+    height: 36px;
+  }
+
+  .chat-actions .icon-button,
+  .mobile-back {
+    width: 34px;
+    height: 34px;
   }
 
   .message-list {
@@ -4374,6 +7380,33 @@ textarea:focus,
 
   .composer-tools {
     grid-column: 1 / -1;
+  }
+
+  .composer {
+    padding: 9px 10px calc(10px + env(safe-area-inset-bottom));
+  }
+
+  .notification-stack {
+    right: 10px;
+    bottom: calc(76px + env(safe-area-inset-bottom));
+  }
+
+  .info-panel {
+    width: min(336px, calc(100vw - 22px));
+    bottom: calc(64px + env(safe-area-inset-bottom));
+  }
+
+  .info-backdrop {
+    bottom: calc(64px + env(safe-area-inset-bottom));
+  }
+
+  .chat-shell.has-active .notification-stack {
+    bottom: calc(14px + env(safe-area-inset-bottom));
+  }
+
+  .chat-shell.has-active .info-panel,
+  .chat-shell.has-active .info-backdrop {
+    bottom: 0;
   }
 }
 </style>

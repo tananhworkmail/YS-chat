@@ -9,6 +9,7 @@ type ChatUser struct {
 	Avatar    string `json:"avatar"`
 	Role      string `json:"role,omitempty"`
 	IsContact bool   `json:"isContact"`
+	IsOnline  bool   `json:"isOnline"`
 }
 
 type ChatAttachment struct {
@@ -33,6 +34,7 @@ type ChatMessage struct {
 	ReplyTo        *ChatMessageReference `json:"replyTo,omitempty"`
 	ForwardedFrom  *ChatMessageReference `json:"forwardedFrom,omitempty"`
 	Attachments    []ChatAttachment      `json:"attachments"`
+	Poll           *ChatPoll             `json:"poll,omitempty"`
 	CreatedAt      time.Time             `json:"createdAt"`
 }
 
@@ -42,6 +44,41 @@ type ChatMessageReference struct {
 	SenderName   string `json:"senderName"`
 	Type         string `json:"type"`
 	Content      string `json:"content"`
+}
+
+type ChatPoll struct {
+	ID                 uint64           `json:"id"`
+	MessageID          uint64           `json:"messageId"`
+	Question           string           `json:"question"`
+	AllowCustomOptions bool             `json:"allowCustomOptions"`
+	AllowMultiple      bool             `json:"allowMultiple"`
+	ShowVoters         bool             `json:"showVoters"`
+	IsClosed           bool             `json:"isClosed"`
+	ClosedBy           string           `json:"closedBy,omitempty"`
+	ClosedAt           *time.Time       `json:"closedAt,omitempty"`
+	CreatedBy          string           `json:"createdBy"`
+	Options            []ChatPollOption `json:"options"`
+	MyOptionIDs        []uint64         `json:"myOptionIds"`
+	TotalVotes         int              `json:"totalVotes"`
+	CreatedAt          time.Time        `json:"createdAt"`
+	UpdatedAt          time.Time        `json:"updatedAt"`
+}
+
+type ChatPollOption struct {
+	ID        uint64          `json:"id"`
+	PollID    uint64          `json:"pollId"`
+	Text      string          `json:"text"`
+	CreatedBy string          `json:"createdBy"`
+	IsCustom  bool            `json:"isCustom"`
+	VoteCount int             `json:"voteCount"`
+	Voters    []ChatPollVoter `json:"voters,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
+}
+
+type ChatPollVoter struct {
+	Userid   string `json:"userid"`
+	Fullname string `json:"fullname"`
+	Avatar   string `json:"avatar"`
 }
 
 type ChatConversation struct {
@@ -55,4 +92,10 @@ type ChatConversation struct {
 	LastMessage *ChatMessage `json:"lastMessage"`
 	CreatedAt   time.Time    `json:"createdAt"`
 	UpdatedAt   time.Time    `json:"updatedAt"`
+}
+
+type ChatSearchResults struct {
+	Contacts []ChatUser    `json:"contacts"`
+	Messages []ChatMessage `json:"messages"`
+	Files    []ChatMessage `json:"files"`
 }

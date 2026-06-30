@@ -1,8 +1,8 @@
 <template>
   <header class="app-header">
     <div class="logo">
-      <img src="@/assets/Logo.png" alt="Logo" class="logo-img" />
-      <span class="logo-text">WEB YIHSHUO</span>
+      <BrandLogo size="sm" />
+      <span class="logo-text">YS CHAT</span>
     </div>
     <div class="search-container">
       <el-input
@@ -31,6 +31,7 @@
 import { ref, onMounted, nextTick } from "vue";
 import { UserFilled, Search } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
+import BrandLogo from "@/components/BrandLogo.vue";
 const userId = ref(null);
 const searchQuery = ref("");
 const searchInput = ref(null);
@@ -56,14 +57,15 @@ const showSearchMessage = () => {
 
 <style scoped>
 .app-header {
-  height: 55px;
-  background: #b6b7b8;
-  color: white;
+  height: 58px;
+  background: #ffffff;
+  color: #172033;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 20px;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+  padding: 0 22px;
+  border-bottom: 1px solid #dfe7f1;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
 }
 
 .logo {
@@ -72,20 +74,19 @@ const showSearchMessage = () => {
   gap: 10px;
 }
 
-.logo-img {
-  height: 35px;
-  width: auto;
+.logo :deep(.brand-logo) {
+  box-shadow: none;
 }
 
 .logo-text {
-  /* Sử dụng font hệ thống thay vì Montserrat */
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
     Arial, sans-serif;
-  font-size: 22px;
-  font-weight: 800; /* Tăng độ đậm để thay thế cho font Montserrat */
-  letter-spacing: 2px;
+  font-size: 18px;
+  line-height: 1.2;
+  font-weight: 900;
+  letter-spacing: 0;
   text-transform: uppercase;
-  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.3);
+  color: #152238;
 }
 
 .search-container {
@@ -102,11 +103,11 @@ const showSearchMessage = () => {
 }
 
 .user-info {
-  font-size: 16px;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 700;
   display: flex;
   align-items: center;
-  gap: 10px;
-  color: rgb(2, 2, 2);
+  gap: 8px;
+  color: #334155;
 }
 </style>

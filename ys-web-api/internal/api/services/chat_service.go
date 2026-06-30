@@ -2,6 +2,7 @@ package services
 
 import (
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,16 @@ const (
 	ErrChatCannotRemoveDirectMember  = "CHAT_CANNOT_REMOVE_DIRECT_MEMBER"
 	ErrChatOnlyOwnerCanManageMembers = "CHAT_ONLY_OWNER_CAN_MANAGE_MEMBERS"
 	ErrChatMemberNotFound            = "CHAT_MEMBER_NOT_FOUND"
+	ErrChatInvalidPoll               = "CHAT_INVALID_POLL"
+	ErrChatPollNotFound              = "CHAT_POLL_NOT_FOUND"
+	ErrChatPollClosed                = "CHAT_POLL_CLOSED"
+	ErrChatPollCustomOptionsDisabled = "CHAT_POLL_CUSTOM_OPTIONS_DISABLED"
+	defaultMessagePageSize           = 50
+	maxMessagePageSize               = 100
+	minPollOptions                   = 2
+	maxPollOptions                   = 20
+	maxPollQuestionLength            = 500
+	maxPollOptionLength              = 160
 )
 
 type ChatService struct {
@@ -68,6 +79,39 @@ type chatAttachmentRecord struct {
 	MimeType     string    `gorm:"column:mime_type"`
 	RelativePath string    `gorm:"column:relative_path"`
 	CreatedAt    time.Time `gorm:"column:created_at"`
+}
+
+type chatPollRecord struct {
+	ID                 uint64     `gorm:"column:id;primaryKey"`
+	MessageID          uint64     `gorm:"column:message_id"`
+	ConversationID     uint64     `gorm:"column:conversation_id"`
+	Question           string     `gorm:"column:question"`
+	AllowCustomOptions bool       `gorm:"column:allow_custom_options"`
+	AllowMultiple      bool       `gorm:"column:allow_multiple"`
+	ShowVoters         bool       `gorm:"column:show_voters"`
+	IsClosed           bool       `gorm:"column:is_closed"`
+	ClosedBy           string     `gorm:"column:closed_by"`
+	ClosedAt           *time.Time `gorm:"column:closed_at"`
+	CreatedBy          string     `gorm:"column:created_by"`
+	CreatedAt          time.Time  `gorm:"column:created_at"`
+	UpdatedAt          time.Time  `gorm:"column:updated_at"`
+}
+
+type chatPollOptionRecord struct {
+	ID        uint64    `gorm:"column:id;primaryKey"`
+	PollID    uint64    `gorm:"column:poll_id"`
+	Text      string    `gorm:"column:option_text"`
+	CreatedBy string    `gorm:"column:created_by"`
+	IsCustom  bool      `gorm:"column:is_custom"`
+	CreatedAt time.Time `gorm:"column:created_at"`
+}
+
+type chatPollVoteRecord struct {
+	ID        uint64    `gorm:"column:id;primaryKey"`
+	PollID    uint64    `gorm:"column:poll_id"`
+	OptionID  uint64    `gorm:"column:option_id"`
+	Userid    string    `gorm:"column:userid"`
+	CreatedAt time.Time `gorm:"column:created_at"`
 }
 
 type conversationRow struct {
@@ -118,6 +162,14 @@ type messageReferenceRow struct {
 	Content      string `gorm:"column:content"`
 }
 
+type pollVoteRow struct {
+	PollID   uint64 `gorm:"column:poll_id"`
+	OptionID uint64 `gorm:"column:option_id"`
+	Userid   string `gorm:"column:userid"`
+	Fullname string `gorm:"column:fullname"`
+	Avatar   string `gorm:"column:avatar"`
+}
+
 func (s *ChatService) SearchUsers(currentUserid, keyword string) ([]types.ChatUser, error) {
 	db, err := s.chatDB()
 	if err != nil {
@@ -146,6 +198,7 @@ func (s *ChatService) SearchUsers(currentUserid, keyword string) ([]types.ChatUs
 	if err := query.Scan(&users).Error; err != nil {
 		return nil, errors.New(ErrSystem)
 	}
+	applyUserPresence(users)
 	return users, nil
 }
 
@@ -168,7 +221,83 @@ func (s *ChatService) ListContacts(currentUserid string) ([]types.ChatUser, erro
 	`, currentUserid).Scan(&contacts).Error; err != nil {
 		return nil, errors.New(ErrSystem)
 	}
+	applyUserPresence(contacts)
 	return contacts, nil
+}
+
+func (s *ChatService) Search(currentUserid, keyword, scope string) (*types.ChatSearchResults, error) {
+	db, err := s.chatDB()
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	keyword = strings.TrimSpace(keyword)
+	scope = normalizeSearchScope(scope)
+	results := &types.ChatSearchResults{
+		Contacts: []types.ChatUser{},
+		Messages: []types.ChatMessage{},
+		Files:    []types.ChatMessage{},
+	}
+	if keyword == "" {
+		return results, nil
+	}
+
+	var contactsLimit, messagesLimit, filesLimit = 25, 40, 40
+	if scope == "all" {
+		contactsLimit, messagesLimit, filesLimit = 8, 12, 12
+	}
+
+	if scope == "all" || scope == "contacts" {
+		contacts, err := s.searchContacts(db, currentUserid, keyword, contactsLimit)
+		if err != nil {
+			return nil, errors.New(ErrSystem)
+		}
+		results.Contacts = contacts
+	}
+
+	if scope == "all" || scope == "messages" {
+		messages, err := s.searchMessages(db, currentUserid, keyword, messagesLimit)
+		if err != nil {
+			return nil, errors.New(ErrSystem)
+		}
+		results.Messages = messages
+	}
+
+	if scope == "all" || scope == "files" {
+		files, err := s.searchFiles(db, currentUserid, keyword, filesLimit)
+		if err != nil {
+			return nil, errors.New(ErrSystem)
+		}
+		results.Files = files
+	}
+
+	return results, nil
+}
+
+func (s *ChatService) PresenceAudience(userid string) ([]string, error) {
+	db, err := s.chatDB()
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	var userids []string
+	if err := db.Raw(`
+		SELECT owner_userid AS userid
+		FROM chat_contacts
+		WHERE contact_userid = ?
+		UNION
+		SELECT contact_userid AS userid
+		FROM chat_contacts
+		WHERE owner_userid = ?
+		UNION
+		SELECT cm_other.userid AS userid
+		FROM chat_members cm_self
+		JOIN chat_members cm_other ON cm_other.conversation_id = cm_self.conversation_id
+		WHERE cm_self.userid = ? AND cm_other.userid <> ?
+	`, userid, userid, userid, userid).Scan(&userids).Error; err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+	return userids, nil
 }
 
 func (s *ChatService) AddContact(currentUserid string, req request.AddContactRequest) (*types.ChatUser, error) {
@@ -203,6 +332,7 @@ func (s *ChatService) AddContact(currentUserid string, req request.AddContactReq
 	}
 
 	contact.IsContact = true
+	contact.IsOnline = RealtimeHubInstance.IsOnline(contact.Userid)
 	return &contact, nil
 }
 
@@ -271,6 +401,7 @@ func (s *ChatService) CreateDirectConversation(currentUserid string, req request
 	}
 
 	var newID uint64
+	var systemMessageID uint64
 	err = db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now()
 		conversation := chatConversationRecord{
@@ -288,12 +419,21 @@ func (s *ChatService) CreateDirectConversation(currentUserid string, req request
 			{"conversation_id": newID, "userid": currentUserid, "role": "member", "joined_at": now},
 			{"conversation_id": newID, "userid": targetUserid, "role": "member", "joined_at": now},
 		}
-		return tx.Table("chat_members").Create(&members).Error
+		if err := tx.Table("chat_members").Create(&members).Error; err != nil {
+			return err
+		}
+		creatorName, err := s.conversationUserDisplayName(tx, newID, currentUserid)
+		if err != nil {
+			return err
+		}
+		systemMessageID, err = s.createSystemMessage(tx, newID, currentUserid, creatorName+" đã tạo nhóm", now)
+		return err
 	})
 	if err != nil {
 		return nil, errors.New(ErrSystem)
 	}
 
+	s.broadcastSystemMessageByID(db, currentUserid, newID, systemMessageID)
 	return s.getConversation(db, currentUserid, newID)
 }
 
@@ -429,9 +569,19 @@ func (s *ChatService) AddMembers(currentUserid string, conversationID uint64, re
 		return nil, err
 	}
 
+	existingUserids, err := s.conversationExistingUserids(db, conversationID, userids)
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+	newUserids := subtractUserids(userids, existingUserids)
+	if len(newUserids) == 0 {
+		return s.getConversation(db, currentUserid, conversationID)
+	}
+
+	var systemMessageID uint64
 	err = db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now()
-		for _, userid := range userids {
+		for _, userid := range newUserids {
 			if err := tx.Exec(
 				"INSERT IGNORE INTO chat_members (conversation_id, userid, role, joined_at) VALUES (?, ?, 'member', ?)",
 				conversationID,
@@ -441,14 +591,27 @@ func (s *ChatService) AddMembers(currentUserid string, conversationID uint64, re
 				return err
 			}
 		}
-		return tx.Table("chat_conversations").
+		if err := tx.Table("chat_conversations").
 			Where("id = ?", conversationID).
-			Update("updated_at", now).Error
+			Update("updated_at", now).Error; err != nil {
+			return err
+		}
+		actorName, err := s.conversationUserDisplayName(tx, conversationID, currentUserid)
+		if err != nil {
+			return err
+		}
+		addedNames, err := s.conversationUserDisplayNames(tx, conversationID, newUserids)
+		if err != nil {
+			return err
+		}
+		systemMessageID, err = s.createSystemMessage(tx, conversationID, currentUserid, actorName+" đã thêm "+strings.Join(addedNames, ", ")+" vào nhóm", now)
+		return err
 	})
 	if err != nil {
 		return nil, errors.New(ErrSystem)
 	}
 
+	s.broadcastSystemMessageByID(db, currentUserid, conversationID, systemMessageID)
 	return s.getConversation(db, currentUserid, conversationID)
 }
 
@@ -496,9 +659,10 @@ func (s *ChatService) RemoveMember(currentUserid string, conversationID uint64, 
 	}
 
 	targetUserid = strings.TrimSpace(targetUserid)
-	if targetUserid == "" || targetUserid == currentUserid {
+	if targetUserid == "" {
 		return nil, errors.New(ErrInvalidInput)
 	}
+	isLeaving := targetUserid == currentUserid
 
 	if ok, err := s.isConversationMember(db, conversationID, currentUserid); err != nil {
 		return nil, errors.New(ErrSystem)
@@ -514,10 +678,12 @@ func (s *ChatService) RemoveMember(currentUserid string, conversationID uint64, 
 		return nil, errors.New(ErrChatCannotRemoveDirectMember)
 	}
 
-	if ok, err := s.isConversationOwner(db, conversationID, currentUserid); err != nil {
-		return nil, errors.New(ErrSystem)
-	} else if !ok {
-		return nil, errors.New(ErrChatOnlyOwnerCanManageMembers)
+	if !isLeaving {
+		if ok, err := s.isConversationOwner(db, conversationID, currentUserid); err != nil {
+			return nil, errors.New(ErrSystem)
+		} else if !ok {
+			return nil, errors.New(ErrChatOnlyOwnerCanManageMembers)
+		}
 	}
 
 	if ok, err := s.isConversationMember(db, conversationID, targetUserid); err != nil {
@@ -526,6 +692,20 @@ func (s *ChatService) RemoveMember(currentUserid string, conversationID uint64, 
 		return nil, errors.New(ErrChatMemberNotFound)
 	}
 
+	actorName, err := s.conversationUserDisplayName(db, conversationID, currentUserid)
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+	targetName, err := s.conversationUserDisplayName(db, conversationID, targetUserid)
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+	systemContent := targetName + " đã rời nhóm"
+	if !isLeaving {
+		systemContent = actorName + " đã xóa " + targetName + " khỏi nhóm"
+	}
+
+	var systemMessageID uint64
 	err = db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now()
 		result := tx.Exec(
@@ -539,9 +719,13 @@ func (s *ChatService) RemoveMember(currentUserid string, conversationID uint64, 
 		if result.RowsAffected == 0 {
 			return errors.New(ErrChatMemberNotFound)
 		}
-		return tx.Table("chat_conversations").
+		if err := tx.Table("chat_conversations").
 			Where("id = ?", conversationID).
-			Update("updated_at", now).Error
+			Update("updated_at", now).Error; err != nil {
+			return err
+		}
+		systemMessageID, err = s.createSystemMessage(tx, conversationID, currentUserid, systemContent, now)
+		return err
 	})
 	if err != nil {
 		if err.Error() == ErrChatMemberNotFound {
@@ -550,23 +734,34 @@ func (s *ChatService) RemoveMember(currentUserid string, conversationID uint64, 
 		return nil, errors.New(ErrSystem)
 	}
 
+	s.broadcastSystemMessageByID(db, currentUserid, conversationID, systemMessageID)
+	if isLeaving {
+		return &types.ChatConversation{ID: conversationID}, nil
+	}
 	return s.getConversation(db, currentUserid, conversationID)
 }
 
-func (s *ChatService) ListMessages(currentUserid string, conversationID uint64) ([]types.ChatMessage, error) {
+func (s *ChatService) ListMessages(currentUserid string, conversationID uint64, limit int, beforeID uint64) ([]types.ChatMessage, bool, error) {
 	db, err := s.chatDB()
 	if err != nil {
-		return nil, errors.New(ErrSystem)
+		return nil, false, errors.New(ErrSystem)
 	}
 
 	if ok, err := s.isConversationMember(db, conversationID, currentUserid); err != nil {
-		return nil, errors.New(ErrSystem)
+		return nil, false, errors.New(ErrSystem)
 	} else if !ok {
-		return nil, errors.New(ErrChatNoPermission)
+		return nil, false, errors.New(ErrChatNoPermission)
+	}
+
+	if limit <= 0 {
+		limit = defaultMessagePageSize
+	}
+	if limit > maxMessagePageSize {
+		limit = maxMessagePageSize
 	}
 
 	var rows []messageRow
-	if err := db.Raw(`
+	query := `
 		SELECT m.id, m.conversation_id, m.sender_userid,
 			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid) AS sender_name,
 			COALESCE(u.avatar, '') AS sender_avatar,
@@ -576,17 +771,30 @@ func (s *ChatService) ListMessages(currentUserid string, conversationID uint64) 
 		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = m.conversation_id AND cm_sender.userid = m.sender_userid
 		LEFT JOIN users u ON u.userid = m.sender_userid
 		WHERE m.conversation_id = ?
-		ORDER BY m.id DESC
-		LIMIT 200
-	`, conversationID).Scan(&rows).Error; err != nil {
-		return nil, errors.New(ErrSystem)
+	`
+	args := []interface{}{conversationID}
+	if beforeID > 0 {
+		query += " AND m.id < ?"
+		args = append(args, beforeID)
+	}
+	query += " ORDER BY m.id DESC LIMIT ?"
+	args = append(args, limit+1)
+
+	if err := db.Raw(query, args...).Scan(&rows).Error; err != nil {
+		return nil, false, errors.New(ErrSystem)
+	}
+
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
 	}
 
 	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
 		rows[i], rows[j] = rows[j], rows[i]
 	}
 
-	return s.buildMessages(db, rows)
+	messages, err := s.buildMessages(db, currentUserid, rows)
+	return messages, hasMore, err
 }
 
 func (s *ChatService) SendMessage(currentUserid string, conversationID uint64, req request.SendChatMessageRequest) (*types.ChatMessage, error) {
@@ -676,12 +884,294 @@ func (s *ChatService) SendMessage(currentUserid string, conversationID uint64, r
 		return nil, errors.New(ErrSystem)
 	}
 
-	message, err := s.loadMessageByID(db, messageID)
+	message, err := s.loadMessageByID(db, currentUserid, messageID)
 	if err != nil {
 		return nil, err
 	}
 	s.broadcastMessageCreated(db, conversationID, message)
 	go PushServiceInstance.SendChatMessageNotification(db, currentUserid, conversationID, message.ID, message.Type, message.Content)
+	return message, nil
+}
+
+func (s *ChatService) CreatePoll(currentUserid string, conversationID uint64, req request.CreatePollRequest) (*types.ChatMessage, error) {
+	db, err := s.chatDB()
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	if ok, err := s.isConversationMember(db, conversationID, currentUserid); err != nil {
+		return nil, errors.New(ErrSystem)
+	} else if !ok {
+		return nil, errors.New(ErrChatNoPermission)
+	}
+
+	conversationType, err := s.conversationType(db, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conversationType != "group" {
+		return nil, errors.New(ErrChatNoPermission)
+	}
+
+	question := strings.TrimSpace(req.Question)
+	options, err := normalizePollOptions(req.Options)
+	if err != nil {
+		return nil, err
+	}
+	if question == "" || len([]rune(question)) > maxPollQuestionLength || len(options) < minPollOptions {
+		return nil, errors.New(ErrChatInvalidPoll)
+	}
+
+	var systemMessageID uint64
+	var messageID uint64
+	err = db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		actorName, err := s.conversationUserDisplayName(tx, conversationID, currentUserid)
+		if err != nil {
+			return err
+		}
+		systemMessageID, err = s.createSystemMessage(tx, conversationID, currentUserid, actorName+" đã tạo bình chọn", now)
+		if err != nil {
+			return err
+		}
+
+		message := chatMessageRecord{
+			ConversationID: conversationID,
+			SenderUserid:   currentUserid,
+			MessageType:    "poll",
+			Content:        question,
+			CreatedAt:      now,
+		}
+		if err := tx.Table("chat_messages").Create(&message).Error; err != nil {
+			return err
+		}
+		messageID = message.ID
+
+		poll := chatPollRecord{
+			MessageID:          messageID,
+			ConversationID:     conversationID,
+			Question:           question,
+			AllowCustomOptions: req.AllowCustomOptions,
+			AllowMultiple:      req.AllowMultiple,
+			ShowVoters:         req.ShowVoters,
+			CreatedBy:          currentUserid,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}
+		if err := tx.Table("chat_polls").Create(&poll).Error; err != nil {
+			return err
+		}
+
+		for _, optionText := range options {
+			option := chatPollOptionRecord{
+				PollID:    poll.ID,
+				Text:      optionText,
+				CreatedBy: currentUserid,
+				IsCustom:  false,
+				CreatedAt: now,
+			}
+			if err := tx.Table("chat_poll_options").Create(&option).Error; err != nil {
+				return err
+			}
+		}
+
+		return tx.Table("chat_conversations").
+			Where("id = ?", conversationID).
+			Update("updated_at", now).Error
+	})
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	systemMessage, err := s.loadMessageByID(db, currentUserid, systemMessageID)
+	if err != nil {
+		return nil, err
+	}
+	message, err := s.loadMessageByID(db, currentUserid, messageID)
+	if err != nil {
+		return nil, err
+	}
+	s.broadcastMessageCreated(db, conversationID, systemMessage)
+	s.broadcastMessageCreated(db, conversationID, message)
+	go PushServiceInstance.SendChatMessageNotification(db, currentUserid, conversationID, message.ID, message.Type, message.Content)
+	return message, nil
+}
+
+func (s *ChatService) VotePoll(currentUserid string, messageID uint64, req request.VotePollRequest) (*types.ChatMessage, error) {
+	db, err := s.chatDB()
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	var poll chatPollRecord
+	if err := db.Table("chat_polls").Where("message_id = ?", messageID).Take(&poll).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New(ErrChatPollNotFound)
+		}
+		return nil, errors.New(ErrSystem)
+	}
+
+	if ok, err := s.isConversationMember(db, poll.ConversationID, currentUserid); err != nil {
+		return nil, errors.New(ErrSystem)
+	} else if !ok {
+		return nil, errors.New(ErrChatNoPermission)
+	}
+	if poll.IsClosed {
+		return nil, errors.New(ErrChatPollClosed)
+	}
+
+	optionIDs := normalizeUintIDs(req.OptionIDs)
+	customOption := strings.TrimSpace(req.CustomOption)
+	if customOption != "" {
+		if !poll.AllowCustomOptions {
+			return nil, errors.New(ErrChatPollCustomOptionsDisabled)
+		}
+		if len([]rune(customOption)) > maxPollOptionLength {
+			return nil, errors.New(ErrChatInvalidPoll)
+		}
+	}
+	if len(optionIDs) > maxPollOptions || (!poll.AllowMultiple && len(optionIDs)+boolInt(customOption != "") > 1) {
+		return nil, errors.New(ErrChatInvalidPoll)
+	}
+
+	if len(optionIDs) > 0 {
+		var foundOptionIDs []uint64
+		if err := db.Table("chat_poll_options").
+			Where("poll_id = ? AND id IN ?", poll.ID, optionIDs).
+			Pluck("id", &foundOptionIDs).Error; err != nil {
+			return nil, errors.New(ErrSystem)
+		}
+		if len(foundOptionIDs) != len(optionIDs) {
+			return nil, errors.New(ErrChatInvalidPoll)
+		}
+	}
+
+	previousOptionIDs, err := s.pollUserOptionIDs(db, poll.ID, currentUserid)
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	var systemMessageID uint64
+	err = db.Transaction(func(tx *gorm.DB) error {
+		selectedOptionIDs := append([]uint64{}, optionIDs...)
+		if customOption != "" {
+			customOptionID, err := s.findOrCreatePollOption(tx, poll.ID, currentUserid, customOption)
+			if err != nil {
+				return err
+			}
+			selectedOptionIDs = append(selectedOptionIDs, customOptionID)
+			selectedOptionIDs = normalizeUintIDs(selectedOptionIDs)
+		}
+		if !poll.AllowMultiple && len(selectedOptionIDs) > 1 {
+			return errors.New(ErrChatInvalidPoll)
+		}
+		voteAction := pollVoteAction(previousOptionIDs, selectedOptionIDs)
+		now := time.Now()
+
+		if err := tx.Table("chat_poll_votes").
+			Where("poll_id = ? AND userid = ?", poll.ID, currentUserid).
+			Delete(&chatPollVoteRecord{}).Error; err != nil {
+			return err
+		}
+
+		for _, optionID := range selectedOptionIDs {
+			vote := chatPollVoteRecord{
+				PollID:    poll.ID,
+				OptionID:  optionID,
+				Userid:    currentUserid,
+				CreatedAt: now,
+			}
+			if err := tx.Table("chat_poll_votes").Create(&vote).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Table("chat_polls").
+			Where("id = ?", poll.ID).
+			Update("updated_at", now).Error; err != nil {
+			return err
+		}
+		if voteAction != "" {
+			actorName, err := s.conversationUserDisplayName(tx, poll.ConversationID, currentUserid)
+			if err != nil {
+				return err
+			}
+			systemMessageID, err = s.createSystemMessage(tx, poll.ConversationID, currentUserid, actorName+" "+voteAction+" bình chọn \""+shortPollQuestion(poll.Question)+"\"", now)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		if err.Error() == ErrChatInvalidPoll {
+			return nil, err
+		}
+		return nil, errors.New(ErrSystem)
+	}
+
+	message, err := s.loadMessageByID(db, currentUserid, messageID)
+	if err != nil {
+		return nil, err
+	}
+	s.broadcastPollUpdated(db, poll.ConversationID, message)
+	s.broadcastSystemMessageByID(db, currentUserid, poll.ConversationID, systemMessageID)
+	return message, nil
+}
+
+func (s *ChatService) ClosePoll(currentUserid string, messageID uint64) (*types.ChatMessage, error) {
+	db, err := s.chatDB()
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	var poll chatPollRecord
+	if err := db.Table("chat_polls").Where("message_id = ?", messageID).Take(&poll).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New(ErrChatPollNotFound)
+		}
+		return nil, errors.New(ErrSystem)
+	}
+	if ok, err := s.isConversationMember(db, poll.ConversationID, currentUserid); err != nil {
+		return nil, errors.New(ErrSystem)
+	} else if !ok {
+		return nil, errors.New(ErrChatNoPermission)
+	}
+	if poll.CreatedBy != currentUserid {
+		return nil, errors.New(ErrChatNoPermission)
+	}
+
+	var systemMessageID uint64
+	if !poll.IsClosed {
+		err = db.Transaction(func(tx *gorm.DB) error {
+			now := time.Now()
+			if err := tx.Table("chat_polls").
+				Where("id = ?", poll.ID).
+				Updates(map[string]interface{}{
+					"is_closed":  true,
+					"closed_by":  currentUserid,
+					"closed_at":  now,
+					"updated_at": now,
+				}).Error; err != nil {
+				return err
+			}
+			actorName, err := s.conversationUserDisplayName(tx, poll.ConversationID, currentUserid)
+			if err != nil {
+				return err
+			}
+			systemMessageID, err = s.createSystemMessage(tx, poll.ConversationID, currentUserid, actorName+" đã đóng bình chọn \""+shortPollQuestion(poll.Question)+"\"", now)
+			return err
+		})
+		if err != nil {
+			return nil, errors.New(ErrSystem)
+		}
+	}
+
+	message, err := s.loadMessageByID(db, currentUserid, messageID)
+	if err != nil {
+		return nil, err
+	}
+	s.broadcastPollUpdated(db, message.ConversationID, message)
+	s.broadcastSystemMessageByID(db, currentUserid, message.ConversationID, systemMessageID)
 	return message, nil
 }
 
@@ -697,6 +1187,54 @@ func (s *ChatService) broadcastMessageCreated(db *gorm.DB, conversationID uint64
 		Message:        message,
 		SentAt:         time.Now(),
 	})
+}
+
+func (s *ChatService) broadcastPollUpdated(db *gorm.DB, conversationID uint64, message *types.ChatMessage) {
+	userids, err := s.conversationMemberUserids(db, conversationID)
+	if err != nil || len(userids) == 0 {
+		return
+	}
+
+	for _, userid := range userids {
+		messageForUser, err := s.loadMessageByID(db, userid, message.ID)
+		if err != nil {
+			continue
+		}
+		RealtimeHubInstance.BroadcastToUsers([]string{userid}, RealtimeEvent{
+			Type:           "chat.poll.updated",
+			ConversationID: conversationID,
+			Message:        messageForUser,
+			SentAt:         time.Now(),
+		})
+	}
+}
+
+func (s *ChatService) broadcastSystemMessageByID(db *gorm.DB, currentUserid string, conversationID uint64, messageID uint64) {
+	if messageID == 0 {
+		return
+	}
+	message, err := s.loadMessageByID(db, currentUserid, messageID)
+	if err != nil {
+		return
+	}
+	s.broadcastMessageCreated(db, conversationID, message)
+}
+
+func (s *ChatService) createSystemMessage(db *gorm.DB, conversationID uint64, senderUserid string, content string, createdAt time.Time) (uint64, error) {
+	message := chatMessageRecord{
+		ConversationID: conversationID,
+		SenderUserid:   senderUserid,
+		MessageType:    "system",
+		Content:        strings.TrimSpace(content),
+		CreatedAt:      createdAt,
+	}
+	if message.Content == "" {
+		return 0, nil
+	}
+	if err := db.Table("chat_messages").Create(&message).Error; err != nil {
+		return 0, err
+	}
+	return message.ID, nil
 }
 
 func (s *ChatService) chatDB() (*gorm.DB, error) {
@@ -794,6 +1332,47 @@ func ensureChatSchema(db *gorm.DB) error {
 			PRIMARY KEY (id),
 			INDEX idx_chat_message_attachments_message (message_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS chat_polls (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			message_id BIGINT UNSIGNED NOT NULL,
+			conversation_id BIGINT UNSIGNED NOT NULL,
+			question VARCHAR(500) NOT NULL,
+			allow_custom_options TINYINT(1) NOT NULL DEFAULT 0,
+			allow_multiple TINYINT(1) NOT NULL DEFAULT 0,
+			show_voters TINYINT(1) NOT NULL DEFAULT 1,
+			is_closed TINYINT(1) NOT NULL DEFAULT 0,
+			closed_by VARCHAR(64) NULL,
+			closed_at DATETIME NULL,
+			created_by VARCHAR(64) NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			UNIQUE KEY uk_chat_polls_message (message_id),
+			INDEX idx_chat_polls_conversation (conversation_id),
+			INDEX idx_chat_polls_created_by (created_by)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS chat_poll_options (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			poll_id BIGINT UNSIGNED NOT NULL,
+			option_text VARCHAR(160) NOT NULL,
+			created_by VARCHAR(64) NOT NULL,
+			is_custom TINYINT(1) NOT NULL DEFAULT 0,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			INDEX idx_chat_poll_options_poll (poll_id),
+			INDEX idx_chat_poll_options_created_by (created_by)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS chat_poll_votes (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			poll_id BIGINT UNSIGNED NOT NULL,
+			option_id BIGINT UNSIGNED NOT NULL,
+			userid VARCHAR(64) NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			UNIQUE KEY uk_chat_poll_votes_user_option (poll_id, option_id, userid),
+			INDEX idx_chat_poll_votes_poll_user (poll_id, userid),
+			INDEX idx_chat_poll_votes_option (option_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	}
 
 	for _, statement := range statements {
@@ -812,6 +1391,18 @@ func ensureChatSchema(db *gorm.DB) error {
 		return err
 	}
 	if err := ensureColumn(db, "chat_messages", "forwarded_from_message_id", "BIGINT UNSIGNED NULL AFTER reply_to_message_id"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "chat_polls", "is_closed", "TINYINT(1) NOT NULL DEFAULT 0 AFTER show_voters"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "chat_polls", "closed_by", "VARCHAR(64) NULL AFTER is_closed"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "chat_polls", "closed_at", "DATETIME NULL AFTER closed_by"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "chat_polls", "updated_at", "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at"); err != nil {
 		return err
 	}
 
@@ -914,6 +1505,76 @@ func (s *ChatService) conversationMemberUserids(db *gorm.DB, conversationID uint
 		Where("conversation_id = ?", conversationID).
 		Pluck("userid", &userids).Error
 	return userids, err
+}
+
+func (s *ChatService) conversationExistingUserids(db *gorm.DB, conversationID uint64, userids []string) ([]string, error) {
+	if len(userids) == 0 {
+		return []string{}, nil
+	}
+	var existing []string
+	err := db.Table("chat_members").
+		Where("conversation_id = ? AND userid IN ?", conversationID, userids).
+		Pluck("userid", &existing).Error
+	return existing, err
+}
+
+func (s *ChatService) conversationUserDisplayName(db *gorm.DB, conversationID uint64, userid string) (string, error) {
+	userid = strings.TrimSpace(userid)
+	if userid == "" {
+		return "", nil
+	}
+
+	var row struct {
+		Name string `gorm:"column:name"`
+	}
+	err := db.Raw(`
+		SELECT COALESCE(NULLIF(cm.nickname, ''), u.fullname, cm.userid) AS name
+		FROM chat_members cm
+		LEFT JOIN users u ON u.userid = cm.userid
+		WHERE cm.conversation_id = ? AND cm.userid = ?
+		LIMIT 1
+	`, conversationID, userid).Scan(&row).Error
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(row.Name) != "" {
+		return strings.TrimSpace(row.Name), nil
+	}
+	return s.userDisplayName(db, userid)
+}
+
+func (s *ChatService) conversationUserDisplayNames(db *gorm.DB, conversationID uint64, userids []string) ([]string, error) {
+	result := make([]string, 0, len(userids))
+	for _, userid := range userids {
+		name, err := s.conversationUserDisplayName(db, conversationID, userid)
+		if err != nil {
+			return nil, err
+		}
+		if name == "" {
+			name = userid
+		}
+		result = append(result, name)
+	}
+	return result, nil
+}
+
+func (s *ChatService) userDisplayName(db *gorm.DB, userid string) (string, error) {
+	var row struct {
+		Name string `gorm:"column:name"`
+	}
+	err := db.Raw(`
+		SELECT COALESCE(NULLIF(fullname, ''), userid) AS name
+		FROM users
+		WHERE userid = ?
+		LIMIT 1
+	`, userid).Scan(&row).Error
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(row.Name) != "" {
+		return strings.TrimSpace(row.Name), nil
+	}
+	return userid, nil
 }
 
 func (s *ChatService) messageInConversation(db *gorm.DB, conversationID uint64, messageID uint64) (bool, error) {
@@ -1074,10 +1735,38 @@ func (s *ChatService) loadMembers(db *gorm.DB, conversationIDs []uint64) (map[ui
 			Role:     row.Role,
 		})
 	}
+	for conversationID, members := range result {
+		applyUserPresence(members)
+		result[conversationID] = members
+	}
 	return result, nil
 }
 
-func (s *ChatService) loadMessageByID(db *gorm.DB, messageID uint64) (*types.ChatMessage, error) {
+func applyUserPresence(users []types.ChatUser) {
+	if len(users) == 0 {
+		return
+	}
+
+	userids := make([]string, 0, len(users))
+	seen := make(map[string]struct{}, len(users))
+	for _, user := range users {
+		if user.Userid == "" {
+			continue
+		}
+		if _, exists := seen[user.Userid]; exists {
+			continue
+		}
+		seen[user.Userid] = struct{}{}
+		userids = append(userids, user.Userid)
+	}
+
+	online := RealtimeHubInstance.OnlineSet(userids)
+	for index := range users {
+		users[index].IsOnline = online[users[index].Userid]
+	}
+}
+
+func (s *ChatService) loadMessageByID(db *gorm.DB, currentUserid string, messageID uint64) (*types.ChatMessage, error) {
 	var rows []messageRow
 	if err := db.Raw(`
 		SELECT m.id, m.conversation_id, m.sender_userid,
@@ -1092,7 +1781,7 @@ func (s *ChatService) loadMessageByID(db *gorm.DB, messageID uint64) (*types.Cha
 	`, messageID).Scan(&rows).Error; err != nil {
 		return nil, errors.New(ErrSystem)
 	}
-	messages, err := s.buildMessages(db, rows)
+	messages, err := s.buildMessages(db, currentUserid, rows)
 	if err != nil {
 		return nil, err
 	}
@@ -1102,7 +1791,7 @@ func (s *ChatService) loadMessageByID(db *gorm.DB, messageID uint64) (*types.Cha
 	return &messages[0], nil
 }
 
-func (s *ChatService) buildMessages(db *gorm.DB, rows []messageRow) ([]types.ChatMessage, error) {
+func (s *ChatService) buildMessages(db *gorm.DB, currentUserid string, rows []messageRow) ([]types.ChatMessage, error) {
 	if len(rows) == 0 {
 		return []types.ChatMessage{}, nil
 	}
@@ -1134,6 +1823,10 @@ func (s *ChatService) buildMessages(db *gorm.DB, rows []messageRow) ([]types.Cha
 	if err != nil {
 		return nil, errors.New(ErrSystem)
 	}
+	pollsByMessage, err := s.loadPolls(db, currentUserid, messageIDs)
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
 
 	messages := make([]types.ChatMessage, 0, len(rows))
 	for _, row := range rows {
@@ -1156,10 +1849,169 @@ func (s *ChatService) buildMessages(db *gorm.DB, rows []messageRow) ([]types.Cha
 			ReplyTo:        replyTo,
 			ForwardedFrom:  forwardedFrom,
 			Attachments:    attachmentsByMessage[row.ID],
+			Poll:           pollsByMessage[row.ID],
 			CreatedAt:      row.CreatedAt,
 		})
 	}
 	return messages, nil
+}
+
+func (s *ChatService) loadPolls(db *gorm.DB, currentUserid string, messageIDs []uint64) (map[uint64]*types.ChatPoll, error) {
+	result := make(map[uint64]*types.ChatPoll)
+	if len(messageIDs) == 0 {
+		return result, nil
+	}
+
+	var pollRows []chatPollRecord
+	if err := db.Table("chat_polls").
+		Where("message_id IN ?", messageIDs).
+		Order("id ASC").
+		Scan(&pollRows).Error; err != nil {
+		return nil, err
+	}
+	if len(pollRows) == 0 {
+		return result, nil
+	}
+
+	pollIDs := make([]uint64, 0, len(pollRows))
+	pollsByID := make(map[uint64]*types.ChatPoll, len(pollRows))
+	for _, row := range pollRows {
+		poll := &types.ChatPoll{
+			ID:                 row.ID,
+			MessageID:          row.MessageID,
+			Question:           row.Question,
+			AllowCustomOptions: row.AllowCustomOptions,
+			AllowMultiple:      row.AllowMultiple,
+			ShowVoters:         row.ShowVoters,
+			IsClosed:           row.IsClosed,
+			ClosedBy:           row.ClosedBy,
+			ClosedAt:           row.ClosedAt,
+			CreatedBy:          row.CreatedBy,
+			Options:            []types.ChatPollOption{},
+			MyOptionIDs:        []uint64{},
+			CreatedAt:          row.CreatedAt,
+			UpdatedAt:          row.UpdatedAt,
+		}
+		pollIDs = append(pollIDs, row.ID)
+		pollsByID[row.ID] = poll
+		result[row.MessageID] = poll
+	}
+
+	var optionRows []chatPollOptionRecord
+	if err := db.Table("chat_poll_options").
+		Where("poll_id IN ?", pollIDs).
+		Order("id ASC").
+		Scan(&optionRows).Error; err != nil {
+		return nil, err
+	}
+
+	optionIndex := make(map[uint64]struct {
+		pollID uint64
+		index  int
+	}, len(optionRows))
+	for _, row := range optionRows {
+		poll := pollsByID[row.PollID]
+		if poll == nil {
+			continue
+		}
+		poll.Options = append(poll.Options, types.ChatPollOption{
+			ID:        row.ID,
+			PollID:    row.PollID,
+			Text:      row.Text,
+			CreatedBy: row.CreatedBy,
+			IsCustom:  row.IsCustom,
+			Voters:    []types.ChatPollVoter{},
+			CreatedAt: row.CreatedAt,
+		})
+		optionIndex[row.ID] = struct {
+			pollID uint64
+			index  int
+		}{pollID: row.PollID, index: len(poll.Options) - 1}
+	}
+
+	var voteRows []pollVoteRow
+	if err := db.Raw(`
+		SELECT v.poll_id, v.option_id, v.userid,
+			COALESCE(u.fullname, v.userid) AS fullname,
+			COALESCE(u.avatar, '') AS avatar
+		FROM chat_poll_votes v
+		LEFT JOIN users u ON u.userid = v.userid
+		WHERE v.poll_id IN ?
+		ORDER BY v.created_at ASC, v.id ASC
+	`, pollIDs).Scan(&voteRows).Error; err != nil {
+		return nil, err
+	}
+
+	votersByPoll := make(map[uint64]map[string]struct{}, len(pollIDs))
+	for _, row := range voteRows {
+		optionPosition, ok := optionIndex[row.OptionID]
+		if !ok {
+			continue
+		}
+		poll := pollsByID[optionPosition.pollID]
+		if poll == nil {
+			continue
+		}
+		option := &poll.Options[optionPosition.index]
+		option.VoteCount++
+		if poll.ShowVoters {
+			option.Voters = append(option.Voters, types.ChatPollVoter{
+				Userid:   row.Userid,
+				Fullname: row.Fullname,
+				Avatar:   row.Avatar,
+			})
+		}
+		if row.Userid == currentUserid {
+			poll.MyOptionIDs = append(poll.MyOptionIDs, row.OptionID)
+		}
+		if votersByPoll[poll.ID] == nil {
+			votersByPoll[poll.ID] = make(map[string]struct{})
+		}
+		votersByPoll[poll.ID][row.Userid] = struct{}{}
+	}
+
+	for _, poll := range pollsByID {
+		poll.TotalVotes = len(votersByPoll[poll.ID])
+		sort.Slice(poll.MyOptionIDs, func(i, j int) bool {
+			return poll.MyOptionIDs[i] < poll.MyOptionIDs[j]
+		})
+	}
+
+	return result, nil
+}
+
+func (s *ChatService) findOrCreatePollOption(db *gorm.DB, pollID uint64, currentUserid string, optionText string) (uint64, error) {
+	var option chatPollOptionRecord
+	err := db.Table("chat_poll_options").
+		Where("poll_id = ? AND option_text = ?", pollID, optionText).
+		Take(&option).Error
+	if err == nil {
+		return option.ID, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, err
+	}
+
+	option = chatPollOptionRecord{
+		PollID:    pollID,
+		Text:      optionText,
+		CreatedBy: currentUserid,
+		IsCustom:  true,
+		CreatedAt: time.Now(),
+	}
+	if err := db.Table("chat_poll_options").Create(&option).Error; err != nil {
+		return 0, err
+	}
+	return option.ID, nil
+}
+
+func (s *ChatService) pollUserOptionIDs(db *gorm.DB, pollID uint64, userid string) ([]uint64, error) {
+	var optionIDs []uint64
+	err := db.Table("chat_poll_votes").
+		Where("poll_id = ? AND userid = ?", pollID, userid).
+		Order("option_id ASC").
+		Pluck("option_id", &optionIDs).Error
+	return optionIDs, err
 }
 
 func (s *ChatService) loadMessageReferences(db *gorm.DB, messageIDs []uint64) (map[uint64]*types.ChatMessageReference, error) {
@@ -1218,6 +2070,82 @@ func (s *ChatService) loadAttachments(db *gorm.DB, messageIDs []uint64) (map[uin
 	return result, nil
 }
 
+func (s *ChatService) searchContacts(db *gorm.DB, currentUserid, keyword string, limit int) ([]types.ChatUser, error) {
+	like := "%" + keyword + "%"
+	var contacts []types.ChatUser
+	if err := db.Raw(`
+		SELECT u.userid,
+			COALESCE(u.fullname, u.userid) AS fullname,
+			COALESCE(u.avatar, '') AS avatar,
+			1 AS is_contact
+		FROM chat_contacts c
+		JOIN users u ON u.userid = c.contact_userid
+		WHERE c.owner_userid = ?
+			AND (u.userid LIKE ? OR u.fullname LIKE ?)
+		ORDER BY u.fullname ASC, u.userid ASC
+		LIMIT ?
+	`, currentUserid, like, like, limit).Scan(&contacts).Error; err != nil {
+		return nil, err
+	}
+	applyUserPresence(contacts)
+	return contacts, nil
+}
+
+func (s *ChatService) searchMessages(db *gorm.DB, currentUserid, keyword string, limit int) ([]types.ChatMessage, error) {
+	like := "%" + keyword + "%"
+	var rows []messageRow
+	if err := db.Raw(`
+		SELECT m.id, m.conversation_id, m.sender_userid,
+			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid) AS sender_name,
+			COALESCE(u.avatar, '') AS sender_avatar,
+			m.message_type, COALESCE(m.content, '') AS content,
+			m.reply_to_message_id, m.forwarded_from_message_id, m.created_at
+		FROM chat_messages m
+		JOIN chat_members cm_self ON cm_self.conversation_id = m.conversation_id AND cm_self.userid = ?
+		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = m.conversation_id AND cm_sender.userid = m.sender_userid
+		LEFT JOIN users u ON u.userid = m.sender_userid
+		WHERE COALESCE(m.content, '') LIKE ?
+		ORDER BY m.id DESC
+		LIMIT ?
+	`, currentUserid, like, limit).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	return s.buildMessages(db, currentUserid, rows)
+}
+
+func (s *ChatService) searchFiles(db *gorm.DB, currentUserid, keyword string, limit int) ([]types.ChatMessage, error) {
+	like := "%" + keyword + "%"
+	var rows []messageRow
+	if err := db.Raw(`
+		SELECT DISTINCT m.id, m.conversation_id, m.sender_userid,
+			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid) AS sender_name,
+			COALESCE(u.avatar, '') AS sender_avatar,
+			m.message_type, COALESCE(m.content, '') AS content,
+			m.reply_to_message_id, m.forwarded_from_message_id, m.created_at
+		FROM chat_message_attachments a
+		JOIN chat_messages m ON m.id = a.message_id
+		JOIN chat_members cm_self ON cm_self.conversation_id = m.conversation_id AND cm_self.userid = ?
+		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = m.conversation_id AND cm_sender.userid = m.sender_userid
+		LEFT JOIN users u ON u.userid = m.sender_userid
+		WHERE a.file_name LIKE ? OR a.relative_path LIKE ?
+		ORDER BY m.id DESC
+		LIMIT ?
+	`, currentUserid, like, like, limit).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	return s.buildMessages(db, currentUserid, rows)
+}
+
+func normalizeSearchScope(scope string) string {
+	normalized := strings.ToLower(strings.TrimSpace(scope))
+	switch normalized {
+	case "contacts", "messages", "files":
+		return normalized
+	default:
+		return "all"
+	}
+}
+
 func normalizeUserids(userids []string) []string {
 	result := make([]string, 0, len(userids))
 	seen := make(map[string]bool)
@@ -1227,6 +2155,22 @@ func normalizeUserids(userids []string) []string {
 			continue
 		}
 		seen[userid] = true
+		result = append(result, userid)
+	}
+	return result
+}
+
+func subtractUserids(userids []string, existing []string) []string {
+	existingSet := make(map[string]bool, len(existing))
+	for _, userid := range existing {
+		existingSet[userid] = true
+	}
+
+	result := make([]string, 0, len(userids))
+	for _, userid := range userids {
+		if userid == "" || existingSet[userid] {
+			continue
+		}
 		result = append(result, userid)
 	}
 	return result
@@ -1269,6 +2213,90 @@ func chatUserDisplayName(user types.ChatUser) string {
 		return strings.TrimSpace(user.Fullname)
 	}
 	return user.Userid
+}
+
+func normalizePollOptions(options []string) ([]string, error) {
+	result := make([]string, 0, len(options))
+	seen := make(map[string]bool, len(options))
+	for _, option := range options {
+		option = strings.TrimSpace(option)
+		if option == "" {
+			continue
+		}
+		if len([]rune(option)) > maxPollOptionLength {
+			return nil, errors.New(ErrChatInvalidPoll)
+		}
+		key := strings.ToLower(option)
+		if seen[key] {
+			return nil, errors.New(ErrChatInvalidPoll)
+		}
+		seen[key] = true
+		result = append(result, option)
+	}
+	if len(result) > maxPollOptions {
+		return nil, errors.New(ErrChatInvalidPoll)
+	}
+	return result, nil
+}
+
+func pollVoteAction(previousOptionIDs []uint64, selectedOptionIDs []uint64) string {
+	if sameUintSet(previousOptionIDs, selectedOptionIDs) {
+		return ""
+	}
+	if len(previousOptionIDs) == 0 && len(selectedOptionIDs) > 0 {
+		return "đã bình chọn trong"
+	}
+	if len(previousOptionIDs) > 0 && len(selectedOptionIDs) == 0 {
+		return "đã hủy bình chọn trong"
+	}
+	return "đã đổi bình chọn trong"
+}
+
+func sameUintSet(first []uint64, second []uint64) bool {
+	first = normalizeUintIDs(first)
+	second = normalizeUintIDs(second)
+	if len(first) != len(second) {
+		return false
+	}
+	firstSet := make(map[uint64]bool, len(first))
+	for _, id := range first {
+		firstSet[id] = true
+	}
+	for _, id := range second {
+		if !firstSet[id] {
+			return false
+		}
+	}
+	return true
+}
+
+func shortPollQuestion(question string) string {
+	question = strings.TrimSpace(question)
+	runes := []rune(question)
+	if len(runes) <= 80 {
+		return question
+	}
+	return string(runes[:80]) + "..."
+}
+
+func normalizeUintIDs(ids []uint64) []uint64 {
+	result := make([]uint64, 0, len(ids))
+	seen := make(map[uint64]bool, len(ids))
+	for _, id := range ids {
+		if id == 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
+	return result
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func isValidMessageType(messageType string) bool {

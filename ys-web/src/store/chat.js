@@ -18,6 +18,10 @@ export const searchUsers = (keyword = "") => {
   return api.get("/chat/users", { params: { keyword } });
 };
 
+export const searchChat = (keyword = "", scope = "all") => {
+  return api.get("/chat/search", { params: { keyword, scope } });
+};
+
 export const getContacts = () => {
   return api.get("/chat/contacts");
 };
@@ -58,12 +62,24 @@ export const updateConversationMemberNickname = (conversationId, userid, nicknam
   return api.put(`/chat/conversations/${conversationId}/members/${encodeURIComponent(userid)}/nickname`, { nickname });
 };
 
-export const getMessages = (conversationId) => {
-  return api.get(`/chat/conversations/${conversationId}/messages`);
+export const getMessages = (conversationId, params = {}) => {
+  return api.get(`/chat/conversations/${conversationId}/messages`, { params });
 };
 
 export const sendMessage = (conversationId, payload) => {
   return api.post(`/chat/conversations/${conversationId}/messages`, payload);
+};
+
+export const createPoll = (conversationId, payload) => {
+  return api.post(`/chat/conversations/${conversationId}/polls`, payload);
+};
+
+export const votePoll = (messageId, payload) => {
+  return api.post(`/chat/messages/${messageId}/poll/votes`, payload);
+};
+
+export const closePoll = (messageId) => {
+  return api.post(`/chat/messages/${messageId}/poll/close`);
 };
 
 export const uploadFiles = (files) => {
@@ -109,6 +125,7 @@ export const getRealtimeUrl = () => {
 
 export default {
   searchUsers,
+  searchChat,
   getContacts,
   addContact,
   registerDeviceToken,
@@ -121,6 +138,9 @@ export default {
   updateConversationMemberNickname,
   getMessages,
   sendMessage,
+  createPoll,
+  votePoll,
+  closePoll,
   uploadFiles,
   getProfile,
   updateProfile,

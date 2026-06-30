@@ -12,6 +12,8 @@ import (
 type RealtimeEvent struct {
 	Type           string                  `json:"type"`
 	ConversationID uint64                  `json:"conversationId,omitempty"`
+	Userid         string                  `json:"userid,omitempty"`
+	IsOnline       bool                    `json:"isOnline,omitempty"`
 	Message        *types.ChatMessage      `json:"message,omitempty"`
 	Conversation   *types.ChatConversation `json:"conversation,omitempty"`
 	SentAt         time.Time               `json:"sentAt"`
@@ -48,6 +50,26 @@ func (h *RealtimeHub) Serve(userid string, conn *websocket.Conn) {
 	client.readPump(h)
 }
 
+func (h *RealtimeHub) IsOnline(userid string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients[userid]) > 0
+}
+
+func (h *RealtimeHub) OnlineSet(userids []string) map[string]bool {
+	result := make(map[string]bool, len(userids))
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, userid := range userids {
+		if userid == "" {
+			continue
+		}
+		result[userid] = len(h.clients[userid]) > 0
+	}
+	return result
+}
+
 func (h *RealtimeHub) BroadcastToUsers(userids []string, event RealtimeEvent) {
 	if event.SentAt.IsZero() {
 		event.SentAt = time.Now()
@@ -74,19 +96,25 @@ func (h *RealtimeHub) BroadcastToUsers(userids []string, event RealtimeEvent) {
 }
 
 func (h *RealtimeHub) register(client *realtimeClient) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	firstConnection := false
 
+	h.mu.Lock()
 	if h.clients[client.userid] == nil {
 		h.clients[client.userid] = make(map[*realtimeClient]struct{})
+		firstConnection = true
 	}
 	h.clients[client.userid][client] = struct{}{}
+	h.mu.Unlock()
+
+	if firstConnection {
+		h.broadcastPresence(client.userid, true)
+	}
 }
 
 func (h *RealtimeHub) unregister(client *realtimeClient) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	lastConnection := false
 
+	h.mu.Lock()
 	if clients, ok := h.clients[client.userid]; ok {
 		if _, exists := clients[client]; exists {
 			delete(clients, client)
@@ -95,8 +123,28 @@ func (h *RealtimeHub) unregister(client *realtimeClient) {
 		}
 		if len(clients) == 0 {
 			delete(h.clients, client.userid)
+			lastConnection = true
 		}
 	}
+	h.mu.Unlock()
+
+	if lastConnection {
+		h.broadcastPresence(client.userid, false)
+	}
+}
+
+func (h *RealtimeHub) broadcastPresence(userid string, isOnline bool) {
+	userids, err := ChatServiceInstance.PresenceAudience(userid)
+	if err != nil || len(userids) == 0 {
+		return
+	}
+
+	h.BroadcastToUsers(userids, RealtimeEvent{
+		Type:     "chat.presence.changed",
+		Userid:   userid,
+		IsOnline: isOnline,
+		SentAt:   time.Now(),
+	})
 }
 
 func (client *realtimeClient) readPump(h *RealtimeHub) {
