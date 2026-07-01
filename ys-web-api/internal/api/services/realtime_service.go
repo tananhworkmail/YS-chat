@@ -1,6 +1,7 @@
 package services
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,12 @@ func NewRealtimeHub() *RealtimeHub {
 }
 
 func (h *RealtimeHub) Serve(userid string, conn *websocket.Conn) {
+	userid = normalizeRealtimeUserid(userid)
+	if userid == "" {
+		_ = conn.Close()
+		return
+	}
+
 	client := &realtimeClient{
 		userid: userid,
 		conn:   conn,
@@ -51,6 +58,11 @@ func (h *RealtimeHub) Serve(userid string, conn *websocket.Conn) {
 }
 
 func (h *RealtimeHub) IsOnline(userid string) bool {
+	userid = normalizeRealtimeUserid(userid)
+	if userid == "" {
+		return false
+	}
+
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients[userid]) > 0
@@ -62,10 +74,13 @@ func (h *RealtimeHub) OnlineSet(userids []string) map[string]bool {
 	defer h.mu.RUnlock()
 
 	for _, userid := range userids {
-		if userid == "" {
+		normalizedUserid := normalizeRealtimeUserid(userid)
+		if normalizedUserid == "" {
 			continue
 		}
-		result[userid] = len(h.clients[userid]) > 0
+		isOnline := len(h.clients[normalizedUserid]) > 0
+		result[userid] = isOnline
+		result[normalizedUserid] = isOnline
 	}
 	return result
 }
@@ -80,6 +95,7 @@ func (h *RealtimeHub) BroadcastToUsers(userids []string, event RealtimeEvent) {
 	defer h.mu.RUnlock()
 
 	for _, userid := range userids {
+		userid = normalizeRealtimeUserid(userid)
 		if userid == "" || seen[userid] {
 			continue
 		}
@@ -134,6 +150,11 @@ func (h *RealtimeHub) unregister(client *realtimeClient) {
 }
 
 func (h *RealtimeHub) broadcastPresence(userid string, isOnline bool) {
+	userid = normalizeRealtimeUserid(userid)
+	if userid == "" {
+		return
+	}
+
 	userids, err := ChatServiceInstance.PresenceAudience(userid)
 	if err != nil || len(userids) == 0 {
 		return
@@ -145,6 +166,10 @@ func (h *RealtimeHub) broadcastPresence(userid string, isOnline bool) {
 		IsOnline: isOnline,
 		SentAt:   time.Now(),
 	})
+}
+
+func normalizeRealtimeUserid(userid string) string {
+	return strings.TrimSpace(userid)
 }
 
 func (client *realtimeClient) readPump(h *RealtimeHub) {

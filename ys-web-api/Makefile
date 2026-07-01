@@ -11,7 +11,7 @@ build-docker:
 	docker build . -t web-api
 
 run-docker:
-	docker run -itd --name web-api --restart always -p 3002:3002 web-api
+	docker run -itd --name web-api --restart always -p 3666:3666 web-api
 
 exec-docker:
 	docker exec -it web-api sh

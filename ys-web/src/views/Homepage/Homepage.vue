@@ -928,17 +928,20 @@
               <div v-if="mentionActive && mentionSuggestions.length" class="mention-menu">
                 <button
                   v-for="(member, index) in mentionSuggestions"
-                  :key="member.userid"
+                  :key="mentionOptionKey(member)"
                   :class="{ selected: index === mentionSelectedIndex }"
                   type="button"
                   @mousedown.prevent="insertMention(member)"
                 >
-                  <el-avatar :size="28" :src="member.avatar || undefined">
+                  <span v-if="isAllMentionOption(member)" class="mention-all-icon">
+                    <Users :size="16" />
+                  </span>
+                  <el-avatar v-else :size="28" :src="member.avatar || undefined">
                     {{ initials(displayName(member)) }}
                   </el-avatar>
                   <span>
-                    <strong>{{ displayName(member) }}</strong>
-                    <small>{{ member.userid }}</small>
+                    <strong>{{ mentionOptionName(member) }}</strong>
+                    <small>{{ mentionOptionDetail(member) }}</small>
                   </span>
                 </button>
               </div>
@@ -1222,7 +1225,7 @@
               </button>
             </el-tooltip>
             <el-tooltip
-              v-if="isCurrentUserGroupOwner && member.userid !== currentUserid"
+              v-if="isCurrentUserGroupOwner && !useridsMatch(member.userid, currentUserid)"
               :content="homeT('info.removeMember')"
               placement="left"
             >
@@ -1550,7 +1553,7 @@
             <button
               v-for="contact in contacts"
               :key="contact.userid"
-              :class="{ selected: groupMemberUserids.includes(contact.userid) }"
+              :class="{ selected: useridsInclude(groupMemberUserids, contact.userid) }"
               type="button"
               @click="toggleGroupMember(contact.userid)"
             >
@@ -1611,7 +1614,7 @@
             <button
               v-for="contact in contacts"
               :key="contact.userid"
-              :class="{ selected: addMemberUserids.includes(contact.userid) }"
+              :class="{ selected: useridsInclude(addMemberUserids, contact.userid) }"
               type="button"
               @click="toggleAddMember(contact.userid)"
             >
@@ -1819,7 +1822,15 @@ const router = useRouter();
 const { t, locale } = useI18n();
 const enableNativePush = import.meta.env.VITE_ENABLE_PUSH === "true";
 const fallbackRefreshMs = 60 * 1000;
-const currentUserid = localStorage.getItem("userid") || "";
+const normalizeUserid = (userid) => String(userid || "").trim();
+const useridsMatch = (first, second) => {
+  const normalizedFirst = normalizeUserid(first);
+  const normalizedSecond = normalizeUserid(second);
+  return normalizedFirst !== "" && normalizedFirst === normalizedSecond;
+};
+const hasUserid = (userid) => normalizeUserid(userid) !== "";
+const useridsInclude = (userids = [], userid) => userids.some((item) => useridsMatch(item, userid));
+const currentUserid = normalizeUserid(localStorage.getItem("userid"));
 const currentUser = ref({
   userid: currentUserid,
   fullname: localStorage.getItem("fullname") || "",
@@ -1943,6 +1954,12 @@ const searchScopeOptions = [
 const searchPreviewLimit = 3;
 const sharedPreviewLimit = 12;
 const messagePageSize = 50;
+const allMentionLabel = "All";
+const allMentionOption = {
+  userid: "__all__",
+  fullname: allMentionLabel,
+  mentionAll: true,
+};
 let messageRequestId = 0;
 const storageTabs = [
   { value: "media", labelKey: "info.media" },
@@ -2161,24 +2178,27 @@ const recordingDurationLabel = computed(() => formatDuration(recordingDuration.v
 const isCurrentUserGroupOwner = computed(() => {
   if (activeConversation.value?.type !== "group") return false;
   return (activeConversation.value.members || []).some(
-    (member) => member.userid === currentUserid && member.role === "owner",
+    (member) => useridsMatch(member.userid, currentUserid) && member.role === "owner",
   );
 });
 
-const shouldShowPresence = (user = {}) => Boolean(user.userid && user.userid !== currentUserid);
+const shouldShowPresence = (user = {}) => hasUserid(user.userid) && !useridsMatch(user.userid, currentUserid);
 const isUserOnline = (user = {}) => Boolean(user.isOnline);
 const presenceLabel = (user = {}) => homeT(isUserOnline(user) ? "presence.online" : "presence.offline");
 
 const conversationPresenceUser = (conversation = {}) => {
   if (conversation.type !== "direct") return null;
-  return (conversation.members || []).find((member) => member.userid !== currentUserid) || null;
+  return (conversation.members || []).find((member) => !useridsMatch(member.userid, currentUserid)) || null;
 };
 
 const presenceUserByUserid = (userid) =>
-  activeConversation.value?.members?.find((member) => member.userid === userid) || { userid, isOnline: false };
+  activeConversation.value?.members?.find((member) => useridsMatch(member.userid, userid)) || { userid, isOnline: false };
 
 const applyPresence = (userid, isOnline) => {
-  const updateUser = (user) => (user?.userid === userid ? { ...user, isOnline } : user);
+  const targetUserid = normalizeUserid(userid);
+  if (!targetUserid) return;
+
+  const updateUser = (user) => (useridsMatch(user?.userid, targetUserid) ? { ...user, isOnline } : user);
 
   contacts.value = contacts.value.map(updateUser);
   chatSearchResults.value = {
@@ -2196,14 +2216,35 @@ const mentionSuggestions = computed(() => {
   if (!activeConversation.value || !mentionActive.value) return [];
   const keyword = mentionQuery.value.trim().toLowerCase();
   const members = activeConversation.value.members || [];
-  return members
-    .filter((member) => member.userid !== currentUserid)
+  const allOption = isGroupConversation(activeConversation.value) && mentionOptionMatches(allMentionOption, keyword)
+    ? [allMentionOption]
+    : [];
+  const memberOptions = members
+    .filter((member) => !useridsMatch(member.userid, currentUserid))
     .filter((member) => {
-      if (!keyword) return true;
-      return `${member.fullname} ${member.nickname || ""} ${member.userid}`.toLowerCase().includes(keyword);
+      return mentionOptionMatches(member, keyword);
     })
     .slice(0, 6);
+
+  return [...allOption, ...memberOptions].slice(0, 7);
 });
+
+const isGroupConversation = (conversation = {}) => conversation.type === "group";
+
+const isAllMentionOption = (option = {}) => Boolean(option.mentionAll);
+
+const mentionOptionKey = (option = {}) => (isAllMentionOption(option) ? "mention-all" : option.userid);
+
+const mentionOptionName = (option = {}) => (isAllMentionOption(option) ? allMentionLabel : displayName(option));
+
+const mentionOptionDetail = (option = {}) => (isAllMentionOption(option) ? "@All" : option.userid);
+
+const mentionOptionMatches = (option = {}, keyword = "") => {
+  if (!keyword) return true;
+  return `${mentionOptionName(option)} ${option.fullname || ""} ${option.nickname || ""} ${option.userid || ""}`
+    .toLowerCase()
+    .includes(keyword);
+};
 
 onMounted(async () => {
   readState.value = loadStoredObject(readStateStorageKey);
@@ -2327,7 +2368,7 @@ const handleConversationNotifications = (nextConversations, isInitialLoad) => {
     const lastReadMessageId = Number(readState.value[conversationId] || 0);
     const isNewMessage = previousLastMessageId && lastMessage.id !== previousLastMessageId;
     const isUnreadFromStorage = isInitialLoad && lastReadMessageId > 0 && lastMessage.id > lastReadMessageId;
-    const fromOtherUser = lastMessage.senderUserid !== currentUserid;
+    const fromOtherUser = !useridsMatch(lastMessage.senderUserid, currentUserid);
     const isActiveConversation = conversationId === activeConversationId.value;
 
     if (fromOtherUser && (isNewMessage || isUnreadFromStorage)) {
@@ -2624,7 +2665,7 @@ const setPanelMode = (mode) => {
   }
 };
 
-const isContactUser = (userid) => contacts.value.some((contact) => contact.userid === userid);
+const isContactUser = (userid) => contacts.value.some((contact) => useridsMatch(contact.userid, userid));
 
 const withContactState = (user) => ({
   ...user,
@@ -2693,16 +2734,16 @@ const openContactDialog = () => {
 const upsertContact = (contact) => {
   if (!contact?.userid) return;
   const nextContact = { ...contact, isContact: true };
-  const withoutCurrent = contacts.value.filter((item) => item.userid !== nextContact.userid);
+  const withoutCurrent = contacts.value.filter((item) => !useridsMatch(item.userid, nextContact.userid));
   contacts.value = sortUsers([...withoutCurrent, nextContact]);
   chatSearchResults.value = {
     ...chatSearchResults.value,
     contacts: (chatSearchResults.value.contacts || []).map((user) =>
-      user.userid === nextContact.userid ? { ...user, isContact: true } : user,
+      useridsMatch(user.userid, nextContact.userid) ? { ...user, isContact: true } : user,
     ),
   };
   contactLookupUsers.value = contactLookupUsers.value.map((user) =>
-    user.userid === nextContact.userid ? { ...user, isContact: true } : user,
+    useridsMatch(user.userid, nextContact.userid) ? { ...user, isContact: true } : user,
   );
 };
 
@@ -2712,7 +2753,7 @@ const addContactByUserid = async (userid) => {
     ElMessage.warning(homeT("messages.enterUserid"));
     return null;
   }
-  if (contactUseridValue === currentUserid) {
+  if (useridsMatch(contactUseridValue, currentUserid)) {
     ElMessage.warning(homeT("messages.cannotAddSelf"));
     return null;
   }
@@ -3015,7 +3056,7 @@ const startDirectChat = async (userid) => {
     ElMessage.warning(homeT("messages.enterChatUserid"));
     return;
   }
-  if (targetUserid === currentUserid) {
+  if (useridsMatch(targetUserid, currentUserid)) {
     ElMessage.warning(homeT("messages.cannotChatSelf"));
     return;
   }
@@ -3044,19 +3085,19 @@ const openGroupDialog = async () => {
 const addGroupMemberChip = () => {
   const userid = groupMemberInput.value.trim();
   if (!userid) return;
-  if (!groupMemberUserids.value.includes(userid) && userid !== currentUserid) {
+  if (!useridsInclude(groupMemberUserids.value, userid) && !useridsMatch(userid, currentUserid)) {
     groupMemberUserids.value.push(userid);
   }
   groupMemberInput.value = "";
 };
 
 const removeGroupMemberChip = (userid) => {
-  groupMemberUserids.value = groupMemberUserids.value.filter((item) => item !== userid);
+  groupMemberUserids.value = groupMemberUserids.value.filter((item) => !useridsMatch(item, userid));
 };
 
 const toggleGroupMember = (userid) => {
-  if (!userid || userid === currentUserid) return;
-  if (groupMemberUserids.value.includes(userid)) {
+  if (!userid || useridsMatch(userid, currentUserid)) return;
+  if (useridsInclude(groupMemberUserids.value, userid)) {
     removeGroupMemberChip(userid);
     return;
   }
@@ -3096,21 +3137,21 @@ const addMemberChip = () => {
   const userid = addMemberInput.value.trim();
   if (!userid) return;
   const currentMemberUserids = activeConversation.value?.members?.map((member) => member.userid) || [];
-  if (!addMemberUserids.value.includes(userid) && !currentMemberUserids.includes(userid)) {
+  if (!useridsInclude(addMemberUserids.value, userid) && !useridsInclude(currentMemberUserids, userid)) {
     addMemberUserids.value.push(userid);
   }
   addMemberInput.value = "";
 };
 
 const removeAddMemberChip = (userid) => {
-  addMemberUserids.value = addMemberUserids.value.filter((item) => item !== userid);
+  addMemberUserids.value = addMemberUserids.value.filter((item) => !useridsMatch(item, userid));
 };
 
 const toggleAddMember = (userid) => {
-  if (!userid || userid === currentUserid) return;
+  if (!userid || useridsMatch(userid, currentUserid)) return;
   const currentMemberUserids = activeConversation.value?.members?.map((member) => member.userid) || [];
-  if (currentMemberUserids.includes(userid)) return;
-  if (addMemberUserids.value.includes(userid)) {
+  if (useridsInclude(currentMemberUserids, userid)) return;
+  if (useridsInclude(addMemberUserids.value, userid)) {
     removeAddMemberChip(userid);
     return;
   }
@@ -3139,7 +3180,7 @@ const removeMemberFromGroup = async (member) => {
     ElMessage.warning(homeT("messages.ownerOnlyRemoveMembers"));
     return;
   }
-  if (member.userid === currentUserid) return;
+  if (useridsMatch(member.userid, currentUserid)) return;
 
   const memberName = member.fullname || member.userid;
   try {
@@ -3265,7 +3306,7 @@ const insertMention = async (member) => {
   const input = composerInputRef.value;
   const cursor = input?.selectionStart ?? composerText.value.length;
   const start = mentionStartIndex.value >= 0 ? mentionStartIndex.value : cursor;
-  const mentionText = `@${displayName(member) || member.userid} `;
+  const mentionText = `@${mentionOptionName(member) || member.userid} `;
   composerText.value = `${composerText.value.slice(0, start)}${mentionText}${composerText.value.slice(cursor)}`;
   closeMentionMenu();
 
@@ -3423,7 +3464,7 @@ const sendVoiceMessage = async (file) => {
       attachments,
     });
     if (messageRes.data?.message) {
-      messages.value.push(messageRes.data.message);
+      upsertMessage(messageRes.data.message);
     }
     await loadConversations(false);
     await scrollToBottom();
@@ -3811,7 +3852,7 @@ const pollInteractionDisabled = (message = {}) =>
   Boolean(message.poll?.isClosed || pollVotingMessageIds.value[message.id]);
 
 const canClosePoll = (message = {}) =>
-  message.type === "poll" && message.poll?.createdBy === currentUserid && !message.poll?.isClosed;
+  message.type === "poll" && useridsMatch(message.poll?.createdBy, currentUserid) && !message.poll?.isClosed;
 
 const pollOptionPercent = (poll = {}, option = {}) => {
   const totalOptionVotes = (poll.options || []).reduce((total, item) => total + Number(item.voteCount || 0), 0);
@@ -3857,7 +3898,7 @@ const submitForward = async () => {
     forwardDialogVisible.value = false;
     forwardingMessage.value = null;
     if (forwardTargetConversationId.value === activeConversationId.value && res.data?.message) {
-      messages.value.push(res.data.message);
+      upsertMessage(res.data.message);
       await scrollToBottom();
     }
     await loadConversations(false);
@@ -3890,7 +3931,7 @@ const sendCurrentMessage = async () => {
       attachments: pendingAttachments.value,
     });
     if (res.data?.message) {
-      messages.value.push(res.data.message);
+      upsertMessage(res.data.message);
     }
     composerText.value = "";
     cancelReply();
@@ -3937,7 +3978,7 @@ const handleLogout = () => {
   router.push("/login");
 };
 
-const isOwnMessage = (message) => message.senderUserid === currentUserid;
+const isOwnMessage = (message) => useridsMatch(message.senderUserid, currentUserid);
 
 const isCenteredMessage = (message = {}) => message.type === "system" || message.type === "poll";
 
@@ -4023,6 +4064,11 @@ const mentionLabels = () => {
   const members = activeConversation.value?.members || [];
   const labels = [];
   const seen = new Set();
+
+  if (isGroupConversation(activeConversation.value)) {
+    labels.push({ text: `@${allMentionLabel}`, lower: `@${allMentionLabel.toLowerCase()}` });
+    seen.add(`@${allMentionLabel.toLowerCase()}`);
+  }
 
   members.forEach((member) => {
     [`@${displayName(member)}`, `@${member.fullname}`, `@${member.userid}`].forEach((label) => {
@@ -4174,7 +4220,7 @@ const initials = (name = "") => {
 const lastMessagePreview = (conversation) => {
   const message = conversation.lastMessage;
   if (!message) return homeT("previews.noMessages");
-  const prefix = message.senderUserid === currentUserid ? homeT("previews.youPrefix") : "";
+  const prefix = useridsMatch(message.senderUserid, currentUserid) ? homeT("previews.youPrefix") : "";
   if (message.type === "voice") return `${prefix}${homeT("previews.voice")}`;
   if (message.type === "file") return `${prefix}${homeT("previews.fileAttachment")}`;
   if (message.type === "folder") return `${prefix}${homeT("previews.folderAttachment")}`;
@@ -6303,6 +6349,18 @@ a {
 .mention-menu span {
   min-width: 0;
   display: grid;
+}
+
+.mention-menu .mention-all-icon {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--brand-softest);
+  color: var(--brand);
 }
 
 .mention-menu strong,

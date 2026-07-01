@@ -49,7 +49,7 @@ Without Firebase credentials, backend still runs but skips sending push notifica
 
 ## HTTPS/domain
 
-Mobile apps should call the API through HTTPS. Use nginx as TLS terminator and proxy to Go backend port `9999`.
+Mobile apps should call the API through HTTPS. Use nginx as TLS terminator and proxy to Go backend port `3666`.
 
 Example config:
 

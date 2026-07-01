@@ -47,8 +47,8 @@ COPY --from=build_base /src/log /app/log
 # Phân quyền thực thi
 RUN chmod +x /app/webapi
 
-# Mở cổng 9999
-EXPOSE 9999
+# Mở cổng 3666
+EXPOSE 3666
 
 # Chạy ứng dụng
 CMD ["/app/webapi"]

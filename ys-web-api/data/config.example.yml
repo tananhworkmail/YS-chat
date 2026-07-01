@@ -1,12 +1,12 @@
 server:
-  port: "9999"
+  port: "3666"
   secret: "change-me"
   # release | debug
   mode: "debug"
 
 cors:
   global: "true"
-  ips: "http://localhost:9999"
+  ips: "http://localhost:1800"
 
 database:
   # mysql | postgres | sqlite | sqlserver

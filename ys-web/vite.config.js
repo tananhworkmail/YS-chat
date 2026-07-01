@@ -81,16 +81,17 @@ export default defineConfig({
 
   server: {
     host: "0.0.0.0",
-    port: 8888,
+    port: 1800,
     strictPort: true,
 
     proxy: {
       "/api/v1": {
-        target: "http://192.168.71.87:9999",
+        target: "http://192.168.71.87:3666",
         changeOrigin: true,
+        ws: true,
       },
       "/uploads": {
-        target: "http://192.168.71.87:9999",
+        target: "http://192.168.71.87:3666",
         changeOrigin: true,
       },
     },
