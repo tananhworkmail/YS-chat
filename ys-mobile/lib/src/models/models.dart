@@ -93,7 +93,10 @@ class ChatMessage {
     this.senderAvatar = '',
     this.type = 'text',
     this.content = '',
+    this.replyTo,
+    this.forwardedFrom,
     this.attachments = const [],
+    this.poll,
     this.createdAt,
   });
 
@@ -104,10 +107,16 @@ class ChatMessage {
   final String senderAvatar;
   final String type;
   final String content;
+  final ChatMessageReference? replyTo;
+  final ChatMessageReference? forwardedFrom;
   final List<ChatAttachment> attachments;
+  final ChatPoll? poll;
   final DateTime? createdAt;
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) {
+    final replyToJson = json['replyTo'];
+    final forwardedFromJson = json['forwardedFrom'];
+    final pollJson = json['poll'];
     return ChatMessage(
       id: _asInt(json['id']),
       conversationId: _asInt(json['conversationId']),
@@ -116,10 +125,138 @@ class ChatMessage {
       senderAvatar: '${json['senderAvatar'] ?? ''}',
       type: '${json['type'] ?? 'text'}',
       content: '${json['content'] ?? ''}',
+      replyTo: replyToJson is Map
+          ? ChatMessageReference.fromJson(
+              Map<String, dynamic>.from(replyToJson))
+          : null,
+      forwardedFrom: forwardedFromJson is Map
+          ? ChatMessageReference.fromJson(
+              Map<String, dynamic>.from(forwardedFromJson))
+          : null,
       attachments: _listOfMaps(json['attachments'])
           .map(ChatAttachment.fromJson)
           .toList(),
+      poll: pollJson is Map
+          ? ChatPoll.fromJson(Map<String, dynamic>.from(pollJson))
+          : null,
       createdAt: DateTime.tryParse('${json['createdAt'] ?? ''}'),
+    );
+  }
+}
+
+class ChatPoll {
+  const ChatPoll({
+    required this.id,
+    required this.messageId,
+    required this.question,
+    this.allowCustomOptions = false,
+    this.allowMultiple = false,
+    this.showVoters = false,
+    this.isClosed = false,
+    this.createdBy = '',
+    this.options = const [],
+    this.myOptionIds = const [],
+    this.totalVotes = 0,
+  });
+
+  final int id;
+  final int messageId;
+  final String question;
+  final bool allowCustomOptions;
+  final bool allowMultiple;
+  final bool showVoters;
+  final bool isClosed;
+  final String createdBy;
+  final List<ChatPollOption> options;
+  final List<int> myOptionIds;
+  final int totalVotes;
+
+  factory ChatPoll.fromJson(Map<String, dynamic> json) {
+    final rawOptionIds = json['myOptionIds'] ?? json['myOptionIDs'];
+    return ChatPoll(
+      id: _asInt(json['id']),
+      messageId: _asInt(json['messageId']),
+      question: '${json['question'] ?? ''}',
+      allowCustomOptions: json['allowCustomOptions'] == true,
+      allowMultiple: json['allowMultiple'] == true,
+      showVoters: json['showVoters'] == true,
+      isClosed: json['isClosed'] == true,
+      createdBy: '${json['createdBy'] ?? ''}',
+      options:
+          _listOfMaps(json['options']).map(ChatPollOption.fromJson).toList(),
+      myOptionIds: rawOptionIds is List
+          ? rawOptionIds.map(_asInt).where((id) => id > 0).toList()
+          : const [],
+      totalVotes: _asInt(json['totalVotes']),
+    );
+  }
+}
+
+class ChatPollOption {
+  const ChatPollOption({
+    required this.id,
+    required this.text,
+    this.voteCount = 0,
+    this.voters = const [],
+  });
+
+  final int id;
+  final String text;
+  final int voteCount;
+  final List<ChatPollVoter> voters;
+
+  factory ChatPollOption.fromJson(Map<String, dynamic> json) {
+    return ChatPollOption(
+      id: _asInt(json['id']),
+      text: '${json['text'] ?? ''}',
+      voteCount: _asInt(json['voteCount']),
+      voters: _listOfMaps(json['voters']).map(ChatPollVoter.fromJson).toList(),
+    );
+  }
+}
+
+class ChatPollVoter {
+  const ChatPollVoter({
+    required this.userid,
+    required this.fullname,
+    this.avatar = '',
+  });
+
+  final String userid;
+  final String fullname;
+  final String avatar;
+
+  factory ChatPollVoter.fromJson(Map<String, dynamic> json) {
+    return ChatPollVoter(
+      userid: '${json['userid'] ?? ''}',
+      fullname: '${json['fullname'] ?? ''}',
+      avatar: '${json['avatar'] ?? ''}',
+    );
+  }
+}
+
+class ChatMessageReference {
+  const ChatMessageReference({
+    required this.id,
+    required this.senderUserid,
+    required this.senderName,
+    this.type = 'text',
+    this.content = '',
+  });
+
+  final int id;
+  final String senderUserid;
+  final String senderName;
+  final String type;
+  final String content;
+
+  factory ChatMessageReference.fromJson(Map<String, dynamic> json) {
+    return ChatMessageReference(
+      id: _asInt(json['id']),
+      senderUserid: '${json['senderUserid'] ?? ''}',
+      senderName: '${json['senderName'] ?? ''}',
+      type: '${json['type'] ?? 'text'}',
+      content: '${json['content'] ?? ''}',
     );
   }
 }
@@ -192,6 +329,9 @@ class RealtimeEvent {
     required this.type,
     this.conversationId = 0,
     this.userid = '',
+    this.fromUserid = '',
+    this.callId = '',
+    this.signal,
     this.isOnline = false,
     this.message,
   });
@@ -199,15 +339,22 @@ class RealtimeEvent {
   final String type;
   final int conversationId;
   final String userid;
+  final String fromUserid;
+  final String callId;
+  final Map<String, dynamic>? signal;
   final bool isOnline;
   final ChatMessage? message;
 
   factory RealtimeEvent.fromJson(Map<String, dynamic> json) {
     final messageJson = json['message'];
+    final signalJson = json['signal'];
     return RealtimeEvent(
       type: '${json['type'] ?? ''}',
       conversationId: _asInt(json['conversationId']),
       userid: '${json['userid'] ?? ''}',
+      fromUserid: '${json['fromUserid'] ?? ''}',
+      callId: '${json['callId'] ?? ''}',
+      signal: signalJson is Map ? Map<String, dynamic>.from(signalJson) : null,
       isOnline: json['isOnline'] == true,
       message: messageJson is Map<String, dynamic>
           ? ChatMessage.fromJson(messageJson)

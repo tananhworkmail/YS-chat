@@ -14,10 +14,14 @@ class TokenStore {
   String? accountId;
 
   Future<void> load() async {
-    token = await _storage.read(key: _tokenKey);
-    userid = await _storage.read(key: _useridKey);
-    fullname = await _storage.read(key: _fullnameKey);
-    accountId = await _storage.read(key: _accountIdKey);
+    try {
+      token = await _storage.read(key: _tokenKey);
+      userid = await _storage.read(key: _useridKey);
+      fullname = await _storage.read(key: _fullnameKey);
+      accountId = await _storage.read(key: _accountIdKey);
+    } catch (_) {
+      await clear();
+    }
   }
 
   Future<void> saveSession({
@@ -41,9 +45,11 @@ class TokenStore {
     userid = null;
     fullname = null;
     accountId = null;
-    await _storage.delete(key: _tokenKey);
-    await _storage.delete(key: _useridKey);
-    await _storage.delete(key: _fullnameKey);
-    await _storage.delete(key: _accountIdKey);
+    try {
+      await _storage.deleteAll();
+    } catch (_) {
+      // If Android restores an old encrypted preferences backup, the keystore
+      // can be unreadable. Keep the app bootable and let the next login replace it.
+    }
   }
 }

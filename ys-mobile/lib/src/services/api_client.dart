@@ -7,6 +7,16 @@ import 'package:mime/mime.dart';
 import '../models/models.dart';
 import 'token_store.dart';
 
+class ChatMessagePage {
+  const ChatMessagePage({
+    required this.messages,
+    required this.hasMore,
+  });
+
+  final List<ChatMessage> messages;
+  final bool hasMore;
+}
+
 class ApiClient {
   ApiClient(String baseUrl, this._tokenStore)
       : baseUrl = baseUrl.replaceAll(RegExp(r'/+$'), ''),
@@ -102,28 +112,76 @@ class ApiClient {
         .toList();
   }
 
-  Future<List<ChatMessage>> messages(int conversationId,
+  Future<ChatMessagePage> messages(int conversationId,
       {int limit = 50, int beforeId = 0}) async {
     final response = await _dio.get(
       '/chat/conversations/$conversationId/messages',
       queryParameters: {'limit': limit, if (beforeId > 0) 'beforeId': beforeId},
     );
-    return _maps(response.data['messages']).map(ChatMessage.fromJson).toList();
+    return ChatMessagePage(
+      messages:
+          _maps(response.data['messages']).map(ChatMessage.fromJson).toList(),
+      hasMore: response.data['hasMore'] == true,
+    );
   }
 
   Future<ChatMessage> sendMessage(
     int conversationId, {
     required String type,
     String content = '',
+    int replyToMessageId = 0,
+    int forwardedFromMessageId = 0,
     List<ChatAttachment> attachments = const [],
   }) async {
     final response =
         await _dio.post('/chat/conversations/$conversationId/messages', data: {
       'type': type,
       'content': content,
+      'replyToMessageId': replyToMessageId,
+      'forwardedFromMessageId': forwardedFromMessageId,
       'attachments':
           attachments.map((attachment) => attachment.toJson()).toList(),
     });
+    return ChatMessage.fromJson(
+        Map<String, dynamic>.from(response.data['message'] as Map));
+  }
+
+  Future<ChatMessage> createPoll(
+    int conversationId, {
+    required String question,
+    required List<String> options,
+    required bool allowCustomOptions,
+    required bool allowMultiple,
+    required bool showVoters,
+  }) async {
+    final response =
+        await _dio.post('/chat/conversations/$conversationId/polls', data: {
+      'question': question,
+      'options': options,
+      'allowCustomOptions': allowCustomOptions,
+      'allowMultiple': allowMultiple,
+      'showVoters': showVoters,
+    });
+    return ChatMessage.fromJson(
+        Map<String, dynamic>.from(response.data['message'] as Map));
+  }
+
+  Future<ChatMessage> votePoll(
+    int messageId, {
+    required List<int> optionIds,
+    String customOption = '',
+  }) async {
+    final response =
+        await _dio.post('/chat/messages/$messageId/poll/votes', data: {
+      'optionIds': optionIds,
+      'customOption': customOption,
+    });
+    return ChatMessage.fromJson(
+        Map<String, dynamic>.from(response.data['message'] as Map));
+  }
+
+  Future<ChatMessage> closePoll(int messageId) async {
+    final response = await _dio.post('/chat/messages/$messageId/poll/close');
     return ChatMessage.fromJson(
         Map<String, dynamic>.from(response.data['message'] as Map));
   }

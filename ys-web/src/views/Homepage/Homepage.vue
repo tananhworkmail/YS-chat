@@ -817,6 +817,32 @@
                   </div>
                 </div>
 
+                <div v-if="videoAttachments(message).length" class="video-grid">
+                  <div
+                    v-for="attachment in videoAttachments(message)"
+                    :key="attachment.id || attachment.fileUrl"
+                    class="video-card"
+                  >
+                    <video
+                      controls
+                      preload="metadata"
+                      :src="attachment.fileUrl"
+                    ></video>
+                    <a
+                      class="image-download-button"
+                      :href="attachment.fileUrl"
+                      :download="downloadFileName(attachment)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      :title="homeT('chat.download')"
+                      :aria-label="homeT('chat.download')"
+                      @click.stop
+                    >
+                      <Download :size="16" />
+                    </a>
+                  </div>
+                </div>
+
                 <div v-if="voiceAttachments(message).length" class="voice-list">
                   <div
                     v-for="attachment in voiceAttachments(message)"
@@ -4690,6 +4716,9 @@ const mentionLabels = () => {
 const imageAttachments = (message) =>
   (message.attachments || []).filter((attachment) => isImageAttachment(attachment));
 
+const videoAttachments = (message) =>
+  (message.attachments || []).filter((attachment) => isVideoAttachment(attachment));
+
 const voiceAttachments = (message) =>
   message.type === "voice"
     ? (message.attachments || []).filter((attachment) => isAudioAttachment(attachment))
@@ -4697,7 +4726,7 @@ const voiceAttachments = (message) =>
 
 const fileAttachments = (message) =>
   (message.attachments || []).filter(
-    (attachment) => !isImageAttachment(attachment) && !(message.type === "voice" && isAudioAttachment(attachment)),
+    (attachment) => !isImageAttachment(attachment) && !isVideoAttachment(attachment) && !(message.type === "voice" && isAudioAttachment(attachment)),
   );
 
 const isImageAttachment = (attachment) => {
@@ -6679,12 +6708,34 @@ a {
   margin-top: 4px;
 }
 
+.video-grid {
+  display: grid;
+  gap: 8px;
+  margin-top: 6px;
+}
+
 .image-card {
   position: relative;
   border-radius: 8px;
   overflow: hidden;
   background: #dce3ee;
   border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.video-card {
+  position: relative;
+  overflow: hidden;
+  width: min(360px, 64vw);
+  border-radius: 8px;
+  background: #0f172a;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.video-card video {
+  width: 100%;
+  max-height: 260px;
+  display: block;
+  background: #0f172a;
 }
 
 .image-preview {
@@ -6720,6 +6771,7 @@ a {
 }
 
 .image-card:hover .image-download-button,
+.video-card:hover .image-download-button,
 .image-download-button:focus-visible,
 .shared-media-item:hover .shared-media-download,
 .shared-media-download:focus-visible {
