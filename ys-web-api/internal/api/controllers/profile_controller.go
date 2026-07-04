@@ -1,12 +1,10 @@
 package controllers
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"web-api/internal/api/services"
 	"web-api/internal/pkg/models/request"
@@ -76,9 +74,8 @@ func (h *ProfileController) UploadAvatar(c *gin.Context) {
 		return
 	}
 
-	filename := fmt.Sprintf("%s_%d_%s", currentUserid(c), time.Now().UnixNano(), profileSafeFilename(file.Filename))
-	destination := filepath.Join(uploadDir, filename)
-	if err := c.SaveUploadedFile(file, destination); err != nil {
+	destination, err := saveUploadedFileRandom(file, uploadDir, profileSafeFilename(file.Filename), currentUserid(c))
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": services.ErrSystem})
 		return
 	}

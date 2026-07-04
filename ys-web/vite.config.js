@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { createReadStream, existsSync, rmSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, URL } from "node:url";
 import { defineConfig } from "vite";
@@ -61,9 +61,21 @@ const apkDownloadPlugin = () => ({
   },
 });
 
-export default defineConfig({
+const mobileDownloadCleanupPlugin = (mode) => ({
+  name: "mobile-download-cleanup",
+  closeBundle() {
+    if (mode !== "mobile") return;
+    rmSync(resolve(process.cwd(), "dist", "downloads"), { recursive: true, force: true });
+  },
+});
+
+export default defineConfig(({ mode }) => {
+  const devApiProxyTarget = process.env.VITE_DEV_API_PROXY_TARGET || "http://127.0.0.1:3666";
+
+  return {
   plugins: [
     apkDownloadPlugin(),
+    mobileDownloadCleanupPlugin(mode),
     vue(),
     AutoImport({
       resolvers: [ElementPlusResolver()],
@@ -84,16 +96,30 @@ export default defineConfig({
     port: 1800,
     strictPort: true,
 
+    allowedHosts: [
+      "web.tythac.com.vn",
+    ],
+
     proxy: {
       "/api/v1": {
-        target: "http://192.168.71.87:3666",
+        target: devApiProxyTarget,
         changeOrigin: true,
         ws: true,
       },
       "/uploads": {
-        target: "http://192.168.71.87:3666",
+        target: devApiProxyTarget,
         changeOrigin: true,
       },
     },
   },
+
+  preview: {
+    host: "0.0.0.0",
+    port: 1800,
+    strictPort: true,
+    allowedHosts: [
+      "web.tythac.com.vn",
+    ],
+  },
+  };
 });

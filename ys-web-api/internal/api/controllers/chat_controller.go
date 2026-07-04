@@ -1,7 +1,6 @@
 package controllers
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -79,6 +78,13 @@ func (h *ChatController) Realtime(c *gin.Context) {
 		return
 	}
 	services.RealtimeHubInstance.Serve(currentUserid(c), conn)
+}
+
+func (h *ChatController) RealtimeHealth(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"ok":     true,
+		"userid": currentUserid(c),
+	})
 }
 
 func (h *ChatController) RegisterDeviceToken(c *gin.Context) {
@@ -337,9 +343,8 @@ func (h *ChatController) UploadFiles(c *gin.Context) {
 	attachments := make([]types.ChatAttachment, 0, len(files))
 	for index, file := range files {
 		cleanName := sanitizeFilename(file.Filename)
-		storedName := fmt.Sprintf("%d_%d_%s", time.Now().UnixNano(), index, cleanName)
-		destination := filepath.Join(uploadDir, storedName)
-		if err := c.SaveUploadedFile(file, destination); err != nil {
+		destination, err := saveUploadedFileRandom(file, uploadDir, cleanName, "")
+		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": services.ErrSystem})
 			return
 		}

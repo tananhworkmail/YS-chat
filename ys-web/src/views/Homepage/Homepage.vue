@@ -37,6 +37,60 @@
       </button>
     </div>
 
+    <div v-if="callState !== 'idle'" class="call-panel" :class="callState">
+      <div class="call-peer">
+        <span class="call-pulse">
+          <PhoneCall :size="18" />
+        </span>
+        <span>
+          <strong>{{ callPeerName }}</strong>
+          <small>{{ callStatusLabel }}</small>
+        </span>
+      </div>
+      <div class="call-controls">
+        <button
+          v-if="callState === 'incoming'"
+          class="call-control accept"
+          type="button"
+          :title="callText('accept')"
+          @click="acceptIncomingCall"
+        >
+          <Phone :size="19" />
+        </button>
+        <button
+          v-if="callState === 'incoming'"
+          class="call-control end"
+          type="button"
+          :title="callText('reject')"
+          @click="rejectIncomingCall"
+        >
+          <PhoneOff :size="19" />
+        </button>
+        <template v-else>
+          <button
+            class="call-control mute"
+            :class="{ muted: callMuted }"
+            type="button"
+            :title="callMuted ? callText('unmute') : callText('mute')"
+            @click="toggleCallMute"
+          >
+            <MicOff v-if="callMuted" :size="18" />
+            <Mic v-else :size="18" />
+          </button>
+          <button
+            class="call-control end"
+            type="button"
+            :title="callText('end')"
+            @click="endOrCancelCall"
+          >
+            <PhoneOff :size="19" />
+          </button>
+        </template>
+      </div>
+    </div>
+
+    <audio ref="remoteAudioRef" class="remote-call-audio" autoplay playsinline></audio>
+
     <nav class="app-rail">
       <div class="rail-logo">
         <BrandLogo size="sm" />
@@ -536,6 +590,11 @@
             </button>
           </div>
           <div class="chat-actions">
+            <el-tooltip v-if="activeConversation.type === 'direct'" :content="callText('start')" placement="bottom">
+              <button class="icon-button" type="button" :disabled="!canStartAudioCall" @click="startAudioCall">
+                <Phone :size="20" />
+              </button>
+            </el-tooltip>
             <el-tooltip v-if="activeConversation.type === 'group'" :content="homeT('chat.addMember')" placement="bottom">
               <button class="icon-button" type="button" @click="openAddMemberDialog">
                 <UserPlus :size="20" />
@@ -1770,8 +1829,6 @@ import { useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { ElMessage, ElMessageBox } from "element-plus";
 import dayjs from "dayjs";
-import { Capacitor } from "@capacitor/core";
-import { PushNotifications } from "@capacitor/push-notifications";
 import BrandLogo from "@/components/BrandLogo.vue";
 import {
   Camera,
@@ -1799,10 +1856,14 @@ import {
   LogOut,
   MessageCircle,
   Mic,
+  MicOff,
   MoreHorizontal,
   Paperclip,
   Pencil,
   Pin,
+  Phone,
+  PhoneCall,
+  PhoneOff,
   Plus,
   Presentation,
   Reply,
@@ -1820,7 +1881,6 @@ import chatApi from "@/store/chat";
 
 const router = useRouter();
 const { t, locale } = useI18n();
-const enableNativePush = import.meta.env.VITE_ENABLE_PUSH === "true";
 const fallbackRefreshMs = 60 * 1000;
 const normalizeUserid = (userid) => String(userid || "").trim();
 const useridsMatch = (first, second) => {
@@ -1918,14 +1978,21 @@ const folderInputRef = ref(null);
 const avatarInputRef = ref(null);
 const groupAvatarInputRef = ref(null);
 const groupBackgroundInputRef = ref(null);
+const remoteAudioRef = ref(null);
+const callState = ref("idle");
+const currentCall = ref(null);
+const callMuted = ref(false);
+const callDuration = ref(0);
+const realtimeStatus = ref("idle");
+const realtimeLastError = ref("");
+const realtimeLastUrl = ref("");
 let refreshTimer = null;
 let searchTimer = null;
 let contactLookupTimer = null;
 let realtimeSocket = null;
 let realtimeReconnectTimer = null;
+let realtimeReadyWaiters = [];
 let backgroundSyncPromise = null;
-let pushListenersRegistered = false;
-let pushListenerHandles = [];
 let searchRequestId = 0;
 let contactLookupRequestId = 0;
 let componentUnmounted = false;
@@ -1934,6 +2001,15 @@ let recordingStream = null;
 let recordingChunks = [];
 let recordingTimer = null;
 let recordingStartedAt = 0;
+let peerConnection = null;
+let localCallStream = null;
+let remoteCallStream = null;
+let pendingCallIceCandidates = [];
+let callTimeoutTimer = null;
+let callDurationTimer = null;
+let callStartedAt = 0;
+let ringtoneContext = null;
+let ringtoneTimer = null;
 let discardRecording = false;
 const readStateStorageKey = `ys_chat_read_state_${currentUserid}`;
 const unreadStorageKey = `ys_chat_unread_counts_${currentUserid}`;
@@ -1984,6 +2060,15 @@ const activeConversation = computed(() =>
   conversations.value.find((conversation) => conversation.id === activeConversationId.value),
 );
 const activePinnedMessage = computed(() => pinnedMessages.value[String(activeConversationId.value)] || null);
+const canStartAudioCall = computed(() => activeConversation.value?.type === "direct" && callState.value === "idle");
+const callPeerName = computed(() => currentCall.value?.peerName || activeConversation.value?.name || "");
+const callStatusLabel = computed(() => {
+  if (callState.value === "incoming") return callText("incoming");
+  if (callState.value === "outgoing") return callText("outgoing");
+  if (callState.value === "connecting") return callText("connecting");
+  if (callState.value === "active") return `${callText("active")} ${formatDuration(callDuration.value)}`;
+  return "";
+});
 
 const panelTitle = computed(() => (panelMode.value === "contacts" ? homeT("rail.contacts") : homeT("rail.chats")));
 
@@ -2254,7 +2339,6 @@ onMounted(async () => {
   await loadContacts();
   await loadConversations(false);
   connectRealtime();
-  await initPushNotifications();
   document.addEventListener("visibilitychange", syncAfterVisibilityReturn);
   window.addEventListener("online", syncAfterNetworkReturn);
 });
@@ -2267,8 +2351,8 @@ onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", syncAfterVisibilityReturn);
   window.removeEventListener("online", syncAfterNetworkReturn);
   cancelVoiceRecording();
+  cleanupCall();
   disconnectRealtime();
-  removePushListeners();
 });
 
 watch([searchKeyword, searchScope], ([value, scope]) => {
@@ -2432,17 +2516,32 @@ const notificationPreview = (message) => {
 };
 
 const connectRealtime = () => {
-  if (componentUnmounted || !localStorage.getItem("user_token") || realtimeSocket) return;
+  if (componentUnmounted || !localStorage.getItem("user_token")) return;
+  if (realtimeSocket?.readyState === WebSocket.OPEN || realtimeSocket?.readyState === WebSocket.CONNECTING) return;
+  if (realtimeSocket) {
+    realtimeSocket.onclose = null;
+    realtimeSocket.onerror = null;
+    realtimeSocket = null;
+  }
 
   try {
-    realtimeSocket = new WebSocket(chatApi.getRealtimeUrl());
-  } catch {
+    realtimeLastUrl.value = chatApi.getRealtimeUrl();
+    realtimeLastError.value = "";
+    realtimeStatus.value = "connecting";
+    realtimeSocket = new WebSocket(realtimeLastUrl.value);
+  } catch (error) {
+    realtimeStatus.value = "error";
+    realtimeLastError.value = error?.message || "Cannot create WebSocket";
+    settleRealtimeReadyWaiters(false);
     startFallbackRefresh();
     scheduleRealtimeReconnect();
     return;
   }
 
   realtimeSocket.onopen = () => {
+    realtimeStatus.value = "connected";
+    realtimeLastError.value = "";
+    settleRealtimeReadyWaiters(true);
     stopFallbackRefresh();
     void syncChatSnapshot();
   };
@@ -2457,11 +2556,15 @@ const connectRealtime = () => {
 
   realtimeSocket.onclose = () => {
     realtimeSocket = null;
+    realtimeStatus.value = "disconnected";
+    settleRealtimeReadyWaiters(false);
     startFallbackRefresh();
     scheduleRealtimeReconnect();
   };
 
   realtimeSocket.onerror = () => {
+    realtimeStatus.value = "error";
+    realtimeLastError.value = "WebSocket error";
     realtimeSocket?.close();
   };
 };
@@ -2479,12 +2582,40 @@ const disconnectRealtime = () => {
     window.clearTimeout(realtimeReconnectTimer);
     realtimeReconnectTimer = null;
   }
+  settleRealtimeReadyWaiters(false);
   if (realtimeSocket) {
     const socket = realtimeSocket;
     realtimeSocket = null;
     socket.onclose = null;
     socket.close();
   }
+};
+
+const settleRealtimeReadyWaiters = (isReady) => {
+  const waiters = realtimeReadyWaiters;
+  realtimeReadyWaiters = [];
+  waiters.forEach((resolve) => resolve(isReady));
+};
+
+const ensureRealtimeReady = async () => {
+  if (realtimeSocket?.readyState === WebSocket.OPEN) return true;
+
+  connectRealtime();
+  if (realtimeSocket?.readyState === WebSocket.OPEN) return true;
+
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(() => {
+      realtimeReadyWaiters = realtimeReadyWaiters.filter((waiter) => waiter !== finish);
+      resolve(false);
+    }, 8000);
+
+    const finish = (isReady) => {
+      window.clearTimeout(timeout);
+      resolve(isReady);
+    };
+
+    realtimeReadyWaiters.push(finish);
+  });
 };
 
 const startFallbackRefresh = () => {
@@ -2527,6 +2658,11 @@ const syncAfterNetworkReturn = () => {
 };
 
 const handleRealtimeEvent = async (event) => {
+  if (isCallRealtimeEvent(event)) {
+    await handleCallRealtimeEvent(event);
+    return;
+  }
+
   if (event?.type === "chat.presence.changed" && event.userid) {
     applyPresence(event.userid, Boolean(event.isOnline));
     return;
@@ -2554,42 +2690,512 @@ const handleRealtimeEvent = async (event) => {
   await loadConversations(false, { silent: true });
 };
 
-const initPushNotifications = async () => {
-  if (!enableNativePush || !Capacitor.isNativePlatform() || pushListenersRegistered) return;
+const callText = (key) => ({
+  start: "Gọi thoại",
+  incoming: "Cuộc gọi đến",
+  outgoing: "Đang gọi...",
+  connecting: "Đang kết nối...",
+  active: "Đang gọi",
+  accept: "Nghe",
+  reject: "Từ chối",
+  end: "Kết thúc",
+  mute: "Tắt micro",
+  unmute: "Bật micro",
+  busy: "Người kia đang bận.",
+  canceled: "Cuộc gọi đã hủy.",
+  rejected: "Cuộc gọi bị từ chối.",
+  ended: "Cuộc gọi đã kết thúc.",
+  unavailable: "Trình duyệt này chưa hỗ trợ gọi thoại.",
+  directOnly: "Chỉ hỗ trợ gọi trong chat cá nhân.",
+  microphoneFailed: "Không thể truy cập micro.",
+  websocketUnavailable: "Kết nối realtime chưa sẵn sàng.",
+}[key] || key);
 
+const realtimeUnavailableMessage = () => {
+  const detail = [realtimeLastError.value, realtimeLastUrl.value].filter(Boolean).join(" - ");
+  return detail ? `${callText("websocketUnavailable")} ${detail}` : callText("websocketUnavailable");
+};
+
+const isCallRealtimeEvent = (event = {}) => typeof event.type === "string" && event.type.startsWith("call.");
+
+const directConversationPeer = (conversation = activeConversation.value) =>
+  (conversation?.members || []).find((member) => !useridsMatch(member.userid, currentUserid)) || null;
+
+const createCallId = (conversationId) =>
+  `${conversationId}-${currentUserid || "user"}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const sendRealtimeEvent = (event) => {
+  if (realtimeSocket?.readyState !== WebSocket.OPEN) {
+    connectRealtime();
+    return false;
+  }
+  realtimeSocket.send(JSON.stringify(event));
+  return true;
+};
+
+const sendCallEvent = (type, signal = null, call = currentCall.value) => {
+  if (!call?.id || !call.conversationId) return false;
+  return sendRealtimeEvent({
+    type,
+    conversationId: call.conversationId,
+    callId: call.id,
+    signal,
+  });
+};
+
+const webrtcIceServers = () => {
+  const servers = [];
+  const stunUrls = String(import.meta.env.VITE_WEBRTC_STUN_URLS || "stun:stun.l.google.com:19302")
+    .split(",")
+    .map((url) => url.trim())
+    .filter(Boolean);
+  if (stunUrls.length) {
+    servers.push({ urls: stunUrls });
+  }
+
+  const turnUrls = String(import.meta.env.VITE_WEBRTC_TURN_URLS || "")
+    .split(",")
+    .map((url) => url.trim())
+    .filter(Boolean);
+  if (turnUrls.length) {
+    servers.push({
+      urls: turnUrls,
+      username: import.meta.env.VITE_WEBRTC_TURN_USERNAME || "",
+      credential: import.meta.env.VITE_WEBRTC_TURN_CREDENTIAL || "",
+    });
+  }
+  return servers;
+};
+
+const prepareLocalCallMedia = async () => {
+  if (localCallStream) return localCallStream;
+  if (!window.isSecureContext) {
+    const error = new Error("INSECURE_CONTEXT");
+    error.name = "SecurityError";
+    throw error;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("WEBRTC_UNAVAILABLE");
+  }
+  localCallStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+    video: false,
+  });
+  callMuted.value = false;
+  return localCallStream;
+};
+
+const callMediaErrorMessage = (error = {}) => {
+  if (!window.isSecureContext) {
+    return "Micro chi hoat dong tren HTTPS hoac localhost. Hay mo bang http://localhost tren may nay, hoac cau hinh HTTPS cho dia chi LAN/domain.";
+  }
+  if (!navigator.mediaDevices?.getUserMedia || error.message === "WEBRTC_UNAVAILABLE") {
+    return callText("unavailable");
+  }
+  if (error.name === "NotAllowedError" || error.name === "SecurityError") {
+    return "Quyen micro dang bi chan. Hay bam bieu tuong o khoa tren thanh dia chi va Allow microphone.";
+  }
+  if (error.name === "NotFoundError" || error.name === "DevicesNotFoundError") {
+    return "Khong tim thay micro tren thiet bi nay.";
+  }
+  if (error.name === "NotReadableError" || error.name === "TrackStartError") {
+    return "Micro dang bi ung dung khac su dung hoac he thong dang chan.";
+  }
+  return callText("microphoneFailed");
+};
+
+const attachRemoteCallStream = async () => {
+  await nextTick();
+  if (!remoteAudioRef.value || !remoteCallStream) return;
+  if (remoteAudioRef.value.srcObject !== remoteCallStream) {
+    remoteAudioRef.value.srcObject = remoteCallStream;
+  }
   try {
-    const permission = await PushNotifications.requestPermissions();
-    if (permission.receive !== "granted") return;
-
-    pushListenersRegistered = true;
-    const registrationHandle = await PushNotifications.addListener("registration", async (token) => {
-      try {
-        await chatApi.registerDeviceToken(token.value, Capacitor.getPlatform());
-      } catch (error) {
-        showApiError(error);
-      }
-    });
-    pushListenerHandles.push(registrationHandle);
-
-    const actionHandle = await PushNotifications.addListener("pushNotificationActionPerformed", async (action) => {
-      const conversationId = Number(action.notification?.data?.conversationId || 0);
-      if (!conversationId) return;
-      await openConversationById(conversationId);
-    });
-    pushListenerHandles.push(actionHandle);
-
-    await PushNotifications.register();
+    await remoteAudioRef.value.play();
   } catch {
-    // Push setup can fail on emulators without Play Services; chat still works through realtime/polling.
+    // Browsers can require a user gesture before audio starts.
   }
 };
 
-const removePushListeners = () => {
-  pushListenerHandles.forEach((handle) => {
-    void handle.remove();
+const addLocalCallTracks = () => {
+  if (!peerConnection || !localCallStream) return;
+  const existingTracks = new Set(peerConnection.getSenders().map((sender) => sender.track).filter(Boolean));
+  localCallStream.getTracks().forEach((track) => {
+    if (!existingTracks.has(track)) {
+      peerConnection.addTrack(track, localCallStream);
+    }
   });
-  pushListenerHandles = [];
-  pushListenersRegistered = false;
+};
+
+const ensurePeerConnection = () => {
+  if (peerConnection) return peerConnection;
+
+  remoteCallStream = new MediaStream();
+  peerConnection = new RTCPeerConnection({ iceServers: webrtcIceServers() });
+  addLocalCallTracks();
+
+  peerConnection.onicecandidate = ({ candidate }) => {
+    if (candidate) {
+      sendCallEvent("call.ice", candidate.toJSON ? candidate.toJSON() : candidate);
+    }
+  };
+
+  peerConnection.ontrack = (event) => {
+    event.streams?.[0]?.getTracks().forEach((track) => {
+      if (!remoteCallStream.getTracks().some((item) => item.id === track.id)) {
+        remoteCallStream.addTrack(track);
+      }
+    });
+    void attachRemoteCallStream();
+    activateCall();
+  };
+
+  peerConnection.onconnectionstatechange = () => {
+    const state = peerConnection?.connectionState;
+    if (state === "connected") {
+      activateCall();
+    }
+    if (state === "failed" || state === "closed") {
+      cleanupCall();
+    }
+  };
+
+  return peerConnection;
+};
+
+const flushPendingCallIceCandidates = async () => {
+  if (!peerConnection?.remoteDescription || pendingCallIceCandidates.length === 0) return;
+  const candidates = pendingCallIceCandidates;
+  pendingCallIceCandidates = [];
+  for (const candidate of candidates) {
+    try {
+      await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch {
+      // Remote ICE can become stale if a call is ended while packets are still in flight.
+    }
+  }
+};
+
+const activateCall = () => {
+  if (callState.value === "active") return;
+  stopRingtone();
+  if (callTimeoutTimer) {
+    window.clearTimeout(callTimeoutTimer);
+    callTimeoutTimer = null;
+  }
+  callState.value = "active";
+  callStartedAt = Date.now();
+  callDuration.value = 0;
+  if (callDurationTimer) window.clearInterval(callDurationTimer);
+  callDurationTimer = window.setInterval(() => {
+    callDuration.value = Math.floor((Date.now() - callStartedAt) / 1000);
+  }, 1000);
+};
+
+const startCallTimeout = () => {
+  if (callTimeoutTimer) window.clearTimeout(callTimeoutTimer);
+  callTimeoutTimer = window.setTimeout(() => {
+    if (callState.value === "incoming") {
+      cleanupCall();
+      return;
+    }
+    if (callState.value === "outgoing" || callState.value === "connecting") {
+      sendCallEvent("call.cancel");
+      cleanupCall(callText("canceled"));
+    }
+  }, 45 * 1000);
+};
+
+const startRingtone = () => {
+  stopRingtone();
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return;
+
+  try {
+    ringtoneContext = new AudioContextClass();
+    const playTone = () => {
+      if (!ringtoneContext) return;
+      const oscillator = ringtoneContext.createOscillator();
+      const gain = ringtoneContext.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, ringtoneContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.16, ringtoneContext.currentTime + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ringtoneContext.currentTime + 0.38);
+      oscillator.connect(gain);
+      gain.connect(ringtoneContext.destination);
+      oscillator.start();
+      oscillator.stop(ringtoneContext.currentTime + 0.42);
+    };
+    void ringtoneContext.resume().then(playTone).catch(() => {});
+    ringtoneTimer = window.setInterval(playTone, 1400);
+  } catch {
+    ringtoneContext = null;
+  }
+};
+
+const stopRingtone = () => {
+  if (ringtoneTimer) {
+    window.clearInterval(ringtoneTimer);
+    ringtoneTimer = null;
+  }
+  if (ringtoneContext) {
+    void ringtoneContext.close().catch(() => {});
+    ringtoneContext = null;
+  }
+};
+
+const notifyIncomingCall = (peerName) => {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  try {
+    new Notification(callText("incoming"), {
+      body: peerName,
+      tag: `ys-call-${currentCall.value?.id || ""}`,
+      silent: false,
+    });
+  } catch {
+    // Browser notifications are best-effort only.
+  }
+};
+
+const requestNotificationPermission = () => {
+  if (!("Notification" in window) || Notification.permission !== "default") return;
+  void Notification.requestPermission().catch(() => {});
+};
+
+const startAudioCall = async () => {
+  if (!activeConversation.value || activeConversation.value.type !== "direct") {
+    ElMessage.warning(callText("directOnly"));
+    return;
+  }
+  if (!canStartAudioCall.value) return;
+
+  const peer = directConversationPeer(activeConversation.value);
+  const call = {
+    id: createCallId(activeConversation.value.id),
+    conversationId: activeConversation.value.id,
+    peerUserid: peer?.userid || "",
+    peerName: activeConversation.value.name,
+    direction: "outgoing",
+  };
+
+  try {
+    if (!(await ensureRealtimeReady())) {
+      ElMessage.error(realtimeUnavailableMessage());
+      return;
+    }
+    await prepareLocalCallMedia();
+    currentCall.value = call;
+    callState.value = "outgoing";
+    startRingtone();
+    requestNotificationPermission();
+    if (!sendCallEvent("call.invite", null, call)) {
+      cleanupCall(callText("websocketUnavailable"));
+      return;
+    }
+    startCallTimeout();
+  } catch (error) {
+    cleanupCall();
+    ElMessage.error(callMediaErrorMessage(error));
+  }
+};
+
+const acceptIncomingCall = async () => {
+  if (callState.value !== "incoming" || !currentCall.value) return;
+  stopRingtone();
+  callState.value = "connecting";
+  try {
+    if (!(await ensureRealtimeReady())) {
+      cleanupCall(realtimeUnavailableMessage());
+      return;
+    }
+    await prepareLocalCallMedia();
+    ensurePeerConnection();
+    sendCallEvent("call.accept");
+    startCallTimeout();
+  } catch (error) {
+    sendCallEvent("call.reject");
+    cleanupCall();
+    ElMessage.error(callMediaErrorMessage(error));
+  }
+};
+
+const rejectIncomingCall = () => {
+  if (callState.value !== "incoming") return;
+  sendCallEvent("call.reject");
+  cleanupCall();
+};
+
+const endOrCancelCall = () => {
+  if (!currentCall.value) return;
+  if (callState.value === "outgoing" || callState.value === "connecting") {
+    sendCallEvent("call.cancel");
+  } else {
+    sendCallEvent("call.end");
+  }
+  cleanupCall();
+};
+
+const toggleCallMute = () => {
+  callMuted.value = !callMuted.value;
+  localCallStream?.getAudioTracks().forEach((track) => {
+    track.enabled = !callMuted.value;
+  });
+};
+
+const cleanupCall = (message = "") => {
+  stopRingtone();
+  if (callTimeoutTimer) {
+    window.clearTimeout(callTimeoutTimer);
+    callTimeoutTimer = null;
+  }
+  if (callDurationTimer) {
+    window.clearInterval(callDurationTimer);
+    callDurationTimer = null;
+  }
+  if (peerConnection) {
+    peerConnection.onicecandidate = null;
+    peerConnection.ontrack = null;
+    peerConnection.onconnectionstatechange = null;
+    peerConnection.close();
+    peerConnection = null;
+  }
+  localCallStream?.getTracks().forEach((track) => track.stop());
+  remoteCallStream?.getTracks().forEach((track) => track.stop());
+  localCallStream = null;
+  remoteCallStream = null;
+  pendingCallIceCandidates = [];
+  if (remoteAudioRef.value) {
+    remoteAudioRef.value.srcObject = null;
+  }
+  currentCall.value = null;
+  callState.value = "idle";
+  callMuted.value = false;
+  callDuration.value = 0;
+  callStartedAt = 0;
+  if (message) {
+    ElMessage.info(message);
+  }
+};
+
+const callMatchesEvent = (event = {}) =>
+  currentCall.value
+  && event.callId === currentCall.value.id
+  && Number(event.conversationId) === Number(currentCall.value.conversationId);
+
+const handleCallRealtimeEvent = async (event) => {
+  if (useridsMatch(event.fromUserid || event.userid, currentUserid)) return;
+
+  if (event.type === "call.invite") {
+    if (callState.value !== "idle") {
+      sendRealtimeEvent({
+        type: "call.busy",
+        conversationId: event.conversationId,
+        callId: event.callId,
+      });
+      return;
+    }
+
+    const conversation = conversations.value.find((item) => item.id === event.conversationId);
+    if (!conversation || conversation.type !== "direct") return;
+
+    currentCall.value = {
+      id: event.callId,
+      conversationId: event.conversationId,
+      peerUserid: event.fromUserid || event.userid || "",
+      peerName: conversation.name,
+      direction: "incoming",
+    };
+    callState.value = "incoming";
+    startRingtone();
+    startCallTimeout();
+    notifyIncomingCall(conversation.name);
+    return;
+  }
+
+  if (!callMatchesEvent(event)) return;
+
+  if (event.type === "call.accept") {
+    if (callState.value !== "outgoing") return;
+    stopRingtone();
+    callState.value = "connecting";
+    try {
+      await prepareLocalCallMedia();
+      const pc = ensurePeerConnection();
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: false });
+      await pc.setLocalDescription(offer);
+      sendCallEvent("call.offer", pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription);
+      startCallTimeout();
+    } catch (error) {
+      sendCallEvent("call.end");
+      cleanupCall(callMediaErrorMessage(error));
+    }
+    return;
+  }
+
+  if (event.type === "call.reject") {
+    cleanupCall(callText("rejected"));
+    return;
+  }
+
+  if (event.type === "call.busy") {
+    cleanupCall(callText("busy"));
+    return;
+  }
+
+  if (event.type === "call.cancel") {
+    cleanupCall(callText("canceled"));
+    return;
+  }
+
+  if (event.type === "call.end") {
+    cleanupCall(callText("ended"));
+    return;
+  }
+
+  if (event.type === "call.offer" && event.signal) {
+    try {
+      callState.value = "connecting";
+      await prepareLocalCallMedia();
+      const pc = ensurePeerConnection();
+      await pc.setRemoteDescription(new RTCSessionDescription(event.signal));
+      await flushPendingCallIceCandidates();
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      sendCallEvent("call.answer", pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription);
+    } catch {
+      sendCallEvent("call.end");
+      cleanupCall();
+    }
+    return;
+  }
+
+  if (event.type === "call.answer" && event.signal) {
+    try {
+      if (!peerConnection) return;
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(event.signal));
+      await flushPendingCallIceCandidates();
+    } catch {
+      cleanupCall();
+    }
+    return;
+  }
+
+  if (event.type === "call.ice" && event.signal) {
+    if (!peerConnection?.remoteDescription) {
+      pendingCallIceCandidates.push(event.signal);
+      return;
+    }
+    try {
+      await peerConnection.addIceCandidate(new RTCIceCandidate(event.signal));
+    } catch {
+      // Ignore stale ICE candidates after a call transition.
+    }
+  }
 };
 
 const openConversationById = async (conversationId) => {
@@ -3970,7 +4576,6 @@ const scrollToMessage = async (messageId) => {
 
 const handleLogout = () => {
   disconnectRealtime();
-  removePushListeners();
   localStorage.removeItem("user_token");
   localStorage.removeItem("userid");
   localStorage.removeItem("fullname");
@@ -4416,6 +5021,115 @@ a {
   color: #64748b;
 }
 
+.call-panel {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 13000;
+  width: min(380px, calc(100vw - 28px));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #172033;
+  border: 1px solid #dbe7f6;
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.24);
+}
+
+.call-peer {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.call-peer > span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.call-peer strong,
+.call-peer small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-peer small {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.call-pulse {
+  width: 38px;
+  height: 38px;
+  min-width: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #ecfeff;
+  color: #0891b2;
+}
+
+.call-panel.incoming .call-pulse,
+.call-panel.outgoing .call-pulse {
+  animation: callPulse 1.2s ease-in-out infinite;
+}
+
+.call-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.call-control {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.call-control.accept {
+  background: #16a34a;
+}
+
+.call-control.end {
+  background: #dc2626;
+}
+
+.call-control.mute {
+  background: #334155;
+}
+
+.call-control.mute.muted {
+  background: #f59e0b;
+}
+
+.remote-call-audio {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+@keyframes callPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(8, 145, 178, 0.28);
+  }
+  50% {
+    box-shadow: 0 0 0 9px rgba(8, 145, 178, 0);
+  }
+}
+
 .app-rail {
   background: linear-gradient(180deg, #0891b2 0%, #0e7490 100%);
   color: #ffffff;
@@ -4572,10 +5286,20 @@ a {
   color: #ffffff;
 }
 
+.icon-button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .icon-button:hover,
 .tool-button:hover {
   background: var(--brand-soft);
   color: var(--brand-dark);
+}
+
+.icon-button:disabled:hover {
+  background: #f0f4fa;
+  color: #243044;
 }
 
 .search-box,
@@ -7247,8 +7971,16 @@ textarea:focus,
 }
 
 @media (max-width: 820px) {
+  .call-panel {
+    top: 10px;
+    right: 10px;
+    left: 10px;
+    width: auto;
+  }
+
   .chat-shell {
     grid-template-columns: 1fr;
+    height: 100vh;
     height: 100dvh;
   }
 
@@ -7258,6 +7990,7 @@ textarea:focus,
     right: 0;
     bottom: 0;
     z-index: 12800;
+    height: 64px;
     height: calc(64px + env(safe-area-inset-bottom));
     flex-direction: row;
     justify-content: space-between;
@@ -7291,6 +8024,7 @@ textarea:focus,
   .chat-pane {
     grid-column: 1;
     grid-row: 1;
+    height: calc(100vh - 64px);
     height: calc(100dvh - 64px - env(safe-area-inset-bottom));
     padding-bottom: 0;
   }
@@ -7313,6 +8047,7 @@ textarea:focus,
 
   .chat-shell.has-active .conversation-panel,
   .chat-shell.has-active .chat-pane {
+    height: 100vh;
     height: 100dvh;
   }
 

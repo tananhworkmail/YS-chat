@@ -300,6 +300,40 @@ func (s *ChatService) PresenceAudience(userid string) ([]string, error) {
 	return userids, nil
 }
 
+func (s *ChatService) DirectCallRecipients(currentUserid string, conversationID uint64) ([]string, error) {
+	db, err := s.chatDB()
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	if ok, err := s.isConversationMember(db, conversationID, currentUserid); err != nil {
+		return nil, errors.New(ErrSystem)
+	} else if !ok {
+		return nil, errors.New(ErrChatNoPermission)
+	}
+
+	conversationType, err := s.conversationType(db, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conversationType != "direct" {
+		return nil, errors.New(ErrChatNoPermission)
+	}
+
+	userids, err := s.conversationMemberUserids(db, conversationID)
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	recipients := make([]string, 0, len(userids))
+	for _, userid := range userids {
+		if strings.TrimSpace(userid) != "" && userid != currentUserid {
+			recipients = append(recipients, userid)
+		}
+	}
+	return recipients, nil
+}
+
 func (s *ChatService) AddContact(currentUserid string, req request.AddContactRequest) (*types.ChatUser, error) {
 	db, err := s.chatDB()
 	if err != nil {

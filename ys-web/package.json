@@ -6,16 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview",
-    "mobile:build": "vite build --mode mobile",
-    "mobile:sync": "npm run mobile:build && npx cap sync android",
-    "mobile:android": "npm run mobile:sync && npx cap open android"
+    "preview": "vite preview"
   },
   "dependencies": {
-    "@capacitor/android": "^8.4.1",
-    "@capacitor/cli": "^8.4.1",
-    "@capacitor/core": "^8.4.1",
-    "@capacitor/push-notifications": "^8.1.1",
     "@chenfengyuan/vue-qrcode": "^2.0.0",
     "@iconify/vue": "^5.0.0",
     "axios": "^1.8.1",

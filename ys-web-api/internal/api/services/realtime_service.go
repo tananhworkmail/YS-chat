@@ -1,6 +1,7 @@
 package services
 
 import (
+	"encoding/json"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,9 @@ type RealtimeEvent struct {
 	Type           string                  `json:"type"`
 	ConversationID uint64                  `json:"conversationId,omitempty"`
 	Userid         string                  `json:"userid,omitempty"`
+	FromUserid     string                  `json:"fromUserid,omitempty"`
+	CallID         string                  `json:"callId,omitempty"`
+	Signal         json.RawMessage         `json:"signal,omitempty"`
 	IsOnline       bool                    `json:"isOnline,omitempty"`
 	Message        *types.ChatMessage      `json:"message,omitempty"`
 	Conversation   *types.ChatConversation `json:"conversation,omitempty"`
@@ -175,7 +179,7 @@ func normalizeRealtimeUserid(userid string) string {
 func (client *realtimeClient) readPump(h *RealtimeHub) {
 	defer h.unregister(client)
 
-	client.conn.SetReadLimit(1024)
+	client.conn.SetReadLimit(512 * 1024)
 	_ = client.conn.SetReadDeadline(time.Now().Add(70 * time.Second))
 	client.conn.SetPongHandler(func(string) error {
 		_ = client.conn.SetReadDeadline(time.Now().Add(70 * time.Second))
@@ -183,9 +187,54 @@ func (client *realtimeClient) readPump(h *RealtimeHub) {
 	})
 
 	for {
-		if _, _, err := client.conn.NextReader(); err != nil {
+		var event RealtimeEvent
+		if err := client.conn.ReadJSON(&event); err != nil {
 			return
 		}
+		h.handleClientEvent(client, event)
+	}
+}
+
+func (h *RealtimeHub) handleClientEvent(client *realtimeClient, event RealtimeEvent) {
+	event.Type = strings.TrimSpace(event.Type)
+	if !isCallRealtimeType(event.Type) {
+		return
+	}
+
+	event.CallID = strings.TrimSpace(event.CallID)
+	if event.ConversationID == 0 || event.CallID == "" || len(event.CallID) > 128 {
+		return
+	}
+
+	recipients, err := ChatServiceInstance.DirectCallRecipients(client.userid, event.ConversationID)
+	if err != nil || len(recipients) == 0 {
+		return
+	}
+
+	event.Userid = client.userid
+	event.FromUserid = client.userid
+	event.Message = nil
+	event.Conversation = nil
+	event.IsOnline = false
+	event.SentAt = time.Now()
+
+	h.BroadcastToUsers(recipients, event)
+}
+
+func isCallRealtimeType(eventType string) bool {
+	switch eventType {
+	case "call.invite",
+		"call.accept",
+		"call.reject",
+		"call.busy",
+		"call.cancel",
+		"call.end",
+		"call.offer",
+		"call.answer",
+		"call.ice":
+		return true
+	default:
+		return false
 	}
 }
 

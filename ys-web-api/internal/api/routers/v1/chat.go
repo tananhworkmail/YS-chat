@@ -15,6 +15,7 @@ func ChatRouter(router *gin.RouterGroup) {
 	chat.GET("/search", controllers.Chat.Search)
 	chat.GET("/contacts", controllers.Chat.ListContacts)
 	chat.POST("/contacts", controllers.Chat.AddContact)
+	chat.GET("/realtime/health", controllers.Chat.RealtimeHealth)
 	chat.GET("/realtime", controllers.Chat.Realtime)
 	chat.POST("/devices", controllers.Chat.RegisterDeviceToken)
 	chat.GET("/conversations", controllers.Chat.ListConversations)
