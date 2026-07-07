@@ -1,0 +1,595 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
+
+class AppLocalizations {
+  const AppLocalizations(this.locale);
+
+  final Locale locale;
+
+  static const supportedLocales = [
+    Locale('vi'),
+    Locale('en'),
+    Locale('zh'),
+  ];
+
+  static const delegate = _AppLocalizationsDelegate();
+
+  static AppLocalizations of(BuildContext context) {
+    return Localizations.of<AppLocalizations>(context, AppLocalizations) ??
+        AppLocalizations(const Locale('vi'));
+  }
+
+  String get code {
+    final languageCode = locale.languageCode.toLowerCase();
+    if (languageCode == 'en' || languageCode == 'zh') return languageCode;
+    return 'vi';
+  }
+
+  String t(String key) {
+    return _strings[code]?[key] ?? _strings['vi']?[key] ?? key;
+  }
+
+  String? apiError(String errorCode) {
+    return _apiErrors[code]?[errorCode] ?? _apiErrors['vi']?[errorCode];
+  }
+
+  String downloaded(String filename) => switch (code) {
+        'en' => 'Downloaded $filename',
+        'zh' => '已下载 $filename',
+        _ => 'Đã tải về $filename',
+      };
+
+  String forwardedFrom(String name) => switch (code) {
+        'en' => 'Forwarded from $name',
+        'zh' => '转发自 $name',
+        _ => 'Đã chuyển tiếp từ $name',
+      };
+
+  String optionNumber(int number) => switch (code) {
+        'en' => 'Option $number',
+        'zh' => '选项 $number',
+        _ => 'Lựa chọn $number',
+      };
+
+  String memberCount(int count) => switch (code) {
+        'en' => '$count members',
+        'zh' => '$count 位成员',
+        _ => '$count thành viên',
+      };
+
+  String voteCount(int count) => switch (code) {
+        'en' => '$count votes',
+        'zh' => '$count 票',
+        _ => '$count lượt bình chọn',
+      };
+
+  String callingDuration(String duration) => switch (code) {
+        'en' => 'In call $duration',
+        'zh' => '通话中 $duration',
+        _ => 'Đang gọi $duration',
+      };
+
+  String callStatus(String raw) {
+    final normalized = raw
+        .toLowerCase()
+        .replaceAll('đ', 'd')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (normalized.contains('cuoc goi den')) return t('incomingCall');
+    if (normalized.contains('dang ket noi')) return t('connecting');
+    if (normalized.contains('dang goi')) return t('calling');
+    if (normalized.contains('khong truy cap duoc micro')) {
+      return t('microphoneUnavailable');
+    }
+    if (normalized.contains('cuoc goi bi tu choi')) return t('callRejected');
+    if (normalized.contains('nguoi kia dang ban')) return t('userBusy');
+    if (normalized.contains('cuoc goi da huy')) return t('callCanceled');
+    if (normalized.contains('cuoc goi da ket thuc')) return t('callEnded');
+    if (normalized.contains('goi dien khong thanh cong')) {
+      return t('callFailed');
+    }
+    return raw;
+  }
+
+  static String languageName(String code) {
+    return switch (code) {
+      'en' => 'English',
+      'zh' => '中文',
+      _ => 'Tiếng Việt',
+    };
+  }
+}
+
+extension AppLocalizationsX on BuildContext {
+  AppLocalizations get l10n => AppLocalizations.of(this);
+}
+
+class _AppLocalizationsDelegate
+    extends LocalizationsDelegate<AppLocalizations> {
+  const _AppLocalizationsDelegate();
+
+  @override
+  bool isSupported(Locale locale) {
+    return ['vi', 'en', 'zh'].contains(locale.languageCode.toLowerCase());
+  }
+
+  @override
+  Future<AppLocalizations> load(Locale locale) {
+    return SynchronousFuture(AppLocalizations(locale));
+  }
+
+  @override
+  bool shouldReload(_AppLocalizationsDelegate old) => false;
+}
+
+const _strings = {
+  'vi': {
+    'appTitle': 'YS Chat',
+    'startupFailed': 'Không khởi động được YS Chat',
+    'internalTagline': 'Kết nối nội bộ nhanh và bảo mật',
+    'login': 'Đăng nhập',
+    'register': 'Đăng ký',
+    'verify': 'Xác minh',
+    'createAccount': 'Tạo tài khoản mới',
+    'recoverPassword': 'Khôi phục mật khẩu',
+    'loginSubtitle': 'Sử dụng tài khoản nội bộ của bạn',
+    'registerSubtitle': 'Nhập thông tin nhân viên để kích hoạt',
+    'forgotSubtitle': 'Xác minh thông tin để nhận mật khẩu mới',
+    'employeeId': 'Mã nhân viên',
+    'enterEmployeeId': 'Nhập mã nhân viên',
+    'fullName': 'Họ tên',
+    'enterFullName': 'Nhập họ tên',
+    'birthday': 'Ngày sinh',
+    'idCard': 'CCCD',
+    'enterIdCard': 'Nhập số CCCD',
+    'password': 'Mật khẩu',
+    'enterPassword': 'Nhập mật khẩu',
+    'idSuffix': '5 số cuối CCCD',
+    'confirmPassword': 'Xác nhận mật khẩu',
+    'enterConfirmPassword': 'Nhập lại mật khẩu',
+    'forgotPassword': 'Quên mật khẩu',
+    'showPassword': 'Hiện mật khẩu',
+    'hidePassword': 'Ẩn mật khẩu',
+    'noAccount': 'Chưa có tài khoản?',
+    'registerNow': 'Đăng ký ngay',
+    'haveAccountLogin': 'Đã có tài khoản? Đăng nhập',
+    'backToLogin': 'Quay lại đăng nhập',
+    'registerSuccess': 'Đăng ký thành công. Vui lòng đăng nhập.',
+    'verifySuccess': 'Xác minh thành công. Vui lòng kiểm tra mật khẩu mới.',
+    'loginFailed': 'Đăng nhập không thành công',
+    'registerFailed': 'Đăng ký không thành công',
+    'verifyFailed': 'Xác minh không thành công',
+    'requiredFields': 'Vui lòng nhập đầy đủ thông tin',
+    'requiredVerifyFields': 'Vui lòng nhập đầy đủ thông tin xác minh',
+    'idSuffixInvalid': 'Số cuối CCCD phải gồm 5 chữ số',
+    'passwordMismatch': 'Mật khẩu xác nhận không khớp',
+    'connectionTimeout': 'Kết nối quá thời gian chờ',
+    'serverUnreachable': 'Không kết nối được máy chủ',
+    'messages': 'Tin nhắn',
+    'contacts': 'Danh bạ',
+    'profile': 'Hồ sơ',
+    'searchContacts': 'Tìm trong danh bạ',
+    'searchConversations': 'Tìm cuộc trò chuyện hoặc người dùng',
+    'noChats': 'Chưa có cuộc trò chuyện',
+    'noMatchingContacts': 'Chưa có liên hệ phù hợp',
+    'noOtherChats': 'Chưa có cuộc trò chuyện khác',
+    'selectChatPrompt': 'Chọn một cuộc trò chuyện để bắt đầu',
+    'forwardTo': 'Chuyển tiếp đến',
+    'openChat': 'Mở chat',
+    'clear': 'Xóa',
+    'directChat': 'Chat trực tiếp',
+    'online': 'Đang hoạt động',
+    'directMessage': 'Nhắn tin trực tiếp',
+    'replyingTo': 'Trả lời',
+    'recording': 'Đang ghi âm',
+    'reply': 'Trả lời',
+    'forward': 'Chuyển tiếp',
+    'copy': 'Copy',
+    'download': 'Tải về',
+    'downloadFailed': 'Tải file không thành công',
+    'forwardedMessage': 'Đã chuyển tiếp tin nhắn',
+    'back': 'Quay lại',
+    'call': 'Gọi điện',
+    'info': 'Thông tin',
+    'cancelReply': 'Bỏ trả lời',
+    'image': 'Ảnh',
+    'file': 'File',
+    'recordVoice': 'Ghi âm',
+    'stopRecording': 'Dừng ghi âm',
+    'poll': 'Bình chọn',
+    'typeMessage': 'Nhập tin nhắn',
+    'saveProfile': 'Lưu hồ sơ',
+    'changePassword': 'Đổi mật khẩu',
+    'logout': 'Đăng xuất',
+    'changeAvatar': 'Đổi avatar',
+    'language': 'Ngôn ngữ',
+    'passwordChanged': 'Đã đổi mật khẩu',
+    'passwordRequired': 'Vui lòng nhập đầy đủ mật khẩu',
+    'newPasswordMismatch': 'Mật khẩu mới không khớp',
+    'changePasswordFailed': 'Đổi mật khẩu không thành công',
+    'currentPassword': 'Mật khẩu hiện tại',
+    'newPassword': 'Mật khẩu mới',
+    'confirmNewPassword': 'Xác nhận mật khẩu mới',
+    'savePassword': 'Lưu mật khẩu',
+    'createPoll': 'Tạo bình chọn',
+    'question': 'Câu hỏi',
+    'delete': 'Xóa',
+    'addOption': 'Thêm lựa chọn',
+    'allowMultiple': 'Cho phép chọn nhiều',
+    'allowCustomOption': 'Cho phép thêm lựa chọn',
+    'showVoters': 'Hiện người bình chọn',
+    'chooseMultiple': 'chọn nhiều',
+    'chooseOne': 'chọn một',
+    'pollValidation': 'Cần câu hỏi và ít nhất 2 lựa chọn',
+    'pollCreateFailed': 'Tạo bình chọn không thành công',
+    'closed': 'Đã đóng',
+    'close': 'Đóng',
+    'addCustomOption': 'Thêm lựa chọn',
+    'sendOption': 'Gửi lựa chọn',
+    'voiceMessage': 'Tin nhắn thoại',
+    'members': 'Thành viên',
+    'media': 'Media',
+    'noMedia': 'Chưa có hình ảnh',
+    'noPolls': 'Chưa có bình chọn',
+    'sharedFiles': 'Tệp đã chia sẻ',
+    'noFiles': 'Chưa có tệp',
+    'attachmentFile': 'Tệp đính kèm',
+    'loadOlder': 'Tải thêm tin cũ',
+    'conversationFallback': 'Cuộc trò chuyện',
+    'voicePreview': 'Tin nhắn thoại',
+    'imagePreview': 'Hình ảnh',
+    'attachmentPreview': 'Tệp đính kèm',
+    'messagePreview': 'Tin nhắn',
+    'incomingCall': 'Cuộc gọi đến',
+    'connecting': 'Đang kết nối...',
+    'calling': 'Đang gọi...',
+    'microphoneUnavailable': 'Không truy cập được micro',
+    'callRejected': 'Cuộc gọi bị từ chối',
+    'userBusy': 'Người kia đang bận',
+    'callCanceled': 'Cuộc gọi đã hủy',
+    'callEnded': 'Cuộc gọi đã kết thúc',
+    'callFailed': 'Gọi điện không thành công',
+  },
+  'en': {
+    'appTitle': 'YS Chat',
+    'startupFailed': 'YS Chat could not start',
+    'internalTagline': 'Fast and secure internal messaging',
+    'login': 'Log in',
+    'register': 'Register',
+    'verify': 'Verify',
+    'createAccount': 'Create new account',
+    'recoverPassword': 'Recover password',
+    'loginSubtitle': 'Use your internal account',
+    'registerSubtitle': 'Enter employee information to activate',
+    'forgotSubtitle': 'Verify your information to receive a new password',
+    'employeeId': 'Employee ID',
+    'enterEmployeeId': 'Enter employee ID',
+    'fullName': 'Full name',
+    'enterFullName': 'Enter full name',
+    'birthday': 'Birthday',
+    'idCard': 'ID card',
+    'enterIdCard': 'Enter ID card number',
+    'password': 'Password',
+    'enterPassword': 'Enter password',
+    'idSuffix': 'Last 5 digits of ID',
+    'confirmPassword': 'Confirm password',
+    'enterConfirmPassword': 'Enter password again',
+    'forgotPassword': 'Forgot password',
+    'showPassword': 'Show password',
+    'hidePassword': 'Hide password',
+    'noAccount': 'No account yet?',
+    'registerNow': 'Register now',
+    'haveAccountLogin': 'Already have an account? Log in',
+    'backToLogin': 'Back to log in',
+    'registerSuccess': 'Registration successful. Please log in.',
+    'verifySuccess': 'Verification successful. Please check your new password.',
+    'loginFailed': 'Login failed',
+    'registerFailed': 'Registration failed',
+    'verifyFailed': 'Verification failed',
+    'requiredFields': 'Please fill in all information',
+    'requiredVerifyFields': 'Please fill in all verification information',
+    'idSuffixInvalid': 'The ID suffix must contain 5 digits',
+    'passwordMismatch': 'Passwords do not match',
+    'connectionTimeout': 'Connection timed out',
+    'serverUnreachable': 'Cannot connect to server',
+    'messages': 'Messages',
+    'contacts': 'Contacts',
+    'profile': 'Profile',
+    'searchContacts': 'Search contacts',
+    'searchConversations': 'Search chats or users',
+    'noChats': 'No conversations yet',
+    'noMatchingContacts': 'No matching contacts',
+    'noOtherChats': 'No other conversations',
+    'selectChatPrompt': 'Select a conversation to start',
+    'forwardTo': 'Forward to',
+    'openChat': 'Open chat',
+    'clear': 'Clear',
+    'directChat': 'Direct chat',
+    'online': 'Online',
+    'directMessage': 'Direct message',
+    'replyingTo': 'Replying to',
+    'recording': 'Recording',
+    'reply': 'Reply',
+    'forward': 'Forward',
+    'copy': 'Copy',
+    'download': 'Download',
+    'downloadFailed': 'File download failed',
+    'forwardedMessage': 'Message forwarded',
+    'back': 'Back',
+    'call': 'Call',
+    'info': 'Info',
+    'cancelReply': 'Cancel reply',
+    'image': 'Image',
+    'file': 'File',
+    'recordVoice': 'Record',
+    'stopRecording': 'Stop recording',
+    'poll': 'Poll',
+    'typeMessage': 'Type a message',
+    'saveProfile': 'Save profile',
+    'changePassword': 'Change password',
+    'logout': 'Log out',
+    'changeAvatar': 'Change avatar',
+    'language': 'Language',
+    'passwordChanged': 'Password changed',
+    'passwordRequired': 'Please enter all password fields',
+    'newPasswordMismatch': 'New passwords do not match',
+    'changePasswordFailed': 'Could not change password',
+    'currentPassword': 'Current password',
+    'newPassword': 'New password',
+    'confirmNewPassword': 'Confirm new password',
+    'savePassword': 'Save password',
+    'createPoll': 'Create poll',
+    'question': 'Question',
+    'delete': 'Delete',
+    'addOption': 'Add option',
+    'allowMultiple': 'Allow multiple choices',
+    'allowCustomOption': 'Allow custom options',
+    'showVoters': 'Show voters',
+    'chooseMultiple': 'multiple choices',
+    'chooseOne': 'single choice',
+    'pollValidation': 'Enter a question and at least 2 options',
+    'pollCreateFailed': 'Could not create poll',
+    'closed': 'Closed',
+    'close': 'Close',
+    'addCustomOption': 'Add option',
+    'sendOption': 'Send option',
+    'voiceMessage': 'Voice message',
+    'members': 'Members',
+    'media': 'Media',
+    'noMedia': 'No media yet',
+    'noPolls': 'No polls yet',
+    'sharedFiles': 'Shared files',
+    'noFiles': 'No files yet',
+    'attachmentFile': 'Attachment',
+    'loadOlder': 'Load older messages',
+    'conversationFallback': 'Conversation',
+    'voicePreview': 'Voice message',
+    'imagePreview': 'Image',
+    'attachmentPreview': 'Attachment',
+    'messagePreview': 'Message',
+    'incomingCall': 'Incoming call',
+    'connecting': 'Connecting...',
+    'calling': 'Calling...',
+    'microphoneUnavailable': 'Microphone unavailable',
+    'callRejected': 'Call rejected',
+    'userBusy': 'The other user is busy',
+    'callCanceled': 'Call canceled',
+    'callEnded': 'Call ended',
+    'callFailed': 'Call failed',
+  },
+  'zh': {
+    'appTitle': 'YS Chat',
+    'startupFailed': 'YS Chat 无法启动',
+    'internalTagline': '快速、安全的内部沟通',
+    'login': '登录',
+    'register': '注册',
+    'verify': '验证',
+    'createAccount': '创建新账号',
+    'recoverPassword': '找回密码',
+    'loginSubtitle': '使用内部账号登录',
+    'registerSubtitle': '输入员工资料以启用账号',
+    'forgotSubtitle': '验证资料以取得新密码',
+    'employeeId': '员工编号',
+    'enterEmployeeId': '请输入员工编号',
+    'fullName': '姓名',
+    'enterFullName': '请输入姓名',
+    'birthday': '出生日期',
+    'idCard': '身份证号',
+    'enterIdCard': '请输入身份证号',
+    'password': '密码',
+    'enterPassword': '请输入密码',
+    'idSuffix': '身份证后 5 位',
+    'confirmPassword': '确认密码',
+    'enterConfirmPassword': '请再次输入密码',
+    'forgotPassword': '忘记密码',
+    'showPassword': '显示密码',
+    'hidePassword': '隐藏密码',
+    'noAccount': '还没有账号？',
+    'registerNow': '立即注册',
+    'haveAccountLogin': '已有账号？登录',
+    'backToLogin': '返回登录',
+    'registerSuccess': '注册成功，请登录。',
+    'verifySuccess': '验证成功，请查看新密码。',
+    'loginFailed': '登录失败',
+    'registerFailed': '注册失败',
+    'verifyFailed': '验证失败',
+    'requiredFields': '请填写完整信息',
+    'requiredVerifyFields': '请填写完整验证信息',
+    'idSuffixInvalid': '身份证后 5 位必须为数字',
+    'passwordMismatch': '两次密码不一致',
+    'connectionTimeout': '连接超时',
+    'serverUnreachable': '无法连接服务器',
+    'messages': '消息',
+    'contacts': '通讯录',
+    'profile': '个人资料',
+    'searchContacts': '搜索通讯录',
+    'searchConversations': '搜索聊天或用户',
+    'noChats': '暂无会话',
+    'noMatchingContacts': '没有符合的联系人',
+    'noOtherChats': '没有其他会话',
+    'selectChatPrompt': '选择一个会话开始',
+    'forwardTo': '转发给',
+    'openChat': '打开聊天',
+    'clear': '清除',
+    'directChat': '私聊',
+    'online': '在线',
+    'directMessage': '私信',
+    'replyingTo': '回复',
+    'recording': '正在录音',
+    'reply': '回复',
+    'forward': '转发',
+    'copy': '复制',
+    'download': '下载',
+    'downloadFailed': '文件下载失败',
+    'forwardedMessage': '消息已转发',
+    'back': '返回',
+    'call': '通话',
+    'info': '信息',
+    'cancelReply': '取消回复',
+    'image': '图片',
+    'file': '文件',
+    'recordVoice': '录音',
+    'stopRecording': '停止录音',
+    'poll': '投票',
+    'typeMessage': '输入消息',
+    'saveProfile': '保存资料',
+    'changePassword': '修改密码',
+    'logout': '退出登录',
+    'changeAvatar': '更换头像',
+    'language': '语言',
+    'passwordChanged': '密码已修改',
+    'passwordRequired': '请填写所有密码栏位',
+    'newPasswordMismatch': '新密码不一致',
+    'changePasswordFailed': '修改密码失败',
+    'currentPassword': '当前密码',
+    'newPassword': '新密码',
+    'confirmNewPassword': '确认新密码',
+    'savePassword': '保存密码',
+    'createPoll': '创建投票',
+    'question': '问题',
+    'delete': '删除',
+    'addOption': '添加选项',
+    'allowMultiple': '允许多选',
+    'allowCustomOption': '允许添加选项',
+    'showVoters': '显示投票人',
+    'chooseMultiple': '多选',
+    'chooseOne': '单选',
+    'pollValidation': '请输入问题和至少 2 个选项',
+    'pollCreateFailed': '创建投票失败',
+    'closed': '已关闭',
+    'close': '关闭',
+    'addCustomOption': '添加选项',
+    'sendOption': '发送选项',
+    'voiceMessage': '语音消息',
+    'members': '成员',
+    'media': '媒体',
+    'noMedia': '暂无图片',
+    'noPolls': '暂无投票',
+    'sharedFiles': '共享文件',
+    'noFiles': '暂无文件',
+    'attachmentFile': '附件',
+    'loadOlder': '加载更早消息',
+    'conversationFallback': '会话',
+    'voicePreview': '语音消息',
+    'imagePreview': '图片',
+    'attachmentPreview': '附件',
+    'messagePreview': '消息',
+    'incomingCall': '来电',
+    'connecting': '正在连接...',
+    'calling': '正在呼叫...',
+    'microphoneUnavailable': '无法访问麦克风',
+    'callRejected': '通话被拒绝',
+    'userBusy': '对方忙线中',
+    'callCanceled': '通话已取消',
+    'callEnded': '通话已结束',
+    'callFailed': '通话失败',
+  },
+};
+
+const _apiErrors = {
+  'vi': {
+    'SYSTEM_ERROR': 'Lỗi hệ thống, vui lòng thử lại sau.',
+    'INVALID_INPUT': 'Dữ liệu đầu vào không hợp lệ.',
+    'USER_ALREADY_EXISTS': 'Tài khoản này đã được đăng ký.',
+    'HRM_USER_NOT_FOUND': 'Không tìm thấy hồ sơ nhân sự.',
+    'EMPLOYEE_RESIGNED': 'Nhân viên đã nghỉ việc, không thể đăng ký.',
+    'ID_CARD_MISMATCH': 'Số CMND/CCCD không khớp với hồ sơ.',
+    'BIRTHDAY_MISMATCH': 'Ngày sinh không khớp với hồ sơ gốc.',
+    'INVALID_CREDENTIALS': 'Sai tài khoản hoặc mật khẩu.',
+    'ACCOUNT_LOCKED': 'Tài khoản của bạn đã bị khóa.',
+    'USER_NOT_REGISTERED': 'Tài khoản chưa được đăng ký trên hệ thống.',
+    'CHAT_USER_NOT_FOUND': 'Không tìm thấy người dùng này.',
+    'CHAT_CONVERSATION_NOT_FOUND': 'Không tìm thấy hội thoại.',
+    'CHAT_NO_PERMISSION': 'Bạn không có quyền trong hội thoại này.',
+    'CHAT_EMPTY_MESSAGE': 'Tin nhắn đang trống.',
+    'CHAT_INVALID_MESSAGE_TYPE': 'Loại tin nhắn không hợp lệ.',
+    'CHAT_INVALID_POLL': 'Bình chọn không hợp lệ.',
+    'CHAT_POLL_NOT_FOUND': 'Không tìm thấy bình chọn.',
+    'CHAT_POLL_CLOSED': 'Bình chọn đã đóng.',
+    'CHAT_POLL_CUSTOM_OPTIONS_DISABLED':
+        'Bình chọn này không cho phép thêm lựa chọn khác.',
+    'CHAT_GROUP_NEEDS_MEMBER': 'Nhóm cần ít nhất một thành viên khác.',
+    'CHAT_CANNOT_ADD_DIRECT_MEMBER':
+        'Chat cá nhân không thể thêm thành viên. Vui lòng tạo nhóm mới.',
+    'CHAT_CANNOT_REMOVE_DIRECT_MEMBER':
+        'Chat cá nhân không thể xóa thành viên.',
+    'CHAT_ONLY_OWNER_CAN_MANAGE_MEMBERS':
+        'Chỉ chủ nhóm mới có thể xóa thành viên.',
+    'CHAT_MEMBER_NOT_FOUND': 'Thành viên không còn trong nhóm.',
+  },
+  'en': {
+    'SYSTEM_ERROR': 'System error, please try again later.',
+    'INVALID_INPUT': 'Invalid input data.',
+    'USER_ALREADY_EXISTS': 'This account is already registered.',
+    'HRM_USER_NOT_FOUND': 'Employee profile was not found.',
+    'EMPLOYEE_RESIGNED': 'This employee has resigned and cannot register.',
+    'ID_CARD_MISMATCH': 'The ID card number does not match the profile.',
+    'BIRTHDAY_MISMATCH': 'The birthday does not match the profile.',
+    'INVALID_CREDENTIALS': 'Invalid account or password.',
+    'ACCOUNT_LOCKED': 'Your account has been locked.',
+    'USER_NOT_REGISTERED': 'This account is not registered in the system.',
+    'CHAT_USER_NOT_FOUND': 'This user was not found.',
+    'CHAT_CONVERSATION_NOT_FOUND': 'Conversation was not found.',
+    'CHAT_NO_PERMISSION': 'You do not have permission in this conversation.',
+    'CHAT_EMPTY_MESSAGE': 'Message is empty.',
+    'CHAT_INVALID_MESSAGE_TYPE': 'Invalid message type.',
+    'CHAT_INVALID_POLL': 'Invalid poll.',
+    'CHAT_POLL_NOT_FOUND': 'Poll not found.',
+    'CHAT_POLL_CLOSED': 'Poll is closed.',
+    'CHAT_POLL_CUSTOM_OPTIONS_DISABLED':
+        'This poll does not allow custom options.',
+    'CHAT_GROUP_NEEDS_MEMBER': 'A group needs at least one other member.',
+    'CHAT_CANNOT_ADD_DIRECT_MEMBER':
+        'Direct chats cannot add members. Please create a new group.',
+    'CHAT_CANNOT_REMOVE_DIRECT_MEMBER': 'Direct chats cannot remove members.',
+    'CHAT_ONLY_OWNER_CAN_MANAGE_MEMBERS':
+        'Only the group owner can remove members.',
+    'CHAT_MEMBER_NOT_FOUND': 'The member is no longer in the group.',
+  },
+  'zh': {
+    'SYSTEM_ERROR': '系统错误，请稍后再试。',
+    'INVALID_INPUT': '输入数据无效。',
+    'USER_ALREADY_EXISTS': '此账号已注册。',
+    'HRM_USER_NOT_FOUND': '未找到员工资料。',
+    'EMPLOYEE_RESIGNED': '员工已离职，无法注册。',
+    'ID_CARD_MISMATCH': '身份证号与资料不匹配。',
+    'BIRTHDAY_MISMATCH': '出生日期与资料不匹配。',
+    'INVALID_CREDENTIALS': '账号或密码错误。',
+    'ACCOUNT_LOCKED': '您的账号已被锁定。',
+    'USER_NOT_REGISTERED': '此账号尚未在系统中注册。',
+    'CHAT_USER_NOT_FOUND': '未找到此用户。',
+    'CHAT_CONVERSATION_NOT_FOUND': '未找到会话。',
+    'CHAT_NO_PERMISSION': '您没有此会话的权限。',
+    'CHAT_EMPTY_MESSAGE': '消息为空。',
+    'CHAT_INVALID_MESSAGE_TYPE': '消息类型无效。',
+    'CHAT_INVALID_POLL': '投票无效。',
+    'CHAT_POLL_NOT_FOUND': '未找到投票。',
+    'CHAT_POLL_CLOSED': '投票已关闭。',
+    'CHAT_POLL_CUSTOM_OPTIONS_DISABLED': '此投票不允许添加自定义选项。',
+    'CHAT_GROUP_NEEDS_MEMBER': '群组至少需要另一位成员。',
+    'CHAT_CANNOT_ADD_DIRECT_MEMBER': '私聊无法添加成员，请创建新群组。',
+    'CHAT_CANNOT_REMOVE_DIRECT_MEMBER': '私聊无法移除成员。',
+    'CHAT_ONLY_OWNER_CAN_MANAGE_MEMBERS': '只有群主可以移除成员。',
+    'CHAT_MEMBER_NOT_FOUND': '成员已不在群组中。',
+  },
+};

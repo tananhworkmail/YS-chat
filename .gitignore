@@ -35,6 +35,8 @@ tmp/
 temp/
 *.tmp
 *.temp
+.tmp.driveupload/
+*.tmp.driveupload
 
 # Frontend dependencies and build output
 node_modules/

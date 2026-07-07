@@ -39,6 +39,7 @@ class AppState extends ChangeNotifier {
   String callPeerName = '';
   bool callMuted = false;
   int callDuration = 0;
+  String languageCode = 'vi';
   Timer? _reconnectTimer;
   Timer? _callTimeoutTimer;
   Timer? _callDurationTimer;
@@ -52,6 +53,7 @@ class AppState extends ChangeNotifier {
   Future<void> restoreSession() async {
     try {
       await tokenStore.load();
+      languageCode = tokenStore.languageCode;
       if (!isAuthenticated) return;
       await _guard(() async {
         me = await apiClient.profile();
@@ -86,6 +88,12 @@ class AppState extends ChangeNotifier {
       _connectRealtime();
       unawaited(pushService.registerCurrentDevice());
     });
+  }
+
+  Future<void> setLanguage(String code) async {
+    languageCode = code;
+    await tokenStore.saveLanguage(code);
+    notifyListeners();
   }
 
   Future<void> logout() async {

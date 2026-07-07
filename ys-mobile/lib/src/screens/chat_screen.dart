@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 import 'package:record/record.dart';
 
 import '../app/app_state.dart';
+import '../l10n/app_localizations.dart';
 import '../models/models.dart';
 import '../theme/app_theme.dart';
 import '../widgets/message_bubble.dart';
@@ -114,12 +115,12 @@ class _ChatScreenState extends State<ChatScreen> {
       await Dio().download(url, destination);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Da tai ve $filename')),
+        SnackBar(content: Text(context.l10n.downloaded(filename))),
       );
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Tai file khong thanh cong')),
+        SnackBar(content: Text(context.l10n.t('downloadFailed'))),
       );
     }
   }
@@ -139,7 +140,7 @@ class _ChatScreenState extends State<ChatScreen> {
     await state.forwardMessage(target, message);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Da chuyen tiep tin nhan')),
+      SnackBar(content: Text(context.l10n.t('forwardedMessage'))),
     );
   }
 
@@ -260,21 +261,21 @@ class _AppRail extends StatelessWidget {
             const BrandLogo(size: 40, padding: 5, shadow: false),
             const SizedBox(height: 28),
             _RailButton(
-              tooltip: 'Tin nhan',
+              tooltip: context.l10n.t('messages'),
               icon: Icons.chat_bubble_outline,
               active: mode == _PanelMode.chats,
               onTap: () => onModeChanged(_PanelMode.chats),
             ),
             const SizedBox(height: 10),
             _RailButton(
-              tooltip: 'Danh ba',
+              tooltip: context.l10n.t('contacts'),
               icon: Icons.groups_outlined,
               active: mode == _PanelMode.contacts,
               onTap: () => onModeChanged(_PanelMode.contacts),
             ),
             const Spacer(),
             _RailButton(
-                tooltip: 'Ho so',
+                tooltip: context.l10n.t('profile'),
                 icon: Icons.account_circle_outlined,
                 onTap: onProfile),
           ],
@@ -316,19 +317,19 @@ class _MobileRail extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             _RailButton(
-              tooltip: 'Tin nhan',
+              tooltip: context.l10n.t('messages'),
               icon: Icons.chat_bubble_outline,
               active: mode == _PanelMode.chats,
               onTap: () => onModeChanged(_PanelMode.chats),
             ),
             _RailButton(
-              tooltip: 'Danh ba',
+              tooltip: context.l10n.t('contacts'),
               icon: Icons.groups_outlined,
               active: mode == _PanelMode.contacts,
               onTap: () => onModeChanged(_PanelMode.contacts),
             ),
             _RailButton(
-                tooltip: 'Ho so',
+                tooltip: context.l10n.t('profile'),
                 icon: Icons.account_circle_outlined,
                 onTap: onProfile),
           ],
@@ -432,8 +433,9 @@ class _CallPanel extends StatelessWidget {
                     ),
                     Text(
                       state.callState == 'active'
-                          ? 'Dang goi ${_formatDuration(state.callDuration)}'
-                          : state.callStatus,
+                          ? context.l10n.callingDuration(
+                              _formatDuration(state.callDuration))
+                          : context.l10n.callStatus(state.callStatus),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -569,7 +571,9 @@ class _SidePanelState extends State<_SidePanel> {
         child: Column(
           children: [
             _PanelHeader(
-              title: isContacts ? 'Danh ba' : 'Tin nhan',
+              title: isContacts
+                  ? context.l10n.t('contacts')
+                  : context.l10n.t('messages'),
               subtitle: 'YS Chat',
               primaryIcon: isContacts
                   ? Icons.person_add_alt_outlined
@@ -585,20 +589,20 @@ class _SidePanelState extends State<_SidePanel> {
                     isContacts ? null : widget.onSearchUser(value),
                 decoration: InputDecoration(
                   hintText: isContacts
-                      ? 'Tim trong danh ba'
-                      : 'Tim cuoc tro chuyen hoac nguoi dung',
+                      ? context.l10n.t('searchContacts')
+                      : context.l10n.t('searchConversations'),
                   prefixIcon: const Icon(Icons.search),
                   suffixIcon: searchController.text.isEmpty
                       ? (isContacts
                           ? null
                           : IconButton(
-                              tooltip: 'Mo chat',
+                              tooltip: context.l10n.t('openChat'),
                               onPressed: () =>
                                   widget.onSearchUser(searchController.text),
                               icon: const Icon(Icons.chat_bubble_outline),
                             ))
                       : IconButton(
-                          tooltip: 'Xoa',
+                          tooltip: context.l10n.t('clear'),
                           onPressed: searchController.clear,
                           icon: const Icon(Icons.close),
                         ),
@@ -693,7 +697,7 @@ class _PanelHeader extends StatelessWidget {
               ),
             ),
             _PanelIconButton(
-                tooltip: 'Mo chat',
+                tooltip: context.l10n.t('openChat'),
                 icon: primaryIcon,
                 onTap: onPrimary,
                 primary: true),
@@ -754,10 +758,10 @@ class _ConversationList extends StatelessWidget {
   Widget build(BuildContext context) {
     if (conversations.isEmpty) {
       return ListView(
-        children: const [
-          SizedBox(height: 120),
+        children: [
+          const SizedBox(height: 120),
           EmptyState(
-              icon: Icons.chat_bubble_outline, text: 'Chua co cuoc tro chuyen'),
+              icon: Icons.chat_bubble_outline, text: context.l10n.t('noChats')),
         ],
       );
     }
@@ -848,7 +852,7 @@ class _ConversationItem extends StatelessWidget {
                       ),
                       const SizedBox(height: 3),
                       Text(
-                        _lastMessagePreview(conversation),
+                        _lastMessagePreview(context, conversation),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -889,8 +893,9 @@ class _ContactList extends StatelessWidget {
       ..sort((a, b) => a.fullname.compareTo(b.fullname));
 
     if (contacts.isEmpty) {
-      return const EmptyState(
-          icon: Icons.groups_outlined, text: 'Chua co lien he phu hop');
+      return EmptyState(
+          icon: Icons.groups_outlined,
+          text: context.l10n.t('noMatchingContacts'));
     }
 
     return ListView.builder(
@@ -1029,9 +1034,9 @@ class _ThreadState extends State<_Thread> {
     if (conversation == null) {
       return Container(
         color: AppColors.canvas,
-        child: const EmptyState(
+        child: EmptyState(
             icon: Icons.forum_outlined,
-            text: 'Chon mot cuoc tro chuyen de bat dau'),
+            text: context.l10n.t('selectChatPrompt')),
       );
     }
 
@@ -1156,7 +1161,7 @@ class _ChatHeader extends StatelessWidget {
         children: [
           if (!wide)
             IconButton(
-              tooltip: 'Quay lai',
+              tooltip: context.l10n.t('back'),
               onPressed: onBack,
               icon: const Icon(Icons.arrow_back),
             ),
@@ -1186,10 +1191,10 @@ class _ChatHeader extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   conversation.type == 'group'
-                      ? '${conversation.memberCount} thanh vien'
+                      ? context.l10n.memberCount(conversation.memberCount)
                       : (member?.isOnline == true
-                          ? 'Dang hoat dong'
-                          : 'Nhan tin truc tiep'),
+                          ? context.l10n.t('online')
+                          : context.l10n.t('directMessage')),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -1202,12 +1207,12 @@ class _ChatHeader extends StatelessWidget {
           ),
           if (conversation.type == 'direct')
             IconButton(
-              tooltip: 'Goi dien',
+              tooltip: context.l10n.t('call'),
               onPressed: () => context.read<AppState>().startAudioCall(),
               icon: const Icon(Icons.phone_outlined),
             ),
           IconButton(
-            tooltip: 'Thong tin',
+            tooltip: context.l10n.t('info'),
             onPressed: onInfo,
             icon: const Icon(Icons.info_outline),
           ),
@@ -1272,7 +1277,7 @@ class _Composer extends StatelessWidget {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            'Tra loi ${replyingTo!.senderName}',
+                            '${context.l10n.t('replyingTo')} ${replyingTo!.senderName}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -1281,7 +1286,7 @@ class _Composer extends StatelessWidget {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            _messagePreview(replyingTo!),
+                            _messagePreview(context, replyingTo!),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -1293,7 +1298,7 @@ class _Composer extends StatelessWidget {
                       ),
                     ),
                     IconButton(
-                      tooltip: 'Bo tra loi',
+                      tooltip: context.l10n.t('cancelReply'),
                       onPressed: onCancelReply,
                       icon: const Icon(Icons.close),
                     ),
@@ -1314,10 +1319,10 @@ class _Composer extends StatelessWidget {
                     const Icon(Icons.fiber_manual_record,
                         size: 15, color: AppColors.danger),
                     const SizedBox(width: 8),
-                    const Expanded(
+                    Expanded(
                       child: Text(
-                        'Dang ghi am',
-                        style: TextStyle(
+                        context.l10n.t('recording'),
+                        style: const TextStyle(
                             color: AppColors.danger,
                             fontWeight: FontWeight.w800),
                       ),
@@ -1338,21 +1343,23 @@ class _Composer extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 _ComposerButton(
-                    tooltip: 'Anh',
+                    tooltip: context.l10n.t('image'),
                     icon: Icons.image_outlined,
                     onTap: onPickImages),
                 _ComposerButton(
-                    tooltip: 'File',
+                    tooltip: context.l10n.t('file'),
                     icon: Icons.attach_file,
                     onTap: onPickFiles),
                 _ComposerButton(
-                  tooltip: recording ? 'Dung ghi am' : 'Ghi am',
+                  tooltip: recording
+                      ? context.l10n.t('stopRecording')
+                      : context.l10n.t('recordVoice'),
                   icon: recording ? Icons.stop_circle_outlined : Icons.mic_none,
                   active: recording,
                   onTap: onRecord,
                 ),
                 _ComposerButton(
-                  tooltip: 'Binh chon',
+                  tooltip: context.l10n.t('poll'),
                   icon: Icons.how_to_vote_outlined,
                   onTap: onCreatePoll,
                 ),
@@ -1364,10 +1371,10 @@ class _Composer extends StatelessWidget {
                     maxLines: 4,
                     textInputAction: TextInputAction.send,
                     onSubmitted: (_) => onSend(),
-                    decoration: const InputDecoration(
-                      hintText: 'Nhap tin nhan',
-                      contentPadding:
-                          EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+                    decoration: InputDecoration(
+                      hintText: context.l10n.t('typeMessage'),
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 11, vertical: 10),
                     ),
                   ),
                 ),
@@ -1526,7 +1533,7 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                     size: 86,
                   ),
                   _PanelIconButton(
-                    tooltip: 'Doi avatar',
+                    tooltip: context.l10n.t('changeAvatar'),
                     icon: Icons.photo_camera_outlined,
                     onTap: _saving ? () {} : _pickAvatar,
                     primary: true,
@@ -1537,10 +1544,33 @@ class _ProfileSheetState extends State<_ProfileSheet> {
             const SizedBox(height: 18),
             TextField(
               controller: _fullnameController,
-              decoration: const InputDecoration(
-                labelText: 'Ho ten',
-                prefixIcon: Icon(Icons.person_outline),
+              decoration: InputDecoration(
+                labelText: context.l10n.t('fullName'),
+                prefixIcon: const Icon(Icons.person_outline),
               ),
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              initialValue: state.languageCode,
+              decoration: InputDecoration(
+                labelText: context.l10n.t('language'),
+                prefixIcon: const Icon(Icons.language),
+              ),
+              items: const ['vi', 'en', 'zh']
+                  .map(
+                    (code) => DropdownMenuItem(
+                      value: code,
+                      child: Text(AppLocalizations.languageName(code)),
+                    ),
+                  )
+                  .toList(),
+              onChanged: _saving
+                  ? null
+                  : (code) {
+                      if (code != null) {
+                        context.read<AppState>().setLanguage(code);
+                      }
+                    },
             ),
             const SizedBox(height: 12),
             Text(
@@ -1559,19 +1589,19 @@ class _ProfileSheetState extends State<_ProfileSheet> {
                           strokeWidth: 2, color: Colors.white),
                     )
                   : const Icon(Icons.save_outlined),
-              label: const Text('Luu ho so'),
+              label: Text(context.l10n.t('saveProfile')),
             ),
             const SizedBox(height: 10),
             OutlinedButton.icon(
               onPressed: _saving ? null : _openPasswordSheet,
               icon: const Icon(Icons.lock_reset_outlined),
-              label: const Text('Doi mat khau'),
+              label: Text(context.l10n.t('changePassword')),
             ),
             const SizedBox(height: 10),
             TextButton.icon(
               onPressed: _saving ? null : _logout,
               icon: const Icon(Icons.logout),
-              label: const Text('Dang xuat'),
+              label: Text(context.l10n.t('logout')),
               style: TextButton.styleFrom(foregroundColor: AppColors.danger),
             ),
           ],
@@ -1612,11 +1642,11 @@ class _PasswordSheetState extends State<_PasswordSheet> {
     final confirmPassword = _confirmPasswordController.text;
 
     if (currentPassword.isEmpty || newPassword.isEmpty) {
-      setState(() => _error = 'Vui long nhap day du mat khau');
+      setState(() => _error = context.l10n.t('passwordRequired'));
       return;
     }
     if (newPassword != confirmPassword) {
-      setState(() => _error = 'Mat khau moi khong khop');
+      setState(() => _error = context.l10n.t('newPasswordMismatch'));
       return;
     }
 
@@ -1632,11 +1662,11 @@ class _PasswordSheetState extends State<_PasswordSheet> {
       if (!mounted) return;
       Navigator.of(context).pop();
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Da doi mat khau')),
+        SnackBar(content: Text(context.l10n.t('passwordChanged'))),
       );
     } catch (_) {
       if (mounted) {
-        setState(() => _error = 'Doi mat khau khong thanh cong');
+        setState(() => _error = context.l10n.t('changePasswordFailed'));
       }
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -1653,9 +1683,9 @@ class _PasswordSheetState extends State<_PasswordSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Doi mat khau',
-              style: TextStyle(
+            Text(
+              context.l10n.t('changePassword'),
+              style: const TextStyle(
                   color: AppColors.ink,
                   fontSize: 18,
                   fontWeight: FontWeight.w900),
@@ -1666,10 +1696,12 @@ class _PasswordSheetState extends State<_PasswordSheet> {
               obscureText: _obscureCurrent,
               textInputAction: TextInputAction.next,
               decoration: InputDecoration(
-                labelText: 'Mat khau hien tai',
+                labelText: context.l10n.t('currentPassword'),
                 prefixIcon: const Icon(Icons.lock_outline),
                 suffixIcon: IconButton(
-                  tooltip: _obscureCurrent ? 'Hien mat khau' : 'An mat khau',
+                  tooltip: _obscureCurrent
+                      ? context.l10n.t('showPassword')
+                      : context.l10n.t('hidePassword'),
                   onPressed: () =>
                       setState(() => _obscureCurrent = !_obscureCurrent),
                   icon: Icon(_obscureCurrent
@@ -1684,10 +1716,12 @@ class _PasswordSheetState extends State<_PasswordSheet> {
               obscureText: _obscureNew,
               textInputAction: TextInputAction.next,
               decoration: InputDecoration(
-                labelText: 'Mat khau moi',
+                labelText: context.l10n.t('newPassword'),
                 prefixIcon: const Icon(Icons.lock_reset_outlined),
                 suffixIcon: IconButton(
-                  tooltip: _obscureNew ? 'Hien mat khau' : 'An mat khau',
+                  tooltip: _obscureNew
+                      ? context.l10n.t('showPassword')
+                      : context.l10n.t('hidePassword'),
                   onPressed: () => setState(() => _obscureNew = !_obscureNew),
                   icon: Icon(_obscureNew
                       ? Icons.visibility_outlined
@@ -1702,10 +1736,12 @@ class _PasswordSheetState extends State<_PasswordSheet> {
               textInputAction: TextInputAction.done,
               onSubmitted: (_) => _saving ? null : _save(),
               decoration: InputDecoration(
-                labelText: 'Xac nhan mat khau moi',
+                labelText: context.l10n.t('confirmNewPassword'),
                 prefixIcon: const Icon(Icons.verified_outlined),
                 suffixIcon: IconButton(
-                  tooltip: _obscureConfirm ? 'Hien mat khau' : 'An mat khau',
+                  tooltip: _obscureConfirm
+                      ? context.l10n.t('showPassword')
+                      : context.l10n.t('hidePassword'),
                   onPressed: () =>
                       setState(() => _obscureConfirm = !_obscureConfirm),
                   icon: Icon(_obscureConfirm
@@ -1732,7 +1768,7 @@ class _PasswordSheetState extends State<_PasswordSheet> {
                           strokeWidth: 2, color: Colors.white),
                     )
                   : const Icon(Icons.save_outlined),
-              label: const Text('Luu mat khau'),
+              label: Text(context.l10n.t('savePassword')),
             ),
           ],
         ),
@@ -1821,20 +1857,20 @@ class _ForwardSheet extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Chuyen tiep den',
-              style: TextStyle(
+            Text(
+              context.l10n.t('forwardTo'),
+              style: const TextStyle(
                   color: AppColors.ink,
                   fontSize: 18,
                   fontWeight: FontWeight.w900),
             ),
             const SizedBox(height: 10),
             if (items.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 32),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 32),
                 child: EmptyState(
                     icon: Icons.forward_outlined,
-                    text: 'Chua co cuoc tro chuyen khac'),
+                    text: context.l10n.t('noOtherChats')),
               )
             else
               Flexible(
@@ -1851,7 +1887,7 @@ class _ForwardSheet extends StatelessWidget {
                           : YSAvatar(label: title, size: 42),
                       title: Text(title,
                           maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(_lastMessagePreview(conversation),
+                      subtitle: Text(_lastMessagePreview(context, conversation),
                           maxLines: 1, overflow: TextOverflow.ellipsis),
                       onTap: () => Navigator.of(context).pop(conversation),
                     );
@@ -1913,7 +1949,7 @@ class _PollCreateSheetState extends State<_PollCreateSheet> {
         .toSet()
         .toList();
     if (question.isEmpty || options.length < 2) {
-      setState(() => _error = 'Can cau hoi va it nhat 2 lua chon');
+      setState(() => _error = context.l10n.t('pollValidation'));
       return;
     }
     setState(() {
@@ -1930,7 +1966,7 @@ class _PollCreateSheetState extends State<_PollCreateSheet> {
           );
       if (mounted) Navigator.of(context).pop();
     } catch (_) {
-      if (mounted) setState(() => _error = 'Tao binh chon khong thanh cong');
+      if (mounted) setState(() => _error = context.l10n.t('pollCreateFailed'));
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
@@ -1947,9 +1983,9 @@ class _PollCreateSheetState extends State<_PollCreateSheet> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text(
-                'Tao binh chon',
-                style: TextStyle(
+              Text(
+                context.l10n.t('createPoll'),
+                style: const TextStyle(
                     color: AppColors.ink,
                     fontSize: 18,
                     fontWeight: FontWeight.w900),
@@ -1957,9 +1993,9 @@ class _PollCreateSheetState extends State<_PollCreateSheet> {
               const SizedBox(height: 12),
               TextField(
                 controller: _questionController,
-                decoration: const InputDecoration(
-                  labelText: 'Cau hoi',
-                  prefixIcon: Icon(Icons.help_outline),
+                decoration: InputDecoration(
+                  labelText: context.l10n.t('question'),
+                  prefixIcon: const Icon(Icons.help_outline),
                 ),
               ),
               const SizedBox(height: 12),
@@ -1972,13 +2008,13 @@ class _PollCreateSheetState extends State<_PollCreateSheet> {
                         child: TextField(
                           controller: entry.value,
                           decoration: InputDecoration(
-                            labelText: 'Lua chon ${entry.key + 1}',
+                            labelText: context.l10n.optionNumber(entry.key + 1),
                             prefixIcon: const Icon(Icons.circle_outlined),
                           ),
                         ),
                       ),
                       IconButton(
-                        tooltip: 'Xoa',
+                        tooltip: context.l10n.t('delete'),
                         onPressed: _optionControllers.length <= 2
                             ? null
                             : () => _removeOption(entry.key),
@@ -1994,27 +2030,27 @@ class _PollCreateSheetState extends State<_PollCreateSheet> {
                   onPressed:
                       _optionControllers.length >= 20 ? null : _addOption,
                   icon: const Icon(Icons.add),
-                  label: const Text('Them lua chon'),
+                  label: Text(context.l10n.t('addOption')),
                 ),
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 value: _allowMultiple,
                 onChanged: (value) => setState(() => _allowMultiple = value),
-                title: const Text('Cho phep chon nhieu'),
+                title: Text(context.l10n.t('allowMultiple')),
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 value: _allowCustomOptions,
                 onChanged: (value) =>
                     setState(() => _allowCustomOptions = value),
-                title: const Text('Cho phep them lua chon'),
+                title: Text(context.l10n.t('allowCustomOption')),
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 value: _showVoters,
                 onChanged: (value) => setState(() => _showVoters = value),
-                title: const Text('Hien nguoi binh chon'),
+                title: Text(context.l10n.t('showVoters')),
               ),
               if (_error.isNotEmpty)
                 Text(_error,
@@ -2030,7 +2066,7 @@ class _PollCreateSheetState extends State<_PollCreateSheet> {
                             strokeWidth: 2, color: Colors.white),
                       )
                     : const Icon(Icons.how_to_vote_outlined),
-                label: const Text('Tao binh chon'),
+                label: Text(context.l10n.t('createPoll')),
               ),
             ],
           ),
@@ -2106,14 +2142,14 @@ class _InfoPanel extends StatelessWidget {
               const SizedBox(height: 4),
               Text(
                 conversation.type == 'group'
-                    ? '${conversation.memberCount} thanh vien'
-                    : 'Chat truc tiep',
+                    ? context.l10n.memberCount(conversation.memberCount)
+                    : context.l10n.t('directChat'),
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                     color: AppColors.muted, fontWeight: FontWeight.w700),
               ),
               const SizedBox(height: 18),
-              const _InfoSectionTitle(title: 'Thanh vien'),
+              _InfoSectionTitle(title: context.l10n.t('members')),
               ...conversation.members.map((member) {
                 final display = member.fullname.trim().isEmpty
                     ? member.userid
@@ -2128,11 +2164,11 @@ class _InfoPanel extends StatelessWidget {
                 );
               }),
               const SizedBox(height: 12),
-              const _InfoSectionTitle(title: 'Media'),
+              _InfoSectionTitle(title: context.l10n.t('media')),
               if (media.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 16),
-                  child: Text('Chua co hinh anh',
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  child: Text(context.l10n.t('noMedia'),
                       style: TextStyle(color: AppColors.muted)),
                 )
               else
@@ -2186,11 +2222,11 @@ class _InfoPanel extends StatelessWidget {
                   },
                 ),
               const SizedBox(height: 16),
-              const _InfoSectionTitle(title: 'Binh chon'),
+              _InfoSectionTitle(title: context.l10n.t('poll')),
               if (polls.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 16),
-                  child: Text('Chua co binh chon',
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  child: Text(context.l10n.t('noPolls'),
                       style: TextStyle(color: AppColors.muted)),
                 )
               else
@@ -2200,15 +2236,15 @@ class _InfoPanel extends StatelessWidget {
                           color: AppColors.brand),
                       title: Text(message.poll?.question ?? message.content,
                           maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(
-                          '${message.poll?.totalVotes ?? 0} luot binh chon'),
+                      subtitle: Text(context.l10n
+                          .voteCount(message.poll?.totalVotes ?? 0)),
                     )),
               const SizedBox(height: 16),
-              const _InfoSectionTitle(title: 'Tep da chia se'),
+              _InfoSectionTitle(title: context.l10n.t('sharedFiles')),
               if (documents.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 16),
-                  child: Text('Chua co tep',
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  child: Text(context.l10n.t('noFiles'),
                       style: TextStyle(color: AppColors.muted)),
                 )
               else
@@ -2216,11 +2252,11 @@ class _InfoPanel extends StatelessWidget {
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.insert_drive_file_outlined,
                           color: AppColors.brand),
-                      title: const Text('Tep dinh kem',
+                      title: Text(context.l10n.t('attachmentFile'),
                           maxLines: 1, overflow: TextOverflow.ellipsis),
                       subtitle: Text(_formatBytes(file.fileSize)),
                       trailing: IconButton(
-                        tooltip: 'Tai ve',
+                        tooltip: context.l10n.t('download'),
                         onPressed: () => onDownload(file),
                         icon: const Icon(Icons.download_outlined),
                       ),
@@ -2238,7 +2274,7 @@ class _InfoPanel extends StatelessWidget {
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.history),
-                    label: const Text('Tai them tin cu'),
+                    label: Text(context.l10n.t('loadOlder')),
                   ),
                 ),
             ],
@@ -2314,23 +2350,28 @@ ChatUser? _presenceMember(ChatConversation conversation, String currentUserid) {
       .firstOrNull;
 }
 
-String _lastMessagePreview(ChatConversation conversation) {
+String _lastMessagePreview(
+    BuildContext context, ChatConversation conversation) {
   final message = conversation.lastMessage;
   if (message == null) return '';
   if (message.content.trim().isNotEmpty) return message.content.trim();
   final attachment = message.attachments.firstOrNull;
   if (attachment != null) return attachment.fileName;
-  if (message.type == 'voice') return 'Tin nhan thoai';
-  if (message.type == 'image') return 'Hinh anh';
-  return 'Tap tin';
+  if (message.type == 'voice') return context.l10n.t('voicePreview');
+  if (message.type == 'image') return context.l10n.t('imagePreview');
+  return context.l10n.t('file');
 }
 
-String _messagePreview(ChatMessage message) {
+String _messagePreview(BuildContext context, ChatMessage message) {
   if (message.content.trim().isNotEmpty) return message.content.trim();
-  if (message.attachments.any(_isImageAttachment)) return 'Hinh anh';
-  if (message.type == 'voice') return 'Tin nhan thoai';
-  if (message.attachments.isNotEmpty) return 'Tep dinh kem';
-  return 'Tin nhan';
+  if (message.attachments.any(_isImageAttachment)) {
+    return context.l10n.t('imagePreview');
+  }
+  if (message.type == 'voice') return context.l10n.t('voicePreview');
+  if (message.attachments.isNotEmpty) {
+    return context.l10n.t('attachmentPreview');
+  }
+  return context.l10n.t('messagePreview');
 }
 
 bool _isImageAttachment(ChatAttachment attachment) {

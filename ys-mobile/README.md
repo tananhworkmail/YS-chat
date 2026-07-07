@@ -60,6 +60,13 @@ cd "D:\Ty Thac Project\YS chat\ys-mobile"
 .\scripts\build-apk-for-web.cmd -ApiUrl "http://192.168.71.87:3666/api/v1"
 ```
 
+Dung script tren thay cho `flutter build apk --release`. Lenh mac dinh cua
+Flutter co the co build them `android-arm` 32-bit; voi Flutter SDK hien tai
+tren may nay, artifact `android-arm-release\gen_snapshot` khong co nen se bao
+loi. Script nay build ro `android-arm64,android-x64` va Gradle chi dong goi
+`arm64-v8a,x86_64`, de file tai web chay duoc tren dien thoai Android 64-bit
+va LDPlayer x64 ma khong bi chen thu vien plugin cho ABI thieu Flutter runtime.
+
 File se duoc copy thanh:
 
 ```text

@@ -27,10 +27,10 @@ if (-not $flutterCommand) {
 Push-Location $mobileRoot
 try {
     if ($DebugBuild) {
-        & $flutterCommand build apk --debug --target-platform android-arm64 --dart-define="YS_API_URL=$ApiUrl"
+        & $flutterCommand build apk --debug --target-platform android-arm64,android-x64 --dart-define="YS_API_URL=$ApiUrl"
         $sourceApk = Join-Path $mobileRoot "build\app\outputs\flutter-apk\app-debug.apk"
     } else {
-        & $flutterCommand build apk --release --target-platform android-arm64 --dart-define="YS_API_URL=$ApiUrl"
+        & $flutterCommand build apk --release --target-platform android-arm64,android-x64 --dart-define="YS_API_URL=$ApiUrl"
         $sourceApk = Join-Path $mobileRoot "build\app\outputs\flutter-apk\app-release.apk"
     }
 

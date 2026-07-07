@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../app/app_state.dart';
+import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
 
 enum _AuthMode { login, register, forgot }
@@ -55,11 +56,12 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _login() async {
     final state = context.read<AppState>();
+    final loginFailed = context.l10n.t('loginFailed');
     try {
       await state.login(
           _useridController.text.trim(), _passwordController.text);
     } catch (err) {
-      _showError(_friendlyError(err, fallback: 'Dang nhap khong thanh cong'));
+      _showError(_friendlyError(err, fallback: loginFailed));
     }
   }
 
@@ -74,15 +76,15 @@ class _LoginScreenState extends State<LoginScreen> {
         fullname.isEmpty ||
         password.isEmpty ||
         idSuffix.isEmpty) {
-      _showError('Vui long nhap day du thong tin');
+      _showError(context.l10n.t('requiredFields'));
       return;
     }
     if (!RegExp(r'^\d{5}$').hasMatch(idSuffix)) {
-      _showError('So cuoi CCCD phai gom 5 chu so');
+      _showError(context.l10n.t('idSuffixInvalid'));
       return;
     }
     if (password != confirm) {
-      _showError('Mat khau xac nhan khong khop');
+      _showError(context.l10n.t('passwordMismatch'));
       return;
     }
 
@@ -96,10 +98,9 @@ class _LoginScreenState extends State<LoginScreen> {
       if (!mounted) return;
       _switchMode(_AuthMode.login);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Dang ky thanh cong. Vui long dang nhap.')),
+        SnackBar(content: Text(context.l10n.t('registerSuccess'))),
       );
-    }, fallback: 'Dang ky khong thanh cong');
+    }, fallback: context.l10n.t('registerFailed'));
   }
 
   Future<void> _forgotPassword() async {
@@ -112,7 +113,7 @@ class _LoginScreenState extends State<LoginScreen> {
         fullname.isEmpty ||
         birthday.isEmpty ||
         idCard.isEmpty) {
-      _showError('Vui long nhap day du thong tin xac minh');
+      _showError(context.l10n.t('requiredVerifyFields'));
       return;
     }
 
@@ -126,11 +127,9 @@ class _LoginScreenState extends State<LoginScreen> {
       if (!mounted) return;
       _switchMode(_AuthMode.login);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content:
-                Text('Xac minh thanh cong. Vui long kiem tra mat khau moi.')),
+        SnackBar(content: Text(context.l10n.t('verifySuccess'))),
       );
-    }, fallback: 'Xac minh khong thanh cong');
+    }, fallback: context.l10n.t('verifyFailed'));
   }
 
   Future<void> _runLocalAction(Future<void> Function() action,
@@ -181,12 +180,15 @@ class _LoginScreenState extends State<LoginScreen> {
   String _friendlyError(Object err, {required String fallback}) {
     if (err is DioException) {
       final data = err.response?.data;
-      if (data is Map && data['error'] != null) return '${data['error']}';
+      if (data is Map && data['error'] != null) {
+        final errorCode = '${data['error']}';
+        return context.l10n.apiError(errorCode) ?? errorCode;
+      }
       if (err.type == DioExceptionType.connectionTimeout ||
           err.type == DioExceptionType.receiveTimeout) {
-        return 'Ket noi qua thoi gian cho';
+        return context.l10n.t('connectionTimeout');
       }
-      if (err.response == null) return 'Khong ket noi duoc may chu';
+      if (err.response == null) return context.l10n.t('serverUnreachable');
     }
     return fallback;
   }
@@ -247,10 +249,10 @@ class _LoginScreenState extends State<LoginScreen> {
         TextField(
           controller: _useridController,
           textInputAction: TextInputAction.next,
-          decoration: const InputDecoration(
-            labelText: 'Ma nhan vien',
-            hintText: 'Nhap ma nhan vien',
-            prefixIcon: Icon(Icons.person_outline),
+          decoration: InputDecoration(
+            labelText: context.l10n.t('employeeId'),
+            hintText: context.l10n.t('enterEmployeeId'),
+            prefixIcon: const Icon(Icons.person_outline),
           ),
         ),
         if (_mode != _AuthMode.login) ...[
@@ -258,10 +260,10 @@ class _LoginScreenState extends State<LoginScreen> {
           TextField(
             controller: _fullnameController,
             textInputAction: TextInputAction.next,
-            decoration: const InputDecoration(
-              labelText: 'Ho ten',
-              hintText: 'Nhap ho ten',
-              prefixIcon: Icon(Icons.badge_outlined),
+            decoration: InputDecoration(
+              labelText: context.l10n.t('fullName'),
+              hintText: context.l10n.t('enterFullName'),
+              prefixIcon: const Icon(Icons.badge_outlined),
             ),
           ),
         ],
@@ -271,11 +273,11 @@ class _LoginScreenState extends State<LoginScreen> {
             controller: _birthdayController,
             readOnly: true,
             onTap: _pickBirthday,
-            decoration: const InputDecoration(
-              labelText: 'Ngay sinh',
+            decoration: InputDecoration(
+              labelText: context.l10n.t('birthday'),
               hintText: 'YYYY-MM-DD',
-              prefixIcon: Icon(Icons.event_outlined),
-              suffixIcon: Icon(Icons.calendar_month_outlined),
+              prefixIcon: const Icon(Icons.event_outlined),
+              suffixIcon: const Icon(Icons.calendar_month_outlined),
             ),
           ),
           const SizedBox(height: 12),
@@ -283,10 +285,10 @@ class _LoginScreenState extends State<LoginScreen> {
             controller: _idCardController,
             textInputAction: TextInputAction.done,
             onSubmitted: (_) => loading ? null : _submit(),
-            decoration: const InputDecoration(
-              labelText: 'CCCD',
-              hintText: 'Nhap so CCCD',
-              prefixIcon: Icon(Icons.verified_user_outlined),
+            decoration: InputDecoration(
+              labelText: context.l10n.t('idCard'),
+              hintText: context.l10n.t('enterIdCard'),
+              prefixIcon: const Icon(Icons.verified_user_outlined),
             ),
           ),
         ] else ...[
@@ -300,11 +302,13 @@ class _LoginScreenState extends State<LoginScreen> {
             onSubmitted: (_) =>
                 _mode == _AuthMode.login && !loading ? _submit() : null,
             decoration: InputDecoration(
-              labelText: 'Mat khau',
-              hintText: 'Nhap mat khau',
+              labelText: context.l10n.t('password'),
+              hintText: context.l10n.t('enterPassword'),
               prefixIcon: const Icon(Icons.lock_outline),
               suffixIcon: IconButton(
-                tooltip: _obscurePassword ? 'Hien mat khau' : 'An mat khau',
+                tooltip: _obscurePassword
+                    ? context.l10n.t('showPassword')
+                    : context.l10n.t('hidePassword'),
                 onPressed: () =>
                     setState(() => _obscurePassword = !_obscurePassword),
                 icon: Icon(_obscurePassword
@@ -321,11 +325,11 @@ class _LoginScreenState extends State<LoginScreen> {
             keyboardType: TextInputType.number,
             maxLength: 5,
             textInputAction: TextInputAction.next,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               counterText: '',
-              labelText: '5 so cuoi CCCD',
+              labelText: context.l10n.t('idSuffix'),
               hintText: '12345',
-              prefixIcon: Icon(Icons.verified_outlined),
+              prefixIcon: const Icon(Icons.verified_outlined),
             ),
           ),
           const SizedBox(height: 12),
@@ -335,11 +339,13 @@ class _LoginScreenState extends State<LoginScreen> {
             textInputAction: TextInputAction.done,
             onSubmitted: (_) => loading ? null : _submit(),
             decoration: InputDecoration(
-              labelText: 'Xac nhan mat khau',
-              hintText: 'Nhap lai mat khau',
+              labelText: context.l10n.t('confirmPassword'),
+              hintText: context.l10n.t('enterConfirmPassword'),
               prefixIcon: const Icon(Icons.lock_reset_outlined),
               suffixIcon: IconButton(
-                tooltip: _obscureConfirm ? 'Hien mat khau' : 'An mat khau',
+                tooltip: _obscureConfirm
+                    ? context.l10n.t('showPassword')
+                    : context.l10n.t('hidePassword'),
                 onPressed: () =>
                     setState(() => _obscureConfirm = !_obscureConfirm),
                 icon: Icon(_obscureConfirm
@@ -355,7 +361,7 @@ class _LoginScreenState extends State<LoginScreen> {
             alignment: Alignment.centerRight,
             child: TextButton(
               onPressed: () => _switchMode(_AuthMode.forgot),
-              child: const Text('Quen mat khau'),
+              child: Text(context.l10n.t('forgotPassword')),
             ),
           ),
         ],
@@ -399,11 +405,11 @@ class _LoginScreenState extends State<LoginScreen> {
   String get _submitLabel {
     switch (_mode) {
       case _AuthMode.login:
-        return 'Dang nhap';
+        return context.l10n.t('login');
       case _AuthMode.register:
-        return 'Dang ky';
+        return context.l10n.t('register');
       case _AuthMode.forgot:
-        return 'Xac minh';
+        return context.l10n.t('verify');
     }
   }
 }
@@ -413,15 +419,15 @@ class _AuthBrandHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Row(
+    return Row(
       children: [
-        BrandLogo(size: 64, padding: 9),
-        SizedBox(width: 13),
+        const BrandLogo(size: 64, padding: 9),
+        const SizedBox(width: 13),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
+              const Text(
                 'YS Chat',
                 style: TextStyle(
                     color: AppColors.brand,
@@ -429,10 +435,10 @@ class _AuthBrandHeader extends StatelessWidget {
                     height: 1.15,
                     fontWeight: FontWeight.w900),
               ),
-              SizedBox(height: 4),
+              const SizedBox(height: 4),
               Text(
-                'Ket noi noi bo nhanh va bao mat',
-                style: TextStyle(
+                context.l10n.t('internalTagline'),
+                style: const TextStyle(
                     color: AppColors.muted,
                     fontSize: 13.5,
                     fontWeight: FontWeight.w700),
@@ -463,11 +469,11 @@ class _AuthModeTabs extends StatelessWidget {
       child: Row(
         children: [
           _TabButton(
-              label: 'Dang nhap',
+              label: context.l10n.t('login'),
               active: mode == _AuthMode.login,
               onTap: () => onChanged(_AuthMode.login)),
           _TabButton(
-              label: 'Dang ky',
+              label: context.l10n.t('register'),
               active: mode == _AuthMode.register,
               onTap: () => onChanged(_AuthMode.register)),
         ],
@@ -529,9 +535,9 @@ class _FormHeader extends StatelessWidget {
       children: [
         Text(
           switch (mode) {
-            _AuthMode.login => 'Dang nhap',
-            _AuthMode.register => 'Tao tai khoan moi',
-            _AuthMode.forgot => 'Khoi phuc mat khau',
+            _AuthMode.login => context.l10n.t('login'),
+            _AuthMode.register => context.l10n.t('createAccount'),
+            _AuthMode.forgot => context.l10n.t('recoverPassword'),
           },
           style: const TextStyle(
               color: AppColors.ink,
@@ -542,9 +548,9 @@ class _FormHeader extends StatelessWidget {
         const SizedBox(height: 5),
         Text(
           switch (mode) {
-            _AuthMode.login => 'Su dung tai khoan noi bo cua ban',
-            _AuthMode.register => 'Nhap thong tin nhan vien de kich hoat',
-            _AuthMode.forgot => 'Xac minh thong tin de nhan mat khau moi',
+            _AuthMode.login => context.l10n.t('loginSubtitle'),
+            _AuthMode.register => context.l10n.t('registerSubtitle'),
+            _AuthMode.forgot => context.l10n.t('forgotSubtitle'),
           },
           style: const TextStyle(
               color: AppColors.muted,
@@ -569,11 +575,11 @@ class _SwitchLine extends StatelessWidget {
       return Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Text('Chua co tai khoan?',
-              style: TextStyle(color: AppColors.muted)),
+          Text(context.l10n.t('noAccount'),
+              style: const TextStyle(color: AppColors.muted)),
           TextButton(
               onPressed: () => onChanged(_AuthMode.register),
-              child: const Text('Dang ky ngay')),
+              child: Text(context.l10n.t('registerNow'))),
         ],
       );
     }
@@ -581,8 +587,8 @@ class _SwitchLine extends StatelessWidget {
       child: TextButton(
         onPressed: () => onChanged(_AuthMode.login),
         child: Text(mode == _AuthMode.register
-            ? 'Da co tai khoan? Dang nhap'
-            : 'Quay lai dang nhap'),
+            ? context.l10n.t('haveAccountLogin')
+            : context.l10n.t('backToLogin')),
       ),
     );
   }

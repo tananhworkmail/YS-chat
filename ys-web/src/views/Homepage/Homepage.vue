@@ -788,7 +788,11 @@
                   </span>
                 </p>
 
-                <div v-if="imageAttachments(message).length" class="image-grid">
+                <div
+                  v-if="imageAttachments(message).length"
+                  class="image-grid"
+                  :class="{ compact: imageAttachments(message).length > 1 }"
+                >
                   <div
                     v-for="attachment in imageAttachments(message)"
                     :key="attachment.id || attachment.fileUrl"
@@ -6481,9 +6485,9 @@ a {
 }
 
 .message-text .mention {
-  color: var(--brand-dark);
+  color: #2563eb;
   font-weight: 800;
-  background: var(--brand-tint);
+  background: #eff6ff;
   border-radius: 6px;
   padding: 1px 3px;
 }
@@ -6708,6 +6712,10 @@ a {
   margin-top: 4px;
 }
 
+.image-grid.compact {
+  grid-template-columns: repeat(2, minmax(0, 118px));
+}
+
 .video-grid {
   display: grid;
   gap: 8px;
@@ -6747,6 +6755,10 @@ a {
   height: 150px;
   display: block;
   object-fit: cover;
+}
+
+.image-grid.compact .image-preview img {
+  height: 108px;
 }
 
 .image-download-button,
@@ -8217,6 +8229,14 @@ textarea:focus,
 
   .image-grid img {
     height: 122px;
+  }
+
+  .image-grid.compact {
+    grid-template-columns: repeat(2, minmax(0, 104px));
+  }
+
+  .image-grid.compact img {
+    height: 96px;
   }
 
   .composer-body {

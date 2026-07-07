@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:video_player/video_player.dart';
 
+import '../l10n/app_localizations.dart';
 import '../models/models.dart';
 import '../theme/app_theme.dart';
 
@@ -120,7 +121,8 @@ class MessageBubble extends StatelessWidget {
                           Padding(
                             padding: const EdgeInsets.only(bottom: 5),
                             child: Text(
-                              'Da chuyen tiep tu ${message.forwardedFrom!.senderName}',
+                              context.l10n.forwardedFrom(
+                                  message.forwardedFrom!.senderName),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
@@ -207,7 +209,7 @@ class MessageBubble extends StatelessWidget {
             children: [
               ListTile(
                 leading: const Icon(Icons.reply),
-                title: const Text('Tra loi'),
+                title: Text(context.l10n.t('reply')),
                 onTap: () {
                   Navigator.of(context).pop();
                   onReply(message);
@@ -215,7 +217,7 @@ class MessageBubble extends StatelessWidget {
               ),
               ListTile(
                 leading: const Icon(Icons.forward),
-                title: const Text('Chuyen tiep'),
+                title: Text(context.l10n.t('forward')),
                 onTap: () {
                   Navigator.of(context).pop();
                   onForward(message);
@@ -224,7 +226,7 @@ class MessageBubble extends StatelessWidget {
               if (message.content.trim().isNotEmpty)
                 ListTile(
                   leading: const Icon(Icons.copy),
-                  title: const Text('Copy'),
+                  title: Text(context.l10n.t('copy')),
                   onTap: () {
                     Clipboard.setData(ClipboardData(text: message.content));
                     Navigator.of(context).pop();
@@ -233,7 +235,7 @@ class MessageBubble extends StatelessWidget {
               if (downloadable != null)
                 ListTile(
                   leading: const Icon(Icons.download_outlined),
-                  title: const Text('Tai ve'),
+                  title: Text(context.l10n.t('download')),
                   onTap: () {
                     Navigator.of(context).pop();
                     onDownload(downloadable);
@@ -340,8 +342,8 @@ class _PollBubbleState extends State<_PollBubble> {
                       ),
                     ),
                     if (poll.isClosed)
-                      const Text('Da dong',
-                          style: TextStyle(
+                      Text(context.l10n.t('closed'),
+                          style: const TextStyle(
                               color: AppColors.muted,
                               fontSize: 12,
                               fontWeight: FontWeight.w800)),
@@ -433,7 +435,7 @@ class _PollBubbleState extends State<_PollBubble> {
                   children: [
                     Expanded(
                       child: Text(
-                        '${poll.totalVotes} luot binh chon · ${poll.allowMultiple ? 'chon nhieu' : 'chon mot'}',
+                        '${context.l10n.voteCount(poll.totalVotes)} · ${poll.allowMultiple ? context.l10n.t('chooseMultiple') : context.l10n.t('chooseOne')}',
                         style: const TextStyle(
                             color: AppColors.muted,
                             fontSize: 12,
@@ -443,7 +445,7 @@ class _PollBubbleState extends State<_PollBubble> {
                     if (widget.mine && !poll.isClosed)
                       TextButton(
                         onPressed: () => widget.onClosePoll(message),
-                        child: const Text('Dong'),
+                        child: Text(context.l10n.t('close')),
                       ),
                   ],
                 ),
@@ -454,15 +456,15 @@ class _PollBubbleState extends State<_PollBubble> {
                       Expanded(
                         child: TextField(
                           controller: _customController,
-                          decoration: const InputDecoration(
-                            hintText: 'Them lua chon',
+                          decoration: InputDecoration(
+                            hintText: context.l10n.t('addCustomOption'),
                             isDense: true,
                           ),
                         ),
                       ),
                       const SizedBox(width: 8),
                       IconButton.filled(
-                        tooltip: 'Gui lua chon',
+                        tooltip: context.l10n.t('sendOption'),
                         onPressed: () {
                           final custom = _customController.text.trim();
                           if (custom.isEmpty) return;
@@ -509,7 +511,7 @@ class _MessageText extends StatelessWidget {
       spans.add(TextSpan(
         text: content.substring(match.start, match.end),
         style: const TextStyle(
-            color: Color(0xff16a34a), fontWeight: FontWeight.w900),
+            color: Color(0xff2563eb), fontWeight: FontWeight.w900),
       ));
       cursor = match.end;
     }
@@ -557,7 +559,7 @@ class _ReferenceBox extends StatelessWidget {
                   fontSize: 12,
                   fontWeight: FontWeight.w900)),
           const SizedBox(height: 2),
-          Text(_referencePreview(reference),
+          Text(_referencePreview(context, reference),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
@@ -585,39 +587,52 @@ class _ImageGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final columns = attachments.length == 1 ? 1 : 2;
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: columns,
-        crossAxisSpacing: 6,
-        mainAxisSpacing: 6,
-        childAspectRatio: attachments.length == 1 ? 1.35 : 1,
-      ),
-      itemCount: attachments.length,
-      itemBuilder: (context, index) {
-        final attachment = attachments[index];
-        return ClipRRect(
-          borderRadius: BorderRadius.circular(8),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              Image.network(
-                resolveUrl(attachment.fileUrl),
-                fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) => const ColoredBox(
-                  color: AppColors.brandSoftest,
-                  child:
-                      Icon(Icons.broken_image_outlined, color: AppColors.muted),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxWidth =
+            constraints.maxWidth.isFinite ? constraints.maxWidth : 320.0;
+        final gridWidth = attachments.length == 1
+            ? maxWidth
+            : maxWidth.clamp(0.0, 228.0).toDouble();
+        return SizedBox(
+          width: gridWidth,
+          child: GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: columns,
+              crossAxisSpacing: 6,
+              mainAxisSpacing: 6,
+              childAspectRatio: attachments.length == 1 ? 1.35 : 1,
+            ),
+            itemCount: attachments.length,
+            itemBuilder: (context, index) {
+              final attachment = attachments[index];
+              return ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    Image.network(
+                      resolveUrl(attachment.fileUrl),
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) =>
+                          const ColoredBox(
+                        color: AppColors.brandSoftest,
+                        child: Icon(Icons.broken_image_outlined,
+                            color: AppColors.muted),
+                      ),
+                    ),
+                    Positioned(
+                      right: 5,
+                      top: 5,
+                      child: _FloatingDownloadButton(
+                          onTap: () => onDownload(attachment)),
+                    ),
+                  ],
                 ),
-              ),
-              Positioned(
-                right: 5,
-                top: 5,
-                child: _FloatingDownloadButton(
-                    onTap: () => onDownload(attachment)),
-              ),
-            ],
+              );
+            },
           ),
         );
       },
@@ -802,7 +817,7 @@ class _VoicePlayerState extends State<_VoicePlayer> {
                 color: foreground),
           ),
           const SizedBox(width: 4),
-          Text('Tin nhan thoai',
+          Text(context.l10n.t('voiceMessage'),
               style: TextStyle(color: foreground, fontWeight: FontWeight.w800)),
         ],
       ),
@@ -891,7 +906,7 @@ class _FileRow extends StatelessWidget {
             ),
           ),
           IconButton(
-            tooltip: 'Tai ve',
+            tooltip: context.l10n.t('download'),
             onPressed: onDownload,
             icon: Icon(Icons.download_outlined,
                 color: mine ? Colors.white : AppColors.brand, size: 18),
@@ -973,11 +988,11 @@ String _formatBytes(int bytes) {
   return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
 }
 
-String _referencePreview(ChatMessageReference reference) {
+String _referencePreview(BuildContext context, ChatMessageReference reference) {
   if (reference.content.trim().isNotEmpty) return reference.content.trim();
-  if (reference.type == 'voice') return 'Tin nhan thoai';
-  if (reference.type == 'file') return 'Tep dinh kem';
-  if (reference.type == 'image') return 'Hinh anh';
-  if (reference.type == 'poll') return 'Binh chon';
-  return 'Tin nhan';
+  if (reference.type == 'voice') return context.l10n.t('voicePreview');
+  if (reference.type == 'file') return context.l10n.t('attachmentPreview');
+  if (reference.type == 'image') return context.l10n.t('imagePreview');
+  if (reference.type == 'poll') return context.l10n.t('poll');
+  return context.l10n.t('messagePreview');
 }
