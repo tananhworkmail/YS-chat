@@ -172,23 +172,25 @@ func GetDB() *gorm.DB {
 	return DB
 }
 
-func LYS_ERP_Connection() (*gorm.DB, error) {
-	configuration := *config.GetConfig()
-	configuration.Database.Driver = "sqlserver"
-	configuration.Database.Host = "192.168.71.7"
-	configuration.Database.Username = "tyxuan"
-	configuration.Database.Password = "jack"
-	configuration.Database.Dbname = "LYS_ERP"
-	configuration.Database.Port = "1433"
-	return cachedConnection("lys_erp", configuration)
-}
+// func LYS_ERP_Connection() (*gorm.DB, error) {
+// 	configuration := *config.GetConfig()
+// 	configuration.Database.Driver = "sqlserver"
+// 	configuration.Database.Host = "192.168.71.7"
+// 	configuration.Database.Username = "tyxuan"
+// 	configuration.Database.Password = "jack"
+// 	configuration.Database.Dbname = "LYS_ERP"
+// 	configuration.Database.Port = "1433"
+// 	return cachedConnection("lys_erp", configuration)
+// }
 
 func HRM_Connection() (*gorm.DB, error) {
 	configuration := *config.GetConfig()
 	configuration.Database.Driver = "sqlserver"
 	configuration.Database.Host = "192.168.71.5"
-	configuration.Database.Username = "sa"
-	configuration.Database.Password = "IT@Admin17"
+	// configuration.Database.Username = "sa"
+	// configuration.Database.Password = "IT@Admin17"
+	configuration.Database.Username = "LYG"
+	configuration.Database.Password = "Tythac@2022"
 	configuration.Database.Dbname = "P0104-TYTHAC"
 	configuration.Database.Port = "1433"
 	return cachedConnection("hrm", configuration)

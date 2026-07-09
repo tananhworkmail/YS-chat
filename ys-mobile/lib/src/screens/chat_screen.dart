@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:record/record.dart';
@@ -114,9 +115,13 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       await Dio().download(url, destination);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(context.l10n.downloaded(filename))),
-      );
+      final result = await OpenFilex.open(destination);
+      if (!mounted) return;
+      if (result.type != ResultType.done) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(context.l10n.downloaded(filename))),
+        );
+      }
     } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -145,6 +150,8 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _showInfoPanel() async {
+    final conversation = context.read<AppState>().selectedConversation;
+    if (conversation == null) return;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -153,6 +160,8 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _openPollSheet() async {
+    final conversation = context.read<AppState>().selectedConversation;
+    if (conversation == null || conversation.type != 'group') return;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -1005,6 +1014,7 @@ class _Thread extends StatefulWidget {
 
 class _ThreadState extends State<_Thread> {
   late final ScrollController _scrollController;
+  final Map<int, GlobalKey> _messageKeys = {};
 
   @override
   void initState() {
@@ -1025,6 +1035,40 @@ class _ThreadState extends State<_Thread> {
     if (position.pixels >= position.maxScrollExtent - 180) {
       context.read<AppState>().loadOlderMessages();
     }
+  }
+
+  Future<void> _scrollToMessage(int messageId) async {
+    final state = context.read<AppState>();
+    final found = await state.loadMessageUntilVisible(messageId);
+    if (!found || !mounted) return;
+
+    final orderedMessages = state.messages;
+    final ascendingIndex =
+        orderedMessages.indexWhere((message) => message.id == messageId);
+    if (ascendingIndex < 0) return;
+    final listIndex = orderedMessages.length - 1 - ascendingIndex;
+    if (_scrollController.hasClients) {
+      final targetOffset = (listIndex * 86.0)
+          .clamp(0.0, _scrollController.position.maxScrollExtent);
+      await _scrollController.animateTo(
+        targetOffset,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      );
+    }
+
+    if (!mounted) return;
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    if (!mounted) return;
+    final keyContext = _messageKeys[messageId]?.currentContext;
+    if (keyContext == null) return;
+    if (!keyContext.mounted) return;
+    await Scrollable.ensureVisible(
+      keyContext,
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeOutCubic,
+      alignment: 0.35,
+    );
   }
 
   @override
@@ -1069,19 +1113,26 @@ class _ThreadState extends State<_Thread> {
                         loading: state.loadingOlderMessages);
                   }
                   final message = state.messages.reversed.elementAt(index);
-                  return MessageBubble(
-                    message: message,
-                    mine: message.senderUserid == widget.currentUserid,
-                    resolveUrl: state.apiClient.absoluteUrl,
-                    onReply: widget.onReply,
-                    onForward: widget.onForward,
-                    onDownload: widget.onDownload,
-                    onVotePoll: (message, optionIds, customOption) => context
-                        .read<AppState>()
-                        .votePoll(message, optionIds,
-                            customOption: customOption),
-                    onClosePoll: (message) =>
-                        context.read<AppState>().closePoll(message),
+                  final key = _messageKeys.putIfAbsent(message.id,
+                      () => GlobalKey(debugLabel: 'm-${message.id}'));
+                  return KeyedSubtree(
+                    key: key,
+                    child: MessageBubble(
+                      message: message,
+                      mine: message.senderUserid == widget.currentUserid,
+                      resolveUrl: state.apiClient.absoluteUrl,
+                      onReply: widget.onReply,
+                      onForward: widget.onForward,
+                      onDownload: widget.onDownload,
+                      mentionLabels: _mentionLabels(conversation),
+                      onOpenReference: _scrollToMessage,
+                      onVotePoll: (message, optionIds, customOption) => context
+                          .read<AppState>()
+                          .votePoll(message, optionIds,
+                              customOption: customOption),
+                      onClosePoll: (message) =>
+                          context.read<AppState>().closePoll(message),
+                    ),
                   );
                 },
               ),
@@ -1090,6 +1141,7 @@ class _ThreadState extends State<_Thread> {
               controller: widget.messageController,
               recording: widget.recording,
               replyingTo: widget.replyingTo,
+              conversation: conversation,
               onCancelReply: widget.onCancelReply,
               onCreatePoll: widget.onCreatePoll,
               onSend: widget.onSend,
@@ -1222,11 +1274,12 @@ class _ChatHeader extends StatelessWidget {
   }
 }
 
-class _Composer extends StatelessWidget {
+class _Composer extends StatefulWidget {
   const _Composer({
     required this.controller,
     required this.recording,
     required this.replyingTo,
+    required this.conversation,
     required this.onCancelReply,
     required this.onCreatePoll,
     required this.onSend,
@@ -1238,12 +1291,106 @@ class _Composer extends StatelessWidget {
   final TextEditingController controller;
   final bool recording;
   final ChatMessage? replyingTo;
+  final ChatConversation conversation;
   final VoidCallback onCancelReply;
   final VoidCallback onCreatePoll;
   final VoidCallback onSend;
   final VoidCallback onPickFiles;
   final VoidCallback onPickImages;
   final VoidCallback onRecord;
+
+  @override
+  State<_Composer> createState() => _ComposerState();
+}
+
+class _ComposerState extends State<_Composer> {
+  List<_MentionOption> _mentionSuggestions = const [];
+  int _mentionStart = -1;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_updateMentionSuggestions);
+  }
+
+  @override
+  void didUpdateWidget(covariant _Composer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_updateMentionSuggestions);
+      widget.controller.addListener(_updateMentionSuggestions);
+    }
+    _updateMentionSuggestions();
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_updateMentionSuggestions);
+    super.dispose();
+  }
+
+  void _updateMentionSuggestions() {
+    final selection = widget.controller.selection;
+    if (!selection.isValid || !selection.isCollapsed) {
+      _setMentionSuggestions(const [], -1);
+      return;
+    }
+    final cursor = selection.baseOffset;
+    final textBeforeCursor = widget.controller.text.substring(0, cursor);
+    final atIndex = textBeforeCursor.lastIndexOf('@');
+    if (widget.conversation.type != 'group' ||
+        atIndex < 0 ||
+        (atIndex > 0 &&
+            !RegExp(r'\s').hasMatch(textBeforeCursor[atIndex - 1]))) {
+      _setMentionSuggestions(const [], -1);
+      return;
+    }
+
+    final query = textBeforeCursor.substring(atIndex + 1);
+    if (query.contains('@') || query.contains('\n') || query.contains(' ')) {
+      _setMentionSuggestions(const [], -1);
+      return;
+    }
+
+    final normalizedQuery = query.toLowerCase();
+    final options = _mentionOptions(widget.conversation)
+        .where((option) =>
+            normalizedQuery.isEmpty ||
+            option.searchText.contains(normalizedQuery))
+        .toList();
+    _setMentionSuggestions(options, options.isEmpty ? -1 : atIndex);
+  }
+
+  void _setMentionSuggestions(List<_MentionOption> options, int start) {
+    if (_mentionStart == start &&
+        _mentionSuggestions.length == options.length &&
+        _mentionSuggestions
+            .asMap()
+            .entries
+            .every((entry) => entry.value.label == options[entry.key].label)) {
+      return;
+    }
+    setState(() {
+      _mentionSuggestions = options;
+      _mentionStart = start;
+    });
+  }
+
+  void _insertMention(_MentionOption option) {
+    final selection = widget.controller.selection;
+    if (_mentionStart < 0 || !selection.isValid) return;
+    final cursor = selection.baseOffset;
+    final text = widget.controller.text;
+    final mentionText = '@${option.label} ';
+    final nextText =
+        '${text.substring(0, _mentionStart)}$mentionText${text.substring(cursor)}';
+    final nextCursor = _mentionStart + mentionText.length;
+    widget.controller.value = TextEditingValue(
+      text: nextText,
+      selection: TextSelection.collapsed(offset: nextCursor),
+    );
+    _setMentionSuggestions(const [], -1);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1258,7 +1405,7 @@ class _Composer extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (replyingTo != null)
+            if (widget.replyingTo != null)
               Container(
                 margin: const EdgeInsets.only(bottom: 8),
                 padding:
@@ -1277,7 +1424,7 @@ class _Composer extends StatelessWidget {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
-                            '${context.l10n.t('replyingTo')} ${replyingTo!.senderName}',
+                            '${context.l10n.t('replyingTo')} ${widget.replyingTo!.senderName}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -1286,7 +1433,7 @@ class _Composer extends StatelessWidget {
                           ),
                           const SizedBox(height: 2),
                           Text(
-                            _messagePreview(context, replyingTo!),
+                            _messagePreview(context, widget.replyingTo!),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -1299,13 +1446,13 @@ class _Composer extends StatelessWidget {
                     ),
                     IconButton(
                       tooltip: context.l10n.t('cancelReply'),
-                      onPressed: onCancelReply,
+                      onPressed: widget.onCancelReply,
                       icon: const Icon(Icons.close),
                     ),
                   ],
                 ),
               ),
-            if (recording)
+            if (widget.recording)
               Container(
                 margin: const EdgeInsets.only(bottom: 8),
                 padding:
@@ -1328,7 +1475,7 @@ class _Composer extends StatelessWidget {
                       ),
                     ),
                     InkWell(
-                      onTap: onRecord,
+                      onTap: widget.onRecord,
                       borderRadius: BorderRadius.circular(8),
                       child: const Padding(
                         padding: EdgeInsets.all(4),
@@ -1339,38 +1486,46 @@ class _Composer extends StatelessWidget {
                   ],
                 ),
               ),
+            if (_mentionSuggestions.isNotEmpty)
+              _MentionSuggestions(
+                options: _mentionSuggestions,
+                onSelected: _insertMention,
+              ),
             Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 _ComposerButton(
                     tooltip: context.l10n.t('image'),
                     icon: Icons.image_outlined,
-                    onTap: onPickImages),
+                    onTap: widget.onPickImages),
                 _ComposerButton(
                     tooltip: context.l10n.t('file'),
                     icon: Icons.attach_file,
-                    onTap: onPickFiles),
+                    onTap: widget.onPickFiles),
                 _ComposerButton(
-                  tooltip: recording
+                  tooltip: widget.recording
                       ? context.l10n.t('stopRecording')
                       : context.l10n.t('recordVoice'),
-                  icon: recording ? Icons.stop_circle_outlined : Icons.mic_none,
-                  active: recording,
-                  onTap: onRecord,
+                  icon: widget.recording
+                      ? Icons.stop_circle_outlined
+                      : Icons.mic_none,
+                  active: widget.recording,
+                  onTap: widget.onRecord,
                 ),
-                _ComposerButton(
-                  tooltip: context.l10n.t('poll'),
-                  icon: Icons.how_to_vote_outlined,
-                  onTap: onCreatePoll,
-                ),
+                if (widget.conversation.type == 'group')
+                  _ComposerButton(
+                    tooltip: context.l10n.t('poll'),
+                    icon: Icons.how_to_vote_outlined,
+                    onTap: widget.onCreatePoll,
+                  ),
                 const SizedBox(width: 6),
                 Expanded(
                   child: TextField(
-                    controller: controller,
+                    controller: widget.controller,
                     minLines: 1,
                     maxLines: 4,
                     textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => onSend(),
+                    onSubmitted: (_) => widget.onSend(),
                     decoration: InputDecoration(
                       hintText: context.l10n.t('typeMessage'),
                       contentPadding: const EdgeInsets.symmetric(
@@ -1380,7 +1535,7 @@ class _Composer extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
                 InkWell(
-                  onTap: onSend,
+                  onTap: widget.onSend,
                   borderRadius: BorderRadius.circular(8),
                   child: Container(
                     width: 40,
@@ -1834,6 +1989,107 @@ class _UserSearchSheet extends StatelessWidget {
   }
 }
 
+class _MentionSuggestions extends StatelessWidget {
+  const _MentionSuggestions({
+    required this.options,
+    required this.onSelected,
+  });
+
+  final List<_MentionOption> options;
+  final ValueChanged<_MentionOption> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      constraints: const BoxConstraints(maxHeight: 236),
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.line),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xff0f172a).withValues(alpha: 0.12),
+            blurRadius: 24,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: ListView.separated(
+        shrinkWrap: true,
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        itemCount: options.length,
+        separatorBuilder: (_, __) => const Divider(height: 1),
+        itemBuilder: (context, index) {
+          final option = options[index];
+          return InkWell(
+            onTap: () => onSelected(option),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              child: Row(
+                children: [
+                  option.isAll
+                      ? Container(
+                          width: 34,
+                          height: 34,
+                          decoration: BoxDecoration(
+                            color: AppColors.brandSoft,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Icon(Icons.groups_outlined,
+                              color: AppColors.brand, size: 19),
+                        )
+                      : YSAvatar(
+                          label: option.label,
+                          online: option.online,
+                          size: 34,
+                        ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          option.label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppColors.ink,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        Text(
+                          option.detail,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: AppColors.muted,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Text(
+                    '@',
+                    style: TextStyle(
+                      color: AppColors.brand,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
 class _ForwardSheet extends StatelessWidget {
   const _ForwardSheet({
     required this.conversations,
@@ -2076,10 +2332,23 @@ class _PollCreateSheetState extends State<_PollCreateSheet> {
   }
 }
 
-class _InfoPanel extends StatelessWidget {
+enum _InfoPanelMode { overview, members, media, polls, files }
+
+class _InfoPanel extends StatefulWidget {
   const _InfoPanel({required this.onDownload});
 
   final ValueChanged<ChatAttachment> onDownload;
+
+  @override
+  State<_InfoPanel> createState() => _InfoPanelState();
+}
+
+class _InfoPanelState extends State<_InfoPanel> {
+  _InfoPanelMode _mode = _InfoPanelMode.overview;
+
+  void _openMode(_InfoPanelMode mode) => setState(() => _mode = mode);
+
+  void _backToOverview() => setState(() => _mode = _InfoPanelMode.overview);
 
   @override
   Widget build(BuildContext context) {
@@ -2095,7 +2364,6 @@ class _InfoPanel extends StatelessWidget {
             _isImageAttachment(attachment) || _isVideoAttachment(attachment))
         .toList()
         .reversed
-        .take(12)
         .toList();
     final documents = state.messages
         .expand((message) => message.attachments)
@@ -2105,14 +2373,13 @@ class _InfoPanel extends StatelessWidget {
             !_isAudioAttachment(attachment))
         .toList()
         .reversed
-        .take(12)
         .toList();
     final polls = state.messages
         .where((message) => message.type == 'poll' && message.poll != null)
         .toList()
         .reversed
-        .take(12)
         .toList();
+    final isGroup = conversation.type == 'group';
 
     return SafeArea(
       child: DraggableScrollableSheet(
@@ -2125,162 +2392,344 @@ class _InfoPanel extends StatelessWidget {
             controller: controller,
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 18),
             children: [
-              Center(
-                child: conversation.type == 'group'
-                    ? _GroupAvatar(count: conversation.memberCount)
-                    : YSAvatar(label: title, size: 74),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: AppColors.ink,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w900),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                conversation.type == 'group'
+              _InfoPanelHeader(
+                title: title,
+                subtitle: isGroup
                     ? context.l10n.memberCount(conversation.memberCount)
                     : context.l10n.t('directChat'),
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: AppColors.muted, fontWeight: FontWeight.w700),
+                isGroup: isGroup,
+                memberCount: conversation.memberCount,
+                showBack: _mode != _InfoPanelMode.overview,
+                onBack: _backToOverview,
               ),
               const SizedBox(height: 18),
-              _InfoSectionTitle(title: context.l10n.t('members')),
-              ...conversation.members.map((member) {
-                final display = member.fullname.trim().isEmpty
-                    ? member.userid
-                    : member.fullname;
-                return ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: YSAvatar(
-                      label: display, size: 38, online: member.isOnline),
-                  title: Text(display,
-                      maxLines: 1, overflow: TextOverflow.ellipsis),
-                  subtitle: Text(member.userid),
-                );
-              }),
-              const SizedBox(height: 12),
-              _InfoSectionTitle(title: context.l10n.t('media')),
-              if (media.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  child: Text(context.l10n.t('noMedia'),
-                      style: TextStyle(color: AppColors.muted)),
-                )
-              else
-                GridView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 3,
-                    crossAxisSpacing: 7,
-                    mainAxisSpacing: 7,
+              if (_mode == _InfoPanelMode.overview) ...[
+                if (isGroup)
+                  _InfoSummaryTile(
+                    icon: Icons.groups_outlined,
+                    title: context.l10n.t('members'),
+                    subtitle:
+                        context.l10n.memberCount(conversation.memberCount),
+                    onTap: () => _openMode(_InfoPanelMode.members),
                   ),
-                  itemCount: media.length,
-                  itemBuilder: (context, index) {
-                    final file = media[index];
-                    return ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          Image.network(
-                            state.apiClient.absoluteUrl(file.fileUrl),
-                            fit: BoxFit.cover,
-                            errorBuilder: (context, error, stackTrace) =>
-                                const ColoredBox(color: AppColors.brandSoftest),
-                          ),
-                          if (_isVideoAttachment(file))
-                            const Center(
-                              child: Icon(Icons.play_circle_fill,
-                                  color: Colors.white, size: 34),
-                            ),
-                          Positioned(
-                            right: 4,
-                            top: 4,
-                            child: InkWell(
-                              onTap: () => onDownload(file),
-                              child: Container(
-                                width: 28,
-                                height: 28,
-                                decoration: BoxDecoration(
-                                  color: Colors.black.withValues(alpha: 0.45),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: const Icon(Icons.download_outlined,
-                                    color: Colors.white, size: 15),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
-              const SizedBox(height: 16),
-              _InfoSectionTitle(title: context.l10n.t('poll')),
-              if (polls.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  child: Text(context.l10n.t('noPolls'),
-                      style: TextStyle(color: AppColors.muted)),
-                )
-              else
-                ...polls.map((message) => ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.how_to_vote_outlined,
-                          color: AppColors.brand),
-                      title: Text(message.poll?.question ?? message.content,
-                          maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(context.l10n
-                          .voteCount(message.poll?.totalVotes ?? 0)),
-                    )),
-              const SizedBox(height: 16),
-              _InfoSectionTitle(title: context.l10n.t('sharedFiles')),
-              if (documents.isEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  child: Text(context.l10n.t('noFiles'),
-                      style: TextStyle(color: AppColors.muted)),
-                )
-              else
-                ...documents.map((file) => ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.insert_drive_file_outlined,
-                          color: AppColors.brand),
-                      title: Text(context.l10n.t('attachmentFile'),
-                          maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(_formatBytes(file.fileSize)),
-                      trailing: IconButton(
-                        tooltip: context.l10n.t('download'),
-                        onPressed: () => onDownload(file),
-                        icon: const Icon(Icons.download_outlined),
-                      ),
-                    )),
-              if (state.hasMoreMessages)
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: OutlinedButton.icon(
-                    onPressed: state.loadingOlderMessages
-                        ? null
-                        : () => context.read<AppState>().loadOlderMessages(),
-                    icon: state.loadingOlderMessages
-                        ? const SizedBox.square(
-                            dimension: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.history),
-                    label: Text(context.l10n.t('loadOlder')),
+                _InfoPreviewSection(
+                  title: context.l10n.t('media'),
+                  count: media.length,
+                  emptyText: context.l10n.t('noMedia'),
+                  onViewAll: media.length > 3
+                      ? () => _openMode(_InfoPanelMode.media)
+                      : null,
+                  child: _MediaPreviewGrid(
+                    media: media.take(3).toList(),
+                    absoluteUrl: state.apiClient.absoluteUrl,
+                    onDownload: widget.onDownload,
                   ),
                 ),
+                if (isGroup)
+                  _InfoPreviewSection(
+                    title: context.l10n.t('poll'),
+                    count: polls.length,
+                    emptyText: context.l10n.t('noPolls'),
+                    onViewAll: polls.length > 3
+                        ? () => _openMode(_InfoPanelMode.polls)
+                        : null,
+                    child: _PollPreviewList(polls: polls.take(3).toList()),
+                  ),
+                _InfoPreviewSection(
+                  title: context.l10n.t('sharedFiles'),
+                  count: documents.length,
+                  emptyText: context.l10n.t('noFiles'),
+                  onViewAll: documents.length > 3
+                      ? () => _openMode(_InfoPanelMode.files)
+                      : null,
+                  child: _DocumentPreviewList(
+                    documents: documents.take(3).toList(),
+                    onDownload: widget.onDownload,
+                  ),
+                ),
+              ] else if (_mode == _InfoPanelMode.members) ...[
+                ...conversation.members.map((member) {
+                  final display = member.fullname.trim().isEmpty
+                      ? member.userid
+                      : member.fullname;
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: YSAvatar(
+                        label: display, size: 38, online: member.isOnline),
+                    title: Text(display,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text(member.userid),
+                  );
+                }),
+              ] else if (_mode == _InfoPanelMode.media) ...[
+                _MediaPreviewGrid(
+                  media: media,
+                  absoluteUrl: state.apiClient.absoluteUrl,
+                  onDownload: widget.onDownload,
+                ),
+              ] else if (_mode == _InfoPanelMode.polls) ...[
+                _PollPreviewList(polls: polls),
+              ] else if (_mode == _InfoPanelMode.files) ...[
+                _DocumentPreviewList(
+                  documents: documents,
+                  onDownload: widget.onDownload,
+                ),
+              ],
             ],
           );
         },
       ),
+    );
+  }
+}
+
+class _InfoPanelHeader extends StatelessWidget {
+  const _InfoPanelHeader({
+    required this.title,
+    required this.subtitle,
+    required this.isGroup,
+    required this.memberCount,
+    required this.showBack,
+    required this.onBack,
+  });
+
+  final String title;
+  final String subtitle;
+  final bool isGroup;
+  final int memberCount;
+  final bool showBack;
+  final VoidCallback onBack;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        if (showBack)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: IconButton(
+              tooltip: context.l10n.t('back'),
+              onPressed: onBack,
+              icon: const Icon(Icons.arrow_back),
+            ),
+          ),
+        Center(
+          child: isGroup
+              ? _GroupAvatar(count: memberCount)
+              : YSAvatar(label: title, size: 74),
+        ),
+        const SizedBox(height: 10),
+        Text(
+          title,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+              color: AppColors.ink, fontSize: 18, fontWeight: FontWeight.w900),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          subtitle,
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+              color: AppColors.muted, fontWeight: FontWeight.w700),
+        ),
+      ],
+    );
+  }
+}
+
+class _InfoSummaryTile extends StatelessWidget {
+  const _InfoSummaryTile({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(icon, color: AppColors.brand),
+      title: Text(title, style: const TextStyle(fontWeight: FontWeight.w900)),
+      subtitle: Text(subtitle),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: onTap,
+    );
+  }
+}
+
+class _InfoPreviewSection extends StatelessWidget {
+  const _InfoPreviewSection({
+    required this.title,
+    required this.count,
+    required this.emptyText,
+    required this.child,
+    this.onViewAll,
+  });
+
+  final String title;
+  final int count;
+  final String emptyText;
+  final Widget child;
+  final VoidCallback? onViewAll;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(child: _InfoSectionTitle(title: '$title ($count)')),
+              if (onViewAll != null)
+                TextButton(
+                  onPressed: onViewAll,
+                  child: Text(context.l10n.t('viewAll')),
+                ),
+            ],
+          ),
+          if (count == 0)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Text(emptyText,
+                  style: const TextStyle(
+                      color: AppColors.muted, fontWeight: FontWeight.w700)),
+            )
+          else
+            child,
+        ],
+      ),
+    );
+  }
+}
+
+class _MediaPreviewGrid extends StatelessWidget {
+  const _MediaPreviewGrid({
+    required this.media,
+    required this.absoluteUrl,
+    required this.onDownload,
+  });
+
+  final List<ChatAttachment> media;
+  final String Function(String url) absoluteUrl;
+  final ValueChanged<ChatAttachment> onDownload;
+
+  @override
+  Widget build(BuildContext context) {
+    if (media.isEmpty) return const SizedBox.shrink();
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        crossAxisSpacing: 7,
+        mainAxisSpacing: 7,
+      ),
+      itemCount: media.length,
+      itemBuilder: (context, index) {
+        final file = media[index];
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Image.network(
+                absoluteUrl(file.fileUrl),
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) =>
+                    const ColoredBox(color: AppColors.brandSoftest),
+              ),
+              if (_isVideoAttachment(file))
+                const Center(
+                  child: Icon(Icons.play_circle_fill,
+                      color: Colors.white, size: 34),
+                ),
+              Positioned(
+                right: 4,
+                top: 4,
+                child: InkWell(
+                  onTap: () => onDownload(file),
+                  child: Container(
+                    width: 28,
+                    height: 28,
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.45),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.download_outlined,
+                        color: Colors.white, size: 15),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _PollPreviewList extends StatelessWidget {
+  const _PollPreviewList({required this.polls});
+
+  final List<ChatMessage> polls;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: polls
+          .map((message) => ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.how_to_vote_outlined,
+                    color: AppColors.brand),
+                title: Text(message.poll?.question ?? message.content,
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle:
+                    Text(context.l10n.voteCount(message.poll?.totalVotes ?? 0)),
+              ))
+          .toList(),
+    );
+  }
+}
+
+class _DocumentPreviewList extends StatelessWidget {
+  const _DocumentPreviewList({
+    required this.documents,
+    required this.onDownload,
+  });
+
+  final List<ChatAttachment> documents;
+  final ValueChanged<ChatAttachment> onDownload;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: documents
+          .map((file) => ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.insert_drive_file_outlined,
+                    color: AppColors.brand),
+                title: Text(
+                  _attachmentDisplayName(file),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(_formatBytes(file.fileSize)),
+                trailing: IconButton(
+                  tooltip: context.l10n.t('download'),
+                  onPressed: () => onDownload(file),
+                  icon: const Icon(Icons.download_outlined),
+                ),
+                onTap: () => onDownload(file),
+              ))
+          .toList(),
     );
   }
 }
@@ -2372,6 +2821,96 @@ String _messagePreview(BuildContext context, ChatMessage message) {
     return context.l10n.t('attachmentPreview');
   }
   return context.l10n.t('messagePreview');
+}
+
+String _attachmentDisplayName(ChatAttachment attachment) {
+  if (attachment.relativePath.trim().isNotEmpty) {
+    return attachment.relativePath.split('/').last;
+  }
+  if (attachment.fileName.trim().isNotEmpty) return attachment.fileName.trim();
+  return 'Attachment';
+}
+
+List<String> _mentionLabels(ChatConversation conversation) {
+  final labels = <String>[];
+  final seen = <String>{};
+
+  void addLabel(String value) {
+    final normalized = value.trim();
+    if (normalized.length <= 1) return;
+    final key = normalized.toLowerCase();
+    if (seen.contains(key)) return;
+    seen.add(key);
+    labels.add(normalized);
+  }
+
+  if (conversation.type == 'group') {
+    addLabel('@All');
+  }
+  for (final member in conversation.members) {
+    final display = member.fullname.trim().isNotEmpty
+        ? member.fullname.trim()
+        : member.userid.trim();
+    addLabel('@$display');
+    addLabel('@${member.fullname}');
+    addLabel('@${member.userid}');
+  }
+  labels.sort((a, b) => b.length.compareTo(a.length));
+  return labels;
+}
+
+List<_MentionOption> _mentionOptions(ChatConversation conversation) {
+  final options = <_MentionOption>[];
+  final seen = <String>{};
+
+  void addOption(_MentionOption option) {
+    final key = option.label.toLowerCase();
+    if (seen.contains(key)) return;
+    seen.add(key);
+    options.add(option);
+  }
+
+  if (conversation.type == 'group') {
+    addOption(const _MentionOption(
+      label: 'All',
+      detail: '@All',
+      searchText: 'all @all',
+      isAll: true,
+    ));
+  }
+
+  for (final member in conversation.members) {
+    final label = member.fullname.trim().isNotEmpty
+        ? member.fullname.trim()
+        : member.userid.trim();
+    if (label.isEmpty) continue;
+    addOption(_MentionOption(
+      label: label,
+      detail: member.userid,
+      online: member.isOnline,
+      searchText:
+          '$label ${member.fullname} ${member.nickname} ${member.userid}'
+              .toLowerCase(),
+    ));
+  }
+
+  return options;
+}
+
+class _MentionOption {
+  const _MentionOption({
+    required this.label,
+    required this.detail,
+    this.searchText = '',
+    this.online = false,
+    this.isAll = false,
+  });
+
+  final String label;
+  final String detail;
+  final String searchText;
+  final bool online;
+  final bool isAll;
 }
 
 bool _isImageAttachment(ChatAttachment attachment) {

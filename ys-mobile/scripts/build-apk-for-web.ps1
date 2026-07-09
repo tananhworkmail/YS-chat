@@ -12,6 +12,82 @@ $mobileRoot = Resolve-Path (Join-Path $scriptRoot "..")
 $repoRoot = Resolve-Path (Join-Path $mobileRoot "..")
 $webDownloadsDir = Join-Path $repoRoot "ys-web\public\downloads"
 $targetApk = Join-Path $webDownloadsDir "YSChat.apk"
+
+function Remove-StaleFlutterDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $RelativePath
+    )
+
+    $target = Join-Path $mobileRoot $RelativePath
+    if (-not (Test-Path -LiteralPath $target)) {
+        return
+    }
+
+    $resolvedTarget = Resolve-Path -LiteralPath $target
+    if (-not $resolvedTarget.Path.StartsWith($mobileRoot.Path, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to delete outside mobile project: $($resolvedTarget.Path)"
+    }
+
+    Get-ChildItem -LiteralPath $resolvedTarget.Path -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        $_.Attributes = $_.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+    }
+    $item = Get-Item -LiteralPath $resolvedTarget.Path -Force
+    $item.Attributes = $item.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $resolvedTarget.Path -Recurse -Force
+            return
+        } catch {
+            if ($attempt -eq 5) {
+                throw
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+
+function Stop-GradleDaemon {
+    $gradleWrapper = Join-Path $mobileRoot "android\gradlew.bat"
+    if (-not (Test-Path -LiteralPath $gradleWrapper)) {
+        return
+    }
+
+    & $gradleWrapper --stop *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Gradle daemon stop returned exit code $LASTEXITCODE. Continuing cleanup."
+    }
+}
+
+function Stop-BuildJavaDaemons {
+    $buildDaemons = Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -eq "java.exe" -and (
+            $_.CommandLine -like "*org.gradle.launcher.daemon.bootstrap.GradleDaemon*" -or
+            $_.CommandLine -like "*org.jetbrains.kotlin.daemon.KotlinCompileDaemon*"
+        )
+    }
+
+    foreach ($process in $buildDaemons) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($buildDaemons) {
+        Start-Sleep -Milliseconds 800
+    }
+}
+
+function Invoke-FlutterBuild {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]] $Arguments
+    )
+
+    & $flutterCommand @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Flutter build failed with exit code $LASTEXITCODE."
+    }
+}
+
 $flutterExecutable = Get-Command flutter -ErrorAction SilentlyContinue
 $flutterCommand = $null
 if ($flutterExecutable) {
@@ -26,11 +102,17 @@ if (-not $flutterCommand) {
 
 Push-Location $mobileRoot
 try {
+    Stop-GradleDaemon
+    Stop-BuildJavaDaemons
+    Remove-StaleFlutterDirectory "ios\Flutter\ephemeral\Packages\.packages"
+    Remove-StaleFlutterDirectory "build\unit_test_assets"
+    Remove-StaleFlutterDirectory "build\app"
+
     if ($DebugBuild) {
-        & $flutterCommand build apk --debug --target-platform android-arm64,android-x64 --dart-define="YS_API_URL=$ApiUrl"
+        Invoke-FlutterBuild -Arguments @("build", "apk", "--debug", "--target-platform", "android-arm64,android-x64", "--dart-define=YS_API_URL=$ApiUrl")
         $sourceApk = Join-Path $mobileRoot "build\app\outputs\flutter-apk\app-debug.apk"
     } else {
-        & $flutterCommand build apk --release --target-platform android-arm64,android-x64 --dart-define="YS_API_URL=$ApiUrl"
+        Invoke-FlutterBuild -Arguments @("build", "apk", "--release", "--target-platform", "android-arm64,android-x64", "--dart-define=YS_API_URL=$ApiUrl")
         $sourceApk = Join-Path $mobileRoot "build\app\outputs\flutter-apk\app-release.apk"
     }
 

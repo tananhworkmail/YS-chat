@@ -163,6 +163,24 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  Future<bool> loadMessageUntilVisible(int messageId) async {
+    if (messageId <= 0) return false;
+    while (!messages.any((message) => message.id == messageId) &&
+        hasMoreMessages) {
+      if (loadingOlderMessages) {
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        continue;
+      }
+      final beforeCount = messages.length;
+      await loadOlderMessages();
+      if (messages.length == beforeCount &&
+          !messages.any((message) => message.id == messageId)) {
+        break;
+      }
+    }
+    return messages.any((message) => message.id == messageId);
+  }
+
   void clearSelectedConversation() {
     selectedConversation = null;
     messages = [];
@@ -176,7 +194,9 @@ class AppState extends ChangeNotifier {
     final trimmed = content.trim();
     if (conversation == null || trimmed.isEmpty) return;
     final message = await apiClient.sendMessage(conversation.id,
-        type: 'text', content: trimmed, replyToMessageId: replyTo?.id ?? 0);
+        type: _isLinkMessageContent(trimmed) ? 'link' : 'text',
+        content: trimmed,
+        replyToMessageId: replyTo?.id ?? 0);
     _upsertMessage(message);
   }
 
@@ -296,7 +316,17 @@ class AppState extends ChangeNotifier {
     if (event.type == 'chat.message.created' ||
         event.type == 'chat.poll.updated') {
       final message = event.message;
-      if (message != null) _upsertMessage(message);
+      if (message != null) {
+        _upsertMessage(message);
+        if (event.type == 'chat.message.created' &&
+            message.senderUserid != tokenStore.userid &&
+            message.conversationId != selectedConversation?.id) {
+          unawaited(pushService.showChatMessage(
+            message: message,
+            conversationTitle: _notificationConversationTitle(message),
+          ));
+        }
+      }
       unawaited(refreshChat(reloadSelected: false));
       return;
     }
@@ -336,6 +366,18 @@ class AppState extends ChangeNotifier {
     }).toList()
       ..sort(_sortConversations);
     notifyListeners();
+  }
+
+  String _notificationConversationTitle(ChatMessage message) {
+    final conversation = conversations
+        .where((item) => item.id == message.conversationId)
+        .firstOrNull;
+    if (conversation != null) {
+      return conversation.titleFor(tokenStore.userid ?? '');
+    }
+    return message.senderName.trim().isNotEmpty
+        ? message.senderName.trim()
+        : 'YS Chat';
   }
 
   Future<void> _guard(Future<void> Function() action) async {
@@ -656,4 +698,16 @@ class AppState extends ChangeNotifier {
     _callStartedAt = null;
     notifyListeners();
   }
+}
+
+bool _isLinkMessageContent(String value) {
+  final content = value.trim();
+  if (content.isEmpty || RegExp(r'\s').hasMatch(content)) return false;
+  final hasProtocol =
+      RegExp(r'^https?://', caseSensitive: false).hasMatch(content);
+  final uri = Uri.tryParse(hasProtocol ? content : 'https://$content');
+  return uri != null &&
+      uri.host.contains('.') &&
+      !uri.host.startsWith('.') &&
+      !uri.host.endsWith('.');
 }

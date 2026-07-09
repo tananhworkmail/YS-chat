@@ -1,7 +1,9 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:video_player/video_player.dart';
 
 import '../l10n/app_localizations.dart';
@@ -19,6 +21,8 @@ class MessageBubble extends StatelessWidget {
     required this.onDownload,
     required this.onVotePoll,
     required this.onClosePoll,
+    required this.mentionLabels,
+    required this.onOpenReference,
   });
 
   final ChatMessage message;
@@ -30,6 +34,8 @@ class MessageBubble extends StatelessWidget {
   final void Function(
       ChatMessage message, List<int> optionIds, String customOption) onVotePoll;
   final ValueChanged<ChatMessage> onClosePoll;
+  final List<String> mentionLabels;
+  final ValueChanged<int> onOpenReference;
 
   @override
   Widget build(BuildContext context) {
@@ -74,7 +80,7 @@ class MessageBubble extends StatelessWidget {
             ],
             Flexible(
               child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 360),
+                constraints: const BoxConstraints(maxWidth: 330),
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     color: mine ? AppColors.brand : Colors.white,
@@ -95,7 +101,7 @@ class MessageBubble extends StatelessWidget {
                     ],
                   ),
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(10, 8, 10, 7),
+                    padding: const EdgeInsets.fromLTRB(9, 7, 9, 6),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
@@ -116,7 +122,10 @@ class MessageBubble extends StatelessWidget {
                           ),
                         if (message.replyTo != null)
                           _ReferenceBox(
-                              reference: message.replyTo!, mine: mine),
+                            reference: message.replyTo!,
+                            mine: mine,
+                            onTap: () => onOpenReference(message.replyTo!.id),
+                          ),
                         if (message.forwardedFrom != null)
                           Padding(
                             padding: const EdgeInsets.only(bottom: 5),
@@ -134,7 +143,10 @@ class MessageBubble extends StatelessWidget {
                           ),
                         if (message.content.trim().isNotEmpty)
                           _MessageText(
-                              content: message.content, color: textColor),
+                            content: message.content,
+                            color: textColor,
+                            mentionLabels: mentionLabels,
+                          ),
                         if (images.isNotEmpty)
                           Padding(
                             padding: EdgeInsets.only(
@@ -488,87 +500,138 @@ class _PollBubbleState extends State<_PollBubble> {
   }
 }
 
-class _MessageText extends StatelessWidget {
-  const _MessageText({required this.content, required this.color});
+class _MessageText extends StatefulWidget {
+  const _MessageText({
+    required this.content,
+    required this.color,
+    required this.mentionLabels,
+  });
 
   final String content;
   final Color color;
+  final List<String> mentionLabels;
+
+  @override
+  State<_MessageText> createState() => _MessageTextState();
+}
+
+class _MessageTextState extends State<_MessageText> {
+  final List<TapGestureRecognizer> _recognizers = [];
+
+  @override
+  void dispose() {
+    for (final recognizer in _recognizers) {
+      recognizer.dispose();
+    }
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final parts = RegExp(r'(@[^\s@]+)').allMatches(content).toList();
+    for (final recognizer in _recognizers) {
+      recognizer.dispose();
+    }
+    _recognizers.clear();
+
+    final parts = _messageParts(widget.content, widget.mentionLabels);
     if (parts.isEmpty) {
-      return Text(content,
-          style: TextStyle(color: color, fontSize: 14.5, height: 1.35));
+      return Text(widget.content,
+          style: TextStyle(color: widget.color, fontSize: 14.2, height: 1.32));
     }
 
     final spans = <TextSpan>[];
-    var cursor = 0;
-    for (final match in parts) {
-      if (match.start > cursor) {
-        spans.add(TextSpan(text: content.substring(cursor, match.start)));
+    for (final part in parts) {
+      if (part.isLink) {
+        final recognizer = TapGestureRecognizer()
+          ..onTap = () => _openLink(part.text);
+        _recognizers.add(recognizer);
+        spans.add(TextSpan(
+          text: part.text,
+          recognizer: recognizer,
+          style: const TextStyle(
+            color: Color(0xff2563eb),
+            fontWeight: FontWeight.w800,
+            decoration: TextDecoration.underline,
+          ),
+        ));
+      } else if (part.isMention) {
+        spans.add(TextSpan(
+          text: part.text,
+          style: const TextStyle(
+              color: Color(0xff2563eb), fontWeight: FontWeight.w900),
+        ));
+      } else {
+        spans.add(TextSpan(text: part.text));
       }
-      spans.add(TextSpan(
-        text: content.substring(match.start, match.end),
-        style: const TextStyle(
-            color: Color(0xff2563eb), fontWeight: FontWeight.w900),
-      ));
-      cursor = match.end;
-    }
-    if (cursor < content.length) {
-      spans.add(TextSpan(text: content.substring(cursor)));
     }
     return RichText(
       text: TextSpan(
-        style: TextStyle(color: color, fontSize: 14.5, height: 1.35),
+        style: TextStyle(color: widget.color, fontSize: 14.2, height: 1.32),
         children: spans,
       ),
     );
   }
+
+  Future<void> _openLink(String value) async {
+    final hasProtocol =
+        RegExp(r'^https?://', caseSensitive: false).hasMatch(value);
+    final uri = Uri.tryParse(hasProtocol ? value : 'https://$value');
+    if (uri == null) return;
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
 }
 
 class _ReferenceBox extends StatelessWidget {
-  const _ReferenceBox({required this.reference, required this.mine});
+  const _ReferenceBox({
+    required this.reference,
+    required this.mine,
+    required this.onTap,
+  });
 
   final ChatMessageReference reference;
   final bool mine;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        color: mine
-            ? Colors.white.withValues(alpha: 0.14)
-            : AppColors.brandSoftest,
-        borderRadius: BorderRadius.circular(8),
-        border: Border(
-            left: BorderSide(
-                color: mine ? Colors.white : AppColors.brand, width: 3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(reference.senderName,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                  color: mine ? Colors.white : AppColors.brandDark,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w900)),
-          const SizedBox(height: 2),
-          Text(_referencePreview(context, reference),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                  color: mine
-                      ? Colors.white.withValues(alpha: 0.78)
-                      : AppColors.muted,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700)),
-        ],
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        decoration: BoxDecoration(
+          color: mine
+              ? Colors.white.withValues(alpha: 0.14)
+              : AppColors.brandSoftest,
+          borderRadius: BorderRadius.circular(8),
+          border: Border(
+              left: BorderSide(
+                  color: mine ? Colors.white : AppColors.brand, width: 3)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(reference.senderName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    color: mine ? Colors.white : AppColors.brandDark,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900)),
+            const SizedBox(height: 2),
+            Text(_referencePreview(context, reference),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    color: mine
+                        ? Colors.white.withValues(alpha: 0.78)
+                        : AppColors.muted,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700)),
+          ],
+        ),
       ),
     );
   }
@@ -608,28 +671,35 @@ class _ImageGrid extends StatelessWidget {
             itemCount: attachments.length,
             itemBuilder: (context, index) {
               final attachment = attachments[index];
+              final url = resolveUrl(attachment.fileUrl);
               return ClipRRect(
                 borderRadius: BorderRadius.circular(8),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Image.network(
-                      resolveUrl(attachment.fileUrl),
-                      fit: BoxFit.cover,
-                      errorBuilder: (context, error, stackTrace) =>
-                          const ColoredBox(
-                        color: AppColors.brandSoftest,
-                        child: Icon(Icons.broken_image_outlined,
-                            color: AppColors.muted),
-                      ),
+                child: Material(
+                  color: AppColors.brandSoftest,
+                  child: InkWell(
+                    onTap: () => _openImageViewer(context, url),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Image.network(
+                          url,
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) =>
+                              const ColoredBox(
+                            color: AppColors.brandSoftest,
+                            child: Icon(Icons.broken_image_outlined,
+                                color: AppColors.muted),
+                          ),
+                        ),
+                        Positioned(
+                          right: 5,
+                          top: 5,
+                          child: _FloatingDownloadButton(
+                              onTap: () => onDownload(attachment)),
+                        ),
+                      ],
                     ),
-                    Positioned(
-                      right: 5,
-                      top: 5,
-                      child: _FloatingDownloadButton(
-                          onTap: () => onDownload(attachment)),
-                    ),
-                  ],
+                  ),
                 ),
               );
             },
@@ -683,6 +753,7 @@ class _VideoPreviewState extends State<_VideoPreview> {
   void initState() {
     super.initState();
     _controller = VideoPlayerController.networkUrl(Uri.parse(widget.url))
+      ..addListener(_refresh)
       ..initialize().then((_) {
         if (mounted) setState(() {});
       });
@@ -690,8 +761,13 @@ class _VideoPreviewState extends State<_VideoPreview> {
 
   @override
   void dispose() {
+    _controller.removeListener(_refresh);
     _controller.dispose();
     super.dispose();
+  }
+
+  void _refresh() {
+    if (mounted) setState(() {});
   }
 
   @override
@@ -705,31 +781,35 @@ class _VideoPreviewState extends State<_VideoPreview> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            if (_controller.value.isInitialized)
-              VideoPlayer(_controller)
-            else
-              const ColoredBox(color: AppColors.brandSoftest),
-            Center(
-              child: IconButton.filled(
-                onPressed: _controller.value.isInitialized
-                    ? () {
-                        setState(() {
-                          _controller.value.isPlaying
-                              ? _controller.pause()
-                              : _controller.play();
-                        });
-                      }
-                    : null,
-                icon: Icon(_controller.value.isPlaying
-                    ? Icons.pause
-                    : Icons.play_arrow),
-              ),
+            GestureDetector(
+              onTap: _controller.value.isInitialized
+                  ? () => _openVideoViewer(context, widget.url)
+                  : null,
+              child: _controller.value.isInitialized
+                  ? VideoPlayer(_controller)
+                  : const ColoredBox(color: AppColors.brandSoftest),
             ),
+            if (!_controller.value.isPlaying)
+              Center(
+                child: IconButton.filled(
+                  onPressed: _controller.value.isInitialized
+                      ? () => _controller.play()
+                      : null,
+                  icon: const Icon(Icons.play_arrow),
+                ),
+              ),
             Positioned(
               right: 5,
               top: 5,
               child: _FloatingDownloadButton(onTap: widget.onDownload),
             ),
+            if (_controller.value.isInitialized)
+              Positioned(
+                left: 8,
+                right: 8,
+                bottom: 5,
+                child: _VideoProgress(controller: _controller),
+              ),
           ],
         ),
       ),
@@ -796,8 +876,8 @@ class _VoicePlayerState extends State<_VoicePlayer> {
   Widget build(BuildContext context) {
     final foreground = widget.mine ? Colors.white : AppColors.ink;
     return Container(
-      constraints: const BoxConstraints(minWidth: 190),
-      padding: const EdgeInsets.all(9),
+      constraints: const BoxConstraints(minWidth: 176, maxWidth: 250),
+      padding: const EdgeInsets.fromLTRB(6, 6, 9, 6),
       decoration: BoxDecoration(
         color: widget.mine
             ? Colors.white.withValues(alpha: 0.14)
@@ -812,13 +892,15 @@ class _VoicePlayerState extends State<_VoicePlayer> {
         mainAxisSize: MainAxisSize.min,
         children: [
           IconButton(
+            visualDensity: VisualDensity.compact,
             onPressed: () => _playing ? _player.pause() : _player.play(),
             icon: Icon(_playing ? Icons.pause_circle : Icons.play_circle,
                 color: foreground),
           ),
-          const SizedBox(width: 4),
-          Text(context.l10n.t('voiceMessage'),
-              style: TextStyle(color: foreground, fontWeight: FontWeight.w800)),
+          const SizedBox(width: 2),
+          Expanded(
+            child: _AudioProgress(player: _player, color: foreground),
+          ),
         ],
       ),
     );
@@ -864,54 +946,320 @@ class _FileRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final foreground = mine ? Colors.white : AppColors.ink;
-    final sub = mine ? Colors.white.withValues(alpha: 0.72) : AppColors.muted;
-    return Container(
-      constraints: const BoxConstraints(minWidth: 220),
-      padding: const EdgeInsets.all(9),
-      decoration: BoxDecoration(
-        color: mine
-            ? Colors.white.withValues(alpha: 0.14)
-            : AppColors.brandSoftest,
+    final muted = mine ? Colors.white.withValues(alpha: 0.74) : AppColors.muted;
+    final panelColor =
+        mine ? Colors.white.withValues(alpha: 0.12) : const Color(0xfff8fbff);
+    final borderColor =
+        mine ? Colors.white.withValues(alpha: 0.20) : AppColors.line;
+    final name = attachment.relativePath.isNotEmpty
+        ? attachment.relativePath.split('/').last
+        : attachment.fileName;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onDownload,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-            color:
-                mine ? Colors.white.withValues(alpha: 0.18) : AppColors.line),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(_fileIcon(attachment), size: 24, color: foreground),
-          const SizedBox(width: 9),
-          Flexible(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minWidth: 190, maxWidth: 286),
+          child: Ink(
+            padding: const EdgeInsets.fromLTRB(9, 8, 6, 8),
+            decoration: BoxDecoration(
+              color: panelColor,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: borderColor),
+            ),
+            child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  attachment.relativePath.isNotEmpty
-                      ? attachment.relativePath
-                      : attachment.fileName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style:
-                      TextStyle(color: foreground, fontWeight: FontWeight.w800),
+                Container(
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: mine
+                        ? Colors.white.withValues(alpha: 0.13)
+                        : AppColors.brandSoft,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child:
+                      Icon(_fileIcon(attachment), size: 20, color: foreground),
                 ),
-                if (attachment.fileSize > 0)
-                  Text(_formatBytes(attachment.fileSize),
-                      style: TextStyle(
-                          color: sub,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700)),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        name.isNotEmpty
+                            ? name
+                            : context.l10n.t('attachmentFile'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: foreground,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      if (attachment.fileSize > 0) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          _formatBytes(attachment.fileSize),
+                          style: TextStyle(
+                            color: muted,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 4),
+                IconButton(
+                  tooltip: context.l10n.t('download'),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: onDownload,
+                  icon: Icon(
+                    Icons.file_open_outlined,
+                    color: mine ? Colors.white : AppColors.brand,
+                    size: 18,
+                  ),
+                ),
               ],
             ),
           ),
-          IconButton(
-            tooltip: context.l10n.t('download'),
-            onPressed: onDownload,
-            icon: Icon(Icons.download_outlined,
-                color: mine ? Colors.white : AppColors.brand, size: 18),
+        ),
+      ),
+    );
+  }
+}
+
+class _AudioProgress extends StatelessWidget {
+  const _AudioProgress({required this.player, required this.color});
+
+  final AudioPlayer player;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<Duration?>(
+      stream: player.durationStream,
+      builder: (context, durationSnapshot) {
+        final duration = durationSnapshot.data ?? Duration.zero;
+        return StreamBuilder<Duration>(
+          stream: player.positionStream,
+          builder: (context, positionSnapshot) {
+            final position = positionSnapshot.data ?? Duration.zero;
+            final max = duration.inMilliseconds <= 0
+                ? 1.0
+                : duration.inMilliseconds.toDouble();
+            final value = position.inMilliseconds.clamp(0, max.toInt());
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 3,
+                    thumbShape:
+                        const RoundSliderThumbShape(enabledThumbRadius: 5),
+                    overlayShape:
+                        const RoundSliderOverlayShape(overlayRadius: 10),
+                    activeTrackColor: color,
+                    inactiveTrackColor: color.withValues(alpha: 0.24),
+                    thumbColor: color,
+                  ),
+                  child: Slider(
+                    min: 0,
+                    max: max,
+                    value: value.toDouble(),
+                    onChanged: duration.inMilliseconds <= 0
+                        ? null
+                        : (next) =>
+                            player.seek(Duration(milliseconds: next.round())),
+                  ),
+                ),
+                Text(
+                  '${_formatDuration(position)} / ${duration == Duration.zero ? '--:--' : _formatDuration(duration)}',
+                  style: TextStyle(
+                    color: color.withValues(alpha: 0.78),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+class _VideoProgress extends StatelessWidget {
+  const _VideoProgress({required this.controller});
+
+  final VideoPlayerController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final value = controller.value;
+        final duration = value.duration;
+        final position = value.position;
+        final max = duration.inMilliseconds <= 0
+            ? 1.0
+            : duration.inMilliseconds.toDouble();
+        final current = position.inMilliseconds.clamp(0, max.toInt());
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.45),
+            borderRadius: BorderRadius.circular(8),
           ),
-        ],
+          child: Row(
+            children: [
+              InkWell(
+                onTap: value.isInitialized
+                    ? () =>
+                        value.isPlaying ? controller.pause() : controller.play()
+                    : null,
+                borderRadius: BorderRadius.circular(999),
+                child: SizedBox(
+                  width: 26,
+                  height: 26,
+                  child: Icon(
+                    value.isPlaying ? Icons.pause : Icons.play_arrow,
+                    color: Colors.white,
+                    size: 16,
+                  ),
+                ),
+              ),
+              Text(
+                _formatDuration(position),
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800),
+              ),
+              Expanded(
+                child: SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 2.5,
+                    thumbShape:
+                        const RoundSliderThumbShape(enabledThumbRadius: 4),
+                    overlayShape:
+                        const RoundSliderOverlayShape(overlayRadius: 9),
+                    activeTrackColor: Colors.white,
+                    inactiveTrackColor: Colors.white30,
+                    thumbColor: Colors.white,
+                  ),
+                  child: Slider(
+                    min: 0,
+                    max: max,
+                    value: current.toDouble(),
+                    onChanged: duration.inMilliseconds <= 0
+                        ? null
+                        : (next) => controller
+                            .seekTo(Duration(milliseconds: next.round())),
+                  ),
+                ),
+              ),
+              Text(
+                _formatDuration(duration),
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _FullscreenVideo extends StatefulWidget {
+  const _FullscreenVideo({required this.url});
+
+  final String url;
+
+  @override
+  State<_FullscreenVideo> createState() => _FullscreenVideoState();
+}
+
+class _FullscreenVideoState extends State<_FullscreenVideo> {
+  late final VideoPlayerController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = VideoPlayerController.networkUrl(Uri.parse(widget.url))
+      ..addListener(_refresh)
+      ..initialize().then((_) {
+        if (!mounted) return;
+        setState(() {});
+        _controller.play();
+      });
+  }
+
+  @override
+  void dispose() {
+    _controller.removeListener(_refresh);
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _refresh() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Center(
+              child: _controller.value.isInitialized
+                  ? AspectRatio(
+                      aspectRatio: _controller.value.aspectRatio,
+                      child: VideoPlayer(_controller),
+                    )
+                  : const CircularProgressIndicator(color: Colors.white),
+            ),
+            Positioned(
+              top: 8,
+              left: 8,
+              child: IconButton.filled(
+                onPressed: () => Navigator.of(context).pop(),
+                icon: const Icon(Icons.close),
+              ),
+            ),
+            if (!_controller.value.isPlaying)
+              Center(
+                child: IconButton.filled(
+                  onPressed: _controller.value.isInitialized
+                      ? () => _controller.play()
+                      : null,
+                  icon: const Icon(Icons.play_arrow),
+                ),
+              ),
+            if (_controller.value.isInitialized)
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: 12,
+                child: _VideoProgress(controller: _controller),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -961,6 +1309,146 @@ bool _isVoice(ChatAttachment attachment) {
       ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'oga', 'webm'].contains(ext);
 }
 
+Future<void> _openImageViewer(BuildContext context, String url) async {
+  await Navigator.of(context).push<void>(
+    MaterialPageRoute(
+      builder: (context) => Scaffold(
+        backgroundColor: Colors.black,
+        body: SafeArea(
+          child: Stack(
+            children: [
+              Center(
+                child: InteractiveViewer(
+                  minScale: 0.8,
+                  maxScale: 5,
+                  child: Image.network(
+                    url,
+                    fit: BoxFit.contain,
+                    errorBuilder: (context, error, stackTrace) => const Icon(
+                      Icons.broken_image_outlined,
+                      color: Colors.white70,
+                      size: 42,
+                    ),
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 8,
+                left: 8,
+                child: IconButton.filled(
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(Icons.close),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+Future<void> _openVideoViewer(BuildContext context, String url) async {
+  await Navigator.of(context).push<void>(
+    MaterialPageRoute(builder: (context) => _FullscreenVideo(url: url)),
+  );
+}
+
+List<_TextPart> _messageParts(String content, List<String> mentionLabels) {
+  if (content.isEmpty) return const [];
+  final labels = mentionLabels
+      .map((label) => label.trim())
+      .where((label) => label.length > 1)
+      .toSet()
+      .toList()
+    ..sort((a, b) => b.length.compareTo(a.length));
+  final lowerLabels =
+      labels.map((label) => (text: label, lower: label.toLowerCase())).toList();
+  final linkMatches = _linkPattern
+      .allMatches(content)
+      .map((match) => _TextRange(match.start, match.end, isLink: true))
+      .toList();
+  final ranges = <_TextRange>[...linkMatches];
+  final lowerContent = content.toLowerCase();
+  var cursor = 0;
+  while (cursor < content.length && lowerLabels.isNotEmpty) {
+    ({String text, String lower})? nextLabel;
+    var nextIndex = -1;
+    for (final label in lowerLabels) {
+      final index = lowerContent.indexOf(label.lower, cursor);
+      if (index < 0 || _overlaps(index, index + label.text.length, ranges)) {
+        continue;
+      }
+      if (nextIndex < 0 ||
+          index < nextIndex ||
+          (index == nextIndex && label.text.length > nextLabel!.text.length)) {
+        nextIndex = index;
+        nextLabel = label;
+      }
+    }
+    if (nextLabel == null) break;
+    final end = nextIndex + nextLabel.text.length;
+    if (_hasMentionBoundary(content, nextIndex, end)) {
+      ranges.add(_TextRange(nextIndex, end, isMention: true));
+    }
+    cursor = end;
+  }
+  if (ranges.isEmpty) return [_TextPart(content)];
+  ranges.sort((a, b) => a.start.compareTo(b.start));
+
+  final parts = <_TextPart>[];
+  var index = 0;
+  for (final range in ranges) {
+    if (range.start < index) continue;
+    if (range.start > index) {
+      parts.add(_TextPart(content.substring(index, range.start)));
+    }
+    parts.add(_TextPart(
+      content.substring(range.start, range.end),
+      isLink: range.isLink,
+      isMention: range.isMention,
+    ));
+    index = range.end;
+  }
+  if (index < content.length) parts.add(_TextPart(content.substring(index)));
+  return parts;
+}
+
+bool _hasMentionBoundary(String content, int start, int end) {
+  final before = start == 0 ? '' : content[start - 1];
+  final after = end >= content.length ? '' : content[end];
+  final beforeOk = before.isEmpty || RegExp(r'\s|[([{]').hasMatch(before);
+  final afterOk = after.isEmpty || RegExp(r'\s|[.,!?;:)\]}]').hasMatch(after);
+  return beforeOk && afterOk;
+}
+
+bool _overlaps(int start, int end, List<_TextRange> ranges) {
+  return ranges.any((range) => start < range.end && end > range.start);
+}
+
+final _linkPattern = RegExp(
+  r'((https?:\/\/)?([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(:\d+)?(\/[^\s]*)?)',
+  caseSensitive: false,
+);
+
+class _TextRange {
+  const _TextRange(this.start, this.end,
+      {this.isLink = false, this.isMention = false});
+
+  final int start;
+  final int end;
+  final bool isLink;
+  final bool isMention;
+}
+
+class _TextPart {
+  const _TextPart(this.text, {this.isLink = false, this.isMention = false});
+
+  final String text;
+  final bool isLink;
+  final bool isMention;
+}
+
 String _fileExt(ChatAttachment attachment) {
   final name = (attachment.fileName.isNotEmpty
           ? attachment.fileName
@@ -986,6 +1474,13 @@ String _formatBytes(int bytes) {
   if (bytes < 1024) return '$bytes B';
   if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
   return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+}
+
+String _formatDuration(Duration duration) {
+  final total = duration.inSeconds;
+  final minutes = total ~/ 60;
+  final seconds = total % 60;
+  return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
 }
 
 String _referencePreview(BuildContext context, ChatMessageReference reference) {

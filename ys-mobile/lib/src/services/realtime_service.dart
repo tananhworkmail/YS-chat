@@ -20,7 +20,13 @@ class RealtimeService {
     required void Function(Object error) onError,
     void Function()? onDone,
   }) {
-    disconnect();
+    final oldSubscription = _subscription;
+    final oldChannel = _channel;
+    _subscription = null;
+    _channel = null;
+    unawaited(oldSubscription?.cancel() ?? Future<void>.value());
+    unawaited(oldChannel?.sink.close() ?? Future<void>.value());
+
     final token = _tokenStore.token;
     if (token == null || token.isEmpty) return;
 
@@ -50,9 +56,11 @@ class RealtimeService {
   }
 
   Future<void> disconnect() async {
-    await _subscription?.cancel();
+    final subscription = _subscription;
+    final channel = _channel;
     _subscription = null;
-    await _channel?.sink.close();
     _channel = null;
+    await subscription?.cancel();
+    await channel?.sink.close();
   }
 }
