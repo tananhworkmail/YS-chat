@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
@@ -17,6 +18,10 @@ import '../widgets/message_bubble.dart';
 
 enum _PanelMode { chats, contacts }
 
+enum _ContactSection { people, groups }
+
+enum _ChatSearchScope { all, messages, contacts, files }
+
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
 
@@ -32,9 +37,42 @@ class _ChatScreenState extends State<ChatScreen> {
   _PanelMode _panelMode = _PanelMode.chats;
   bool _recording = false;
   ChatMessage? _replyingTo;
+  AppState? _observedAppState;
+  int _lastCallNoticeSequence = 0;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final state = context.read<AppState>();
+    if (identical(_observedAppState, state)) return;
+    _observedAppState?.removeListener(_handleCallNotice);
+    _observedAppState = state;
+    state.addListener(_handleCallNotice);
+    _handleCallNotice();
+  }
+
+  void _handleCallNotice() {
+    final state = _observedAppState;
+    if (state == null ||
+        state.callNoticeSequence <= _lastCallNoticeSequence ||
+        state.callNotice.trim().isEmpty) {
+      return;
+    }
+    _lastCallNoticeSequence = state.callNoticeSequence;
+    final notice = state.callNotice;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        SnackBar(content: Text(context.l10n.callStatus(notice))),
+      );
+    });
+  }
 
   @override
   void dispose() {
+    _observedAppState?.removeListener(_handleCallNotice);
     _messageController.dispose();
     _searchController.dispose();
     _contactSearchController.dispose();
@@ -84,7 +122,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final value = (keyword ?? _searchController.text).trim();
     if (value.isEmpty) return;
     final state = context.read<AppState>();
-    final users = await state.apiClient.searchUsers(value);
+    final users = await _findExactUsers(value);
     if (!mounted) return;
     final selected = await showModalBottomSheet<ChatUser>(
       context: context,
@@ -94,6 +132,127 @@ class _ChatScreenState extends State<ChatScreen> {
     if (selected != null && mounted) {
       await state.openDirectConversation(selected.userid);
       setState(() => _panelMode = _PanelMode.chats);
+    }
+  }
+
+  Future<void> _addContact([String? keyword]) async {
+    final state = context.read<AppState>();
+    try {
+      final value = (keyword ?? _contactSearchController.text).trim();
+      if (value.isEmpty) return;
+      final users = await _findExactUsers(value);
+      if (!mounted) return;
+      final selected = await showModalBottomSheet<ChatUser>(
+        context: context,
+        isScrollControlled: true,
+        builder: (context) => _UserSearchSheet(users: users),
+      );
+      if (selected == null || !mounted) return;
+      await state.addContact(selected.userid);
+      _contactSearchController.clear();
+      if (!mounted) return;
+      final display = selected.displayName;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${context.l10n.t('contactAdded')}: $display')),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('addContactFailed'))),
+      );
+    }
+  }
+
+  Future<List<ChatUser>> _findExactUsers(String keyword) async {
+    final query = keyword.trim();
+    if (query.isEmpty) return const [];
+    final users = await context.read<AppState>().apiClient.searchUsers(query);
+    final exact = users
+        .where(
+            (user) => user.userid.trim().toLowerCase() == query.toLowerCase())
+        .toList();
+    return exact;
+  }
+
+  Future<void> _addActiveConversationContact() async {
+    final state = context.read<AppState>();
+    final conversation = state.selectedConversation;
+    if (conversation == null || conversation.type != 'direct') return;
+    final currentUserid = state.tokenStore.userid ?? '';
+    final peer = conversation.members.firstWhere(
+      (member) => member.userid != currentUserid,
+      orElse: () => const ChatUser(userid: '', fullname: ''),
+    );
+    if (peer.userid.isEmpty) return;
+    try {
+      await state.addContact(peer.userid);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('contactAdded'))),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('addContactFailed'))),
+      );
+    }
+  }
+
+  Future<void> _editActiveConversationNickname() async {
+    final state = context.read<AppState>();
+    final conversation = state.selectedConversation;
+    if (conversation == null || conversation.type != 'direct') return;
+    final currentUserid = state.tokenStore.userid ?? '';
+    final peer = conversation.members
+        .where((member) => member.userid != currentUserid)
+        .firstOrNull;
+    if (peer == null ||
+        !state.contacts.any((contact) =>
+            contact.userid.toLowerCase() == peer.userid.toLowerCase())) {
+      return;
+    }
+    final nickname = await _requestNickname(
+      context,
+      contact: peer,
+      initialValue: peer.nickname,
+    );
+    if (nickname == null || !mounted) return;
+    try {
+      await state.updateContactNickname(peer.userid, nickname);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(context.l10n
+              .t(nickname.isEmpty ? 'nicknameRemoved' : 'nicknameSaved')),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('nicknameFailed'))),
+      );
+    }
+  }
+
+  Future<void> _showCreateGroupSheet() async {
+    final state = context.read<AppState>();
+    final draft = await showModalBottomSheet<_CreateGroupDraft>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _CreateGroupSheet(
+        contacts: state.contacts,
+        currentUserid: state.tokenStore.userid ?? '',
+      ),
+    );
+    if (draft == null || !mounted) return;
+    try {
+      await state.createGroupConversation(draft.name, draft.memberUserids);
+      if (mounted) setState(() => _panelMode = _PanelMode.chats);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('groupCreateFailed'))),
+      );
     }
   }
 
@@ -186,6 +345,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 contactSearchController: _contactSearchController,
                 currentUserid: currentUserid,
                 onSearchUser: _startDirectChat,
+                onAddContact: _addContact,
+                onCreateGroup: _showCreateGroupSheet,
                 onModeChanged: (mode) => setState(() => _panelMode = mode),
               );
               final thread = _Thread(
@@ -201,6 +362,8 @@ class _ChatScreenState extends State<ChatScreen> {
                 onForward: _openForwardSheet,
                 onDownload: _downloadAttachment,
                 onInfo: _showInfoPanel,
+                onAddContact: _addActiveConversationContact,
+                onEditNickname: _editActiveConversationNickname,
                 onCreatePoll: _openPollSheet,
                 onSend: _sendText,
                 onPickFiles: () => _pickFiles(FileType.any),
@@ -260,22 +423,24 @@ class _AppRail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final unreadCount = context.watch<AppState>().totalUnreadMessages;
     return Container(
       width: 72,
       color: AppColors.brandDark,
-      padding: const EdgeInsets.symmetric(vertical: 14),
+      padding: const EdgeInsets.symmetric(vertical: 8),
       child: SafeArea(
         child: Column(
           children: [
             const BrandLogo(size: 40, padding: 5, shadow: false),
-            const SizedBox(height: 28),
+            const SizedBox(height: 16),
             _RailButton(
               tooltip: context.l10n.t('messages'),
               icon: Icons.chat_bubble_outline,
               active: mode == _PanelMode.chats,
+              badgeCount: unreadCount,
               onTap: () => onModeChanged(_PanelMode.chats),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 6),
             _RailButton(
               tooltip: context.l10n.t('contacts'),
               icon: Icons.groups_outlined,
@@ -307,11 +472,12 @@ class _MobileRail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final unreadCount = context.watch<AppState>().totalUnreadMessages;
     return SafeArea(
       top: false,
       child: Container(
-        height: 64,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        height: 54,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
         decoration: BoxDecoration(
           color: AppColors.brandDark,
           boxShadow: [
@@ -329,6 +495,7 @@ class _MobileRail extends StatelessWidget {
               tooltip: context.l10n.t('messages'),
               icon: Icons.chat_bubble_outline,
               active: mode == _PanelMode.chats,
+              badgeCount: unreadCount,
               onTap: () => onModeChanged(_PanelMode.chats),
             ),
             _RailButton(
@@ -354,12 +521,14 @@ class _RailButton extends StatelessWidget {
     required this.icon,
     required this.onTap,
     this.active = false,
+    this.badgeCount = 0,
   });
 
   final String tooltip;
   final IconData icon;
   final VoidCallback onTap;
   final bool active;
+  final int badgeCount;
 
   @override
   Widget build(BuildContext context) {
@@ -369,18 +538,33 @@ class _RailButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
         onTap: onTap,
         child: Container(
-          width: 44,
-          height: 44,
+          width: 40,
+          height: 40,
           decoration: BoxDecoration(
             color: active
                 ? Colors.white.withValues(alpha: 0.18)
                 : Colors.transparent,
             borderRadius: BorderRadius.circular(8),
           ),
-          child: Icon(icon,
-              color:
-                  active ? Colors.white : Colors.white.withValues(alpha: 0.78),
-              size: 22),
+          child: Stack(
+            clipBehavior: Clip.none,
+            alignment: Alignment.center,
+            children: [
+              Icon(
+                icon,
+                color: active
+                    ? Colors.white
+                    : Colors.white.withValues(alpha: 0.78),
+                size: 22,
+              ),
+              if (badgeCount > 0)
+                Positioned(
+                  right: 2,
+                  top: 2,
+                  child: _UnreadBadge(count: badgeCount),
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -395,95 +579,143 @@ class _CallPanel extends StatelessWidget {
     final state = context.watch<AppState>();
     if (state.callState == 'idle') return const SizedBox.shrink();
 
-    return SafeArea(
-      child: Align(
-        alignment: Alignment.topCenter,
-        child: Container(
-          margin: const EdgeInsets.all(10),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: AppColors.line),
-            boxShadow: [
-              BoxShadow(
-                color: const Color(0xff0f172a).withValues(alpha: 0.18),
-                blurRadius: 24,
-                offset: const Offset(0, 10),
-              ),
-            ],
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 38,
-                height: 38,
-                decoration: BoxDecoration(
-                  color: AppColors.brandSoft,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Icon(Icons.phone_in_talk_outlined,
-                    color: AppColors.brand),
-              ),
-              const SizedBox(width: 10),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 170),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
+    final currentUserid = state.tokenStore.userid ?? '';
+    final conversation = state.conversations
+        .where((item) => item.id == state.callConversationId)
+        .firstOrNull;
+    final member = conversation == null
+        ? null
+        : _presenceMember(conversation, currentUserid);
+    final imageUrl = conversation?.avatar.isNotEmpty == true
+        ? state.apiClient.absoluteUrl(conversation!.avatar)
+        : member?.avatarUrl(state);
+    final status = state.callState == 'active'
+        ? context.l10n.callingDuration(_formatDuration(state.callDuration))
+        : context.l10n.callStatus(state.callStatus);
+
+    return Positioned.fill(
+      child: Material(
+        color: const Color(0xff111827),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+            child: Column(
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Text(
-                      state.callPeerName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          color: AppColors.ink, fontWeight: FontWeight.w900),
+                    const Icon(
+                      Icons.lock_outline,
+                      color: Color(0xff9ca3af),
+                      size: 15,
                     ),
+                    const SizedBox(width: 6),
                     Text(
-                      state.callState == 'active'
-                          ? context.l10n.callingDuration(
-                              _formatDuration(state.callDuration))
-                          : context.l10n.callStatus(state.callStatus),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                      context.l10n.t('call'),
                       style: const TextStyle(
-                          color: AppColors.muted,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700),
+                        color: Color(0xffd1d5db),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                   ],
                 ),
-              ),
-              const SizedBox(width: 10),
-              if (state.callState == 'incoming') ...[
-                _CallButton(
-                  icon: Icons.call,
-                  color: const Color(0xff16a34a),
-                  onTap: () => context.read<AppState>().acceptIncomingCall(),
+                const Spacer(flex: 2),
+                Container(
+                  padding: const EdgeInsets.all(5),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.24),
+                      width: 2,
+                    ),
+                  ),
+                  child: YSAvatar(
+                    label: state.callPeerName,
+                    imageUrl: imageUrl,
+                    online: member?.isOnline,
+                    size: 96,
+                  ),
                 ),
-                const SizedBox(width: 6),
-                _CallButton(
-                  icon: Icons.call_end,
-                  color: AppColors.danger,
-                  onTap: () => context.read<AppState>().rejectIncomingCall(),
+                const SizedBox(height: 26),
+                Text(
+                  state.callPeerName,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
-              ] else ...[
-                _CallButton(
-                  icon: state.callMuted ? Icons.mic_off : Icons.mic,
-                  color: state.callMuted
-                      ? const Color(0xfff59e0b)
-                      : AppColors.brand,
-                  onTap: () => context.read<AppState>().toggleCallMute(),
+                const SizedBox(height: 10),
+                Text(
+                  status,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xffd1d5db),
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-                const SizedBox(width: 6),
-                _CallButton(
-                  icon: Icons.call_end,
-                  color: AppColors.danger,
-                  onTap: () => context.read<AppState>().endOrCancelCall(),
-                ),
+                const Spacer(flex: 3),
+                if (state.callState == 'incoming')
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      _CallActionButton(
+                        icon: Icons.call_end,
+                        label: context.l10n.t('rejectCall'),
+                        color: AppColors.danger,
+                        onTap: () =>
+                            context.read<AppState>().rejectIncomingCall(),
+                      ),
+                      _CallActionButton(
+                        icon: Icons.call,
+                        label: context.l10n.t('acceptCall'),
+                        color: const Color(0xff16a34a),
+                        onTap: () =>
+                            context.read<AppState>().acceptIncomingCall(),
+                      ),
+                    ],
+                  )
+                else
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      _CallActionButton(
+                        icon: state.callMuted ? Icons.mic_off : Icons.mic,
+                        label: context.l10n
+                            .t(state.callMuted ? 'unmuteCall' : 'muteCall'),
+                        color: state.callMuted
+                            ? const Color(0xfff59e0b)
+                            : Colors.white.withValues(alpha: 0.16),
+                        onTap: () => context.read<AppState>().toggleCallMute(),
+                      ),
+                      _CallActionButton(
+                        icon: state.callSpeakerOn
+                            ? Icons.volume_up
+                            : Icons.hearing,
+                        label: context.l10n.t('speakerCall'),
+                        color: state.callSpeakerOn
+                            ? AppColors.brand
+                            : Colors.white.withValues(alpha: 0.16),
+                        onTap: () =>
+                            context.read<AppState>().toggleCallSpeaker(),
+                      ),
+                      _CallActionButton(
+                        icon: Icons.call_end,
+                        label: context.l10n.t('endCall'),
+                        color: AppColors.danger,
+                        onTap: () => context.read<AppState>().endOrCancelCall(),
+                      ),
+                    ],
+                  ),
               ],
-            ],
+            ),
           ),
         ),
       ),
@@ -491,25 +723,54 @@ class _CallPanel extends StatelessWidget {
   }
 }
 
-class _CallButton extends StatelessWidget {
-  const _CallButton(
-      {required this.icon, required this.color, required this.onTap});
+class _CallActionButton extends StatelessWidget {
+  const _CallActionButton({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
 
   final IconData icon;
+  final String label;
   final Color color;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        width: 36,
-        height: 36,
-        decoration:
-            BoxDecoration(color: color, borderRadius: BorderRadius.circular(8)),
-        child: Icon(icon, color: Colors.white, size: 19),
+    return SizedBox(
+      width: 78,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Tooltip(
+            message: label,
+            child: Material(
+              color: color,
+              shape: const CircleBorder(),
+              child: InkWell(
+                onTap: onTap,
+                customBorder: const CircleBorder(),
+                child: SizedBox.square(
+                  dimension: 58,
+                  child: Icon(icon, color: Colors.white, size: 25),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 7),
+          Text(
+            label,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -522,6 +783,8 @@ class _SidePanel extends StatefulWidget {
     required this.contactSearchController,
     required this.currentUserid,
     required this.onSearchUser,
+    required this.onAddContact,
+    required this.onCreateGroup,
     required this.onModeChanged,
   });
 
@@ -530,6 +793,8 @@ class _SidePanel extends StatefulWidget {
   final TextEditingController contactSearchController;
   final String currentUserid;
   final Future<void> Function([String? keyword]) onSearchUser;
+  final Future<void> Function([String? keyword]) onAddContact;
+  final VoidCallback onCreateGroup;
   final ValueChanged<_PanelMode> onModeChanged;
 
   @override
@@ -537,11 +802,20 @@ class _SidePanel extends StatefulWidget {
 }
 
 class _SidePanelState extends State<_SidePanel> {
+  Timer? _exactUserSearchTimer;
+  ChatUser? _exactSearchedUser;
+  ChatSearchResults _searchResults = const ChatSearchResults();
+  _ChatSearchScope _searchScope = _ChatSearchScope.all;
+  bool _searching = false;
+  int _exactUserSearchRequest = 0;
+  _ContactSection _contactSection = _ContactSection.people;
+
   @override
   void initState() {
     super.initState();
     widget.searchController.addListener(_refresh);
     widget.contactSearchController.addListener(_refresh);
+    _scheduleExactUserSearch();
   }
 
   @override
@@ -555,16 +829,110 @@ class _SidePanelState extends State<_SidePanel> {
       oldWidget.contactSearchController.removeListener(_refresh);
       widget.contactSearchController.addListener(_refresh);
     }
+    if (oldWidget.mode != widget.mode ||
+        oldWidget.searchController != widget.searchController) {
+      _scheduleExactUserSearch();
+    }
   }
 
   @override
   void dispose() {
     widget.searchController.removeListener(_refresh);
     widget.contactSearchController.removeListener(_refresh);
+    _exactUserSearchTimer?.cancel();
     super.dispose();
   }
 
-  void _refresh() => setState(() {});
+  void _refresh() {
+    if (!mounted) return;
+    setState(() {});
+    if (widget.mode == _PanelMode.chats) _scheduleExactUserSearch();
+  }
+
+  void _scheduleExactUserSearch() {
+    _exactUserSearchTimer?.cancel();
+    final query = widget.searchController.text.trim();
+    final request = ++_exactUserSearchRequest;
+    if (widget.mode != _PanelMode.chats || query.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _exactSearchedUser = null;
+          _searchResults = const ChatSearchResults();
+          _searching = false;
+        });
+      }
+      return;
+    }
+
+    _exactUserSearchTimer = Timer(const Duration(milliseconds: 240), () {
+      if (mounted) setState(() => _searching = true);
+      _loadExactUserSearch(query, request);
+    });
+  }
+
+  Future<void> _loadExactUserSearch(String query, int request) async {
+    try {
+      final apiClient = context.read<AppState>().apiClient;
+      final resultsFuture = apiClient.searchChat(query, _searchScope.name);
+      final usersFuture = apiClient.searchUsers(query);
+      final results = await resultsFuture;
+      final users = await usersFuture;
+      if (!mounted ||
+          request != _exactUserSearchRequest ||
+          widget.mode != _PanelMode.chats ||
+          widget.searchController.text.trim() != query) {
+        return;
+      }
+      ChatUser? exact;
+      for (final user in users) {
+        if (user.userid.trim().toLowerCase() == query.toLowerCase()) {
+          exact = user;
+          break;
+        }
+      }
+      setState(() {
+        _exactSearchedUser = exact;
+        _searchResults = results;
+        _searching = false;
+      });
+    } catch (_) {
+      if (mounted && request == _exactUserSearchRequest) {
+        setState(() {
+          _exactSearchedUser = null;
+          _searchResults = const ChatSearchResults();
+          _searching = false;
+        });
+      }
+    }
+  }
+
+  void _changeSearchScope(_ChatSearchScope scope) {
+    if (_searchScope == scope) return;
+    setState(() => _searchScope = scope);
+    _scheduleExactUserSearch();
+  }
+
+  Future<void> _openExactUser(ChatUser user) async {
+    await context.read<AppState>().openDirectConversation(user.userid);
+    if (!mounted) return;
+    widget.onModeChanged(_PanelMode.chats);
+  }
+
+  Future<void> _addExactUser(ChatUser user) async {
+    try {
+      await context.read<AppState>().addContact(user.userid);
+      if (!mounted) return;
+      setState(() => _exactSearchedUser = user.copyWith(isContact: true));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('contactAdded'))),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('addContactFailed'))),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -586,11 +954,20 @@ class _SidePanelState extends State<_SidePanel> {
               subtitle: 'YS Chat',
               primaryIcon: isContacts
                   ? Icons.person_add_alt_outlined
-                  : Icons.edit_square,
-              onPrimary: () => widget.onSearchUser(searchController.text),
+                  : Icons.group_add_outlined,
+              primaryTooltip:
+                  context.l10n.t(isContacts ? 'addContact' : 'createGroup'),
+              onPrimary: () => isContacts
+                  ? widget.onAddContact(searchController.text)
+                  : widget.onCreateGroup(),
+              secondaryIcon: isContacts ? null : Icons.edit_square,
+              secondaryTooltip: isContacts ? null : context.l10n.t('openChat'),
+              onSecondary: isContacts
+                  ? null
+                  : () => widget.onSearchUser(searchController.text),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
               child: TextField(
                 controller: searchController,
                 textInputAction: TextInputAction.search,
@@ -598,7 +975,11 @@ class _SidePanelState extends State<_SidePanel> {
                     isContacts ? null : widget.onSearchUser(value),
                 decoration: InputDecoration(
                   hintText: isContacts
-                      ? context.l10n.t('searchContacts')
+                      ? context.l10n.t(
+                          _contactSection == _ContactSection.people
+                              ? 'searchContacts'
+                              : 'searchGroups',
+                        )
                       : context.l10n.t('searchConversations'),
                   prefixIcon: const Icon(Icons.search),
                   suffixIcon: searchController.text.isEmpty
@@ -619,25 +1000,79 @@ class _SidePanelState extends State<_SidePanel> {
               ),
             ),
             if (isContacts)
+              _ContactSectionTabs(
+                selected: _contactSection,
+                peopleCount: state.contacts.length,
+                groupCount: state.conversations
+                    .where((conversation) => conversation.type == 'group')
+                    .length,
+                onChanged: (section) =>
+                    setState(() => _contactSection = section),
+              ),
+            if (isContacts)
               Expanded(
-                child: _ContactList(
-                  keyword: widget.contactSearchController.text,
-                  onStartChat: (userid) async {
-                    await context
-                        .read<AppState>()
-                        .openDirectConversation(userid);
-                    widget.onModeChanged(_PanelMode.chats);
-                  },
-                ),
+                child: _contactSection == _ContactSection.people
+                    ? _ContactList(
+                        keyword: widget.contactSearchController.text,
+                        onStartChat: (userid) async {
+                          await context
+                              .read<AppState>()
+                              .openDirectConversation(userid);
+                          widget.onModeChanged(_PanelMode.chats);
+                        },
+                      )
+                    : _GroupContactList(
+                        keyword: widget.contactSearchController.text,
+                        currentUserid: widget.currentUserid,
+                        onOpenGroup: (conversation) async {
+                          await context
+                              .read<AppState>()
+                              .selectConversation(conversation);
+                          widget.onModeChanged(_PanelMode.chats);
+                        },
+                      ),
               )
             else
               Expanded(
-                child: _ConversationList(
-                  conversations: _filterConversations(
-                      state.conversations, widget.searchController.text),
-                  currentUserid: widget.currentUserid,
-                  selectedConversationId: state.selectedConversation?.id,
-                ),
+                child: widget.searchController.text.trim().isEmpty
+                    ? _ConversationList(
+                        conversations: state.conversations,
+                        currentUserid: widget.currentUserid,
+                        selectedConversationId: state.selectedConversation?.id,
+                      )
+                    : Column(
+                        children: [
+                          _SearchScopeTabs(
+                            selected: _searchScope,
+                            onChanged: _changeSearchScope,
+                          ),
+                          Expanded(
+                            child: _MobileSearchResults(
+                              scope: _searchScope,
+                              loading: _searching,
+                              exactUser: _exactSearchedUser,
+                              results: _searchResults,
+                              conversations: _filterConversations(
+                                state.conversations,
+                                widget.searchController.text,
+                              ),
+                              allConversations: state.conversations,
+                              currentUserid: widget.currentUserid,
+                              onOpenExactUser: _openExactUser,
+                              onAddExactUser: _addExactUser,
+                              onOpenContact: _openExactUser,
+                              onOpenConversation: (conversation) async {
+                                await state.selectConversation(conversation);
+                                if (mounted) {
+                                  widget.onModeChanged(_PanelMode.chats);
+                                }
+                              },
+                              onOpenMessage: (message) =>
+                                  _openSearchMessage(message),
+                            ),
+                          ),
+                        ],
+                      ),
               ),
           ],
         ),
@@ -651,9 +1086,465 @@ class _SidePanelState extends State<_SidePanel> {
     if (query.isEmpty) return conversations;
     return conversations.where((conversation) {
       final title = conversation.titleFor(widget.currentUserid).toLowerCase();
-      final lastMessage = conversation.lastMessage?.content.toLowerCase() ?? '';
-      return title.contains(query) || lastMessage.contains(query);
+      return title.contains(query);
     }).toList();
+  }
+
+  Future<void> _openSearchMessage(ChatMessage message) async {
+    final state = context.read<AppState>();
+    final conversation = state.conversations
+        .where((item) => item.id == message.conversationId)
+        .firstOrNull;
+    if (conversation == null) return;
+    await state.openSearchMessage(conversation, message.id);
+    if (mounted) widget.onModeChanged(_PanelMode.chats);
+  }
+}
+
+class _ExactUserResult extends StatelessWidget {
+  const _ExactUserResult({
+    required this.user,
+    required this.onOpenChat,
+    required this.onAddContact,
+  });
+
+  final ChatUser user;
+  final VoidCallback onOpenChat;
+  final VoidCallback onAddContact;
+
+  @override
+  Widget build(BuildContext context) {
+    final display = user.displayName;
+    final isContact = user.isContact ||
+        context.watch<AppState>().contacts.any((contact) =>
+            contact.userid.toLowerCase() == user.userid.toLowerCase());
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+      child: Material(
+        color: AppColors.brandSoft,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+          child: Row(
+            children: [
+              YSAvatar(label: display, size: 38),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(display,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: AppColors.ink, fontWeight: FontWeight.w900)),
+                    Text(user.userid,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: AppColors.muted,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600)),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: context.l10n.t('openChat'),
+                onPressed: onOpenChat,
+                icon: const Icon(Icons.chat_bubble_outline, size: 19),
+              ),
+              IconButton(
+                tooltip:
+                    context.l10n.t(isContact ? 'contactAdded' : 'addContact'),
+                onPressed: isContact ? null : onAddContact,
+                icon: Icon(isContact
+                    ? Icons.check_circle_outline
+                    : Icons.person_add_alt_1_outlined),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SearchScopeTabs extends StatelessWidget {
+  const _SearchScopeTabs({required this.selected, required this.onChanged});
+
+  final _ChatSearchScope selected;
+  final ValueChanged<_ChatSearchScope> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 42,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+        child: SegmentedButton<_ChatSearchScope>(
+          showSelectedIcon: false,
+          style: const ButtonStyle(
+            visualDensity: VisualDensity(horizontal: -3, vertical: -3),
+            textStyle: WidgetStatePropertyAll(
+              TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
+            ),
+          ),
+          segments: [
+            ButtonSegment(
+              value: _ChatSearchScope.all,
+              label: Text(context.l10n.t('searchAll')),
+            ),
+            ButtonSegment(
+              value: _ChatSearchScope.messages,
+              label: Text(context.l10n.t('searchMessages')),
+            ),
+            ButtonSegment(
+              value: _ChatSearchScope.contacts,
+              label: Text(context.l10n.t('searchContactNames')),
+            ),
+            ButtonSegment(
+              value: _ChatSearchScope.files,
+              label: Text(context.l10n.t('searchFiles')),
+            ),
+          ],
+          selected: {selected},
+          onSelectionChanged: (selection) => onChanged(selection.first),
+        ),
+      ),
+    );
+  }
+}
+
+class _MobileSearchResults extends StatelessWidget {
+  const _MobileSearchResults({
+    required this.scope,
+    required this.loading,
+    required this.exactUser,
+    required this.results,
+    required this.conversations,
+    required this.allConversations,
+    required this.currentUserid,
+    required this.onOpenExactUser,
+    required this.onAddExactUser,
+    required this.onOpenContact,
+    required this.onOpenConversation,
+    required this.onOpenMessage,
+  });
+
+  final _ChatSearchScope scope;
+  final bool loading;
+  final ChatUser? exactUser;
+  final ChatSearchResults results;
+  final List<ChatConversation> conversations;
+  final List<ChatConversation> allConversations;
+  final String currentUserid;
+  final ValueChanged<ChatUser> onOpenExactUser;
+  final ValueChanged<ChatUser> onAddExactUser;
+  final ValueChanged<ChatUser> onOpenContact;
+  final ValueChanged<ChatConversation> onOpenConversation;
+  final ValueChanged<ChatMessage> onOpenMessage;
+
+  @override
+  Widget build(BuildContext context) {
+    final showAll = scope == _ChatSearchScope.all;
+    final showContacts = showAll || scope == _ChatSearchScope.contacts;
+    final showMessages = showAll || scope == _ChatSearchScope.messages;
+    final showFiles = showAll || scope == _ChatSearchScope.files;
+    final exactIsInContacts = exactUser != null &&
+        results.contacts.any((contact) =>
+            contact.userid.toLowerCase() == exactUser!.userid.toLowerCase());
+    final hasResults = (showAll && conversations.isNotEmpty) ||
+        (showContacts &&
+            (results.contacts.isNotEmpty ||
+                (exactUser != null && !exactIsInContacts))) ||
+        (showMessages && results.messages.isNotEmpty) ||
+        (showFiles && results.files.isNotEmpty);
+
+    if (loading && !hasResults) {
+      return const Center(
+        child: SizedBox.square(
+          dimension: 24,
+          child: CircularProgressIndicator(strokeWidth: 2.4),
+        ),
+      );
+    }
+    if (!hasResults) {
+      return EmptyState(
+        icon: Icons.search_off_outlined,
+        text: context.l10n.t('noSearchResults'),
+      );
+    }
+
+    final children = <Widget>[];
+    if (loading) {
+      children.add(const LinearProgressIndicator(minHeight: 2));
+    }
+    if (showAll && conversations.isNotEmpty) {
+      children.add(_SearchResultHeader(
+        label: context.l10n.t('searchConversationsResult'),
+        count: conversations.length,
+      ));
+      children.addAll(conversations.map((conversation) => _ConversationItem(
+            conversation: conversation,
+            currentUserid: currentUserid,
+            selected: false,
+            onTap: () => onOpenConversation(conversation),
+          )));
+    }
+    if (showContacts && exactUser != null && !exactIsInContacts) {
+      children.add(_SearchResultHeader(
+        label: context.l10n.t('searchContactsResult'),
+        count: results.contacts.length + 1,
+      ));
+      children.add(_ExactUserResult(
+        user: exactUser!,
+        onOpenChat: () => onOpenExactUser(exactUser!),
+        onAddContact: () => onAddExactUser(exactUser!),
+      ));
+    } else if (showContacts && results.contacts.isNotEmpty) {
+      children.add(_SearchResultHeader(
+        label: context.l10n.t('searchContactsResult'),
+        count: results.contacts.length,
+      ));
+    }
+    if (showContacts) {
+      children.addAll(results.contacts.map((contact) => ListTile(
+            dense: true,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+            leading: YSAvatar(label: contact.displayName, size: 36),
+            title: Text(
+              contact.displayName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+            subtitle: Text(contact.userid),
+            trailing: const Icon(Icons.chat_bubble_outline, size: 18),
+            onTap: () => onOpenContact(contact),
+          )));
+    }
+    if (showMessages && results.messages.isNotEmpty) {
+      children.add(_SearchResultHeader(
+        label: context.l10n.t('searchMessagesResult'),
+        count: results.messages.length,
+      ));
+      children.addAll(results.messages.map((message) => _SearchMessageTile(
+            message: message,
+            conversation: _conversationFor(message),
+            currentUserid: currentUserid,
+            fileResult: false,
+            onTap: () => onOpenMessage(message),
+          )));
+    }
+    if (showFiles && results.files.isNotEmpty) {
+      children.add(_SearchResultHeader(
+        label: context.l10n.t('searchFilesResult'),
+        count: results.files.length,
+      ));
+      children.addAll(results.files.map((message) => _SearchMessageTile(
+            message: message,
+            conversation: _conversationFor(message),
+            currentUserid: currentUserid,
+            fileResult: true,
+            onTap: () => onOpenMessage(message),
+          )));
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
+      children: children,
+    );
+  }
+
+  ChatConversation? _conversationFor(ChatMessage message) => allConversations
+      .where((conversation) => conversation.id == message.conversationId)
+      .firstOrNull;
+}
+
+class _SearchResultHeader extends StatelessWidget {
+  const _SearchResultHeader({required this.label, required this.count});
+
+  final String label;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 10, 8, 4),
+      child: Text(
+        '$label ($count)',
+        style: const TextStyle(
+          color: AppColors.brandDark,
+          fontSize: 12,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
+  }
+}
+
+class _SearchMessageTile extends StatelessWidget {
+  const _SearchMessageTile({
+    required this.message,
+    required this.conversation,
+    required this.currentUserid,
+    required this.fileResult,
+    required this.onTap,
+  });
+
+  final ChatMessage message;
+  final ChatConversation? conversation;
+  final String currentUserid;
+  final bool fileResult;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final title = conversation?.titleFor(currentUserid) ?? message.senderName;
+    final attachment = message.attachments.firstOrNull;
+    final preview = fileResult && attachment != null
+        ? _attachmentDisplayName(attachment)
+        : _messagePreview(context, message);
+    return ListTile(
+      dense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+      leading: Container(
+        width: 36,
+        height: 36,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: fileResult ? const Color(0xffeef2ff) : AppColors.brandSoft,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Icon(
+          fileResult ? Icons.insert_drive_file_outlined : Icons.chat_outlined,
+          size: 19,
+          color: fileResult ? const Color(0xff4f46e5) : AppColors.brandDark,
+        ),
+      ),
+      title: Text(
+        title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontWeight: FontWeight.w800),
+      ),
+      subtitle: Text(preview, maxLines: 2, overflow: TextOverflow.ellipsis),
+      trailing: const Icon(Icons.chevron_right, size: 18),
+      onTap: onTap,
+    );
+  }
+}
+
+class _ContactSectionTabs extends StatelessWidget {
+  const _ContactSectionTabs({
+    required this.selected,
+    required this.peopleCount,
+    required this.groupCount,
+    required this.onChanged,
+  });
+
+  final _ContactSection selected;
+  final int peopleCount;
+  final int groupCount;
+  final ValueChanged<_ContactSection> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 38,
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xfff0f4f8),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _ContactSectionButton(
+              label: context.l10n.t('personalContacts'),
+              icon: Icons.person_outline,
+              count: peopleCount,
+              selected: selected == _ContactSection.people,
+              onTap: () => onChanged(_ContactSection.people),
+            ),
+          ),
+          Expanded(
+            child: _ContactSectionButton(
+              label: context.l10n.t('groupContacts'),
+              icon: Icons.groups_outlined,
+              count: groupCount,
+              selected: selected == _ContactSection.groups,
+              onTap: () => onChanged(_ContactSection.groups),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ContactSectionButton extends StatelessWidget {
+  const _ContactSectionButton({
+    required this.label,
+    required this.icon,
+    required this.count,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final IconData icon;
+  final int count;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected ? Colors.white : Colors.transparent,
+      borderRadius: BorderRadius.circular(6),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(6),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                size: 17,
+                color: selected ? AppColors.brandDark : AppColors.muted,
+              ),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: selected ? AppColors.ink : AppColors.muted,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              Text(
+                '$count',
+                style: TextStyle(
+                  color: selected ? AppColors.brandDark : AppColors.muted,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -662,20 +1553,28 @@ class _PanelHeader extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.primaryIcon,
+    required this.primaryTooltip,
     required this.onPrimary,
+    this.secondaryIcon,
+    this.secondaryTooltip,
+    this.onSecondary,
   });
 
   final String title;
   final String subtitle;
   final IconData primaryIcon;
+  final String primaryTooltip;
   final VoidCallback onPrimary;
+  final IconData? secondaryIcon;
+  final String? secondaryTooltip;
+  final VoidCallback? onSecondary;
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 76,
+      height: 64,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
         child: Row(
           children: [
             Expanded(
@@ -699,14 +1598,22 @@ class _PanelHeader extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                         color: AppColors.ink,
-                        fontSize: 22,
+                        fontSize: 20,
                         fontWeight: FontWeight.w900),
                   ),
                 ],
               ),
             ),
+            if (secondaryIcon != null && onSecondary != null) ...[
+              _PanelIconButton(
+                tooltip: secondaryTooltip ?? '',
+                icon: secondaryIcon!,
+                onTap: onSecondary!,
+              ),
+              const SizedBox(width: 6),
+            ],
             _PanelIconButton(
-                tooltip: context.l10n.t('openChat'),
+                tooltip: primaryTooltip,
                 icon: primaryIcon,
                 onTap: onPrimary,
                 primary: true),
@@ -738,14 +1645,14 @@ class _PanelIconButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
         onTap: onTap,
         child: Container(
-          width: 38,
-          height: 38,
+          width: 34,
+          height: 34,
           decoration: BoxDecoration(
             color: primary ? AppColors.brand : const Color(0xfff0f4fa),
             borderRadius: BorderRadius.circular(8),
           ),
           child: Icon(icon,
-              color: primary ? Colors.white : AppColors.ink, size: 20),
+              color: primary ? Colors.white : AppColors.ink, size: 19),
         ),
       ),
     );
@@ -776,7 +1683,7 @@ class _ConversationList extends StatelessWidget {
     }
 
     return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
       itemCount: conversations.length,
       itemBuilder: (context, index) {
         final conversation = conversations[index];
@@ -807,15 +1714,16 @@ class _ConversationItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final state = context.read<AppState>();
+    final state = context.watch<AppState>();
     final title = conversation.titleFor(currentUserid);
+    final unreadCount = state.unreadCountFor(conversation.id);
     final member = _presenceMember(conversation, currentUserid);
     final imageUrl = conversation.avatar.isNotEmpty
         ? state.apiClient.absoluteUrl(conversation.avatar)
         : member?.avatarUrl(state);
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
+      padding: const EdgeInsets.symmetric(vertical: 1),
       child: Material(
         color: selected ? AppColors.brandSoft : Colors.transparent,
         borderRadius: BorderRadius.circular(8),
@@ -823,17 +1731,18 @@ class _ConversationItem extends StatelessWidget {
           borderRadius: BorderRadius.circular(8),
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             child: Row(
               children: [
                 if (conversation.type == 'group' && conversation.avatar.isEmpty)
-                  _GroupAvatar(count: conversation.memberCount)
+                  _GroupAvatar(count: conversation.memberCount, size: 40)
                 else
                   YSAvatar(
                       label: title,
                       imageUrl: imageUrl,
-                      online: member?.isOnline),
-                const SizedBox(width: 10),
+                      online: member?.isOnline,
+                      size: 40),
+                const SizedBox(width: 9),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -860,14 +1769,29 @@ class _ConversationItem extends StatelessWidget {
                         ],
                       ),
                       const SizedBox(height: 3),
-                      Text(
-                        _lastMessagePreview(context, conversation),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            color: AppColors.muted,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              _lastMessagePreview(context, conversation),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: unreadCount > 0
+                                    ? AppColors.ink
+                                    : AppColors.muted,
+                                fontSize: 13,
+                                fontWeight: unreadCount > 0
+                                    ? FontWeight.w800
+                                    : FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          if (unreadCount > 0) ...[
+                            const SizedBox(width: 8),
+                            _UnreadBadge(count: unreadCount),
+                          ],
+                        ],
                       ),
                     ],
                   ),
@@ -875,6 +1799,35 @@ class _ConversationItem extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _UnreadBadge extends StatelessWidget {
+  const _UnreadBadge({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = count > 99 ? '99+' : '$count';
+    return Container(
+      constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 5),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: AppColors.danger,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.white, width: 1.5),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 10,
+          fontWeight: FontWeight.w900,
         ),
       ),
     );
@@ -896,10 +1849,11 @@ class _ContactList extends StatelessWidget {
     final query = keyword.trim().toLowerCase();
     final contacts = state.contacts.where((contact) {
       if (query.isEmpty) return true;
-      return contact.fullname.toLowerCase().contains(query) ||
+      return contact.displayName.toLowerCase().contains(query) ||
+          contact.fullname.toLowerCase().contains(query) ||
           contact.userid.toLowerCase().contains(query);
     }).toList()
-      ..sort((a, b) => a.fullname.compareTo(b.fullname));
+      ..sort(_compareDirectoryContacts);
 
     if (contacts.isEmpty) {
       return EmptyState(
@@ -907,64 +1861,179 @@ class _ContactList extends StatelessWidget {
           text: context.l10n.t('noMatchingContacts'));
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
-      itemCount: contacts.length,
-      itemBuilder: (context, index) {
-        final contact = contacts[index];
-        final display =
-            contact.fullname.trim().isEmpty ? contact.userid : contact.fullname;
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 2),
-          child: Material(
-            color: Colors.transparent,
-            borderRadius: BorderRadius.circular(8),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(8),
-              onTap: () => onStartChat(contact.userid),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
-                child: Row(
+    final children = <Widget>[];
+    String? currentLetter;
+    for (final contact in contacts) {
+      final display = contact.displayName;
+      final letter = _contactDirectoryLetter(display);
+      if (letter != currentLetter) {
+        currentLetter = letter;
+        children.add(_ContactLetterHeader(letter: letter));
+      }
+      children.add(
+        _ContactListItem(
+          contact: contact,
+          display: display,
+          imageUrl: contact.avatar.isNotEmpty
+              ? state.apiClient.absoluteUrl(contact.avatar)
+              : null,
+          onTap: () => onStartChat(contact.userid),
+        ),
+      );
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+      children: children,
+    );
+  }
+}
+
+class _ContactLetterHeader extends StatelessWidget {
+  const _ContactLetterHeader({required this.letter});
+
+  final String letter;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(8, 7, 8, 3),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: AppColors.line)),
+      ),
+      child: Text(
+        letter,
+        style: const TextStyle(
+          color: AppColors.brandDark,
+          fontSize: 13,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
+  }
+}
+
+class _ContactListItem extends StatelessWidget {
+  const _ContactListItem({
+    required this.contact,
+    required this.display,
+    required this.imageUrl,
+    required this.onTap,
+  });
+
+  final ChatUser contact;
+  final String display;
+  final String? imageUrl;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: Row(
+            children: [
+              YSAvatar(
+                label: display,
+                imageUrl: imageUrl,
+                online: contact.isOnline,
+                size: 40,
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    YSAvatar(
-                      label: display,
-                      imageUrl: contact.avatar.isNotEmpty
-                          ? state.apiClient.absoluteUrl(contact.avatar)
-                          : null,
-                      online: contact.isOnline,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            display,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                color: AppColors.ink,
-                                fontWeight: FontWeight.w900),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            contact.userid,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                color: AppColors.muted,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600),
-                          ),
-                        ],
+                    Text(
+                      display,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.ink,
+                        fontWeight: FontWeight.w900,
                       ),
                     ),
-                    const Icon(Icons.chevron_right, color: AppColors.muted),
+                    Text(
+                      contact.userid,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.muted,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ],
                 ),
               ),
-            ),
+              const Icon(Icons.chevron_right, color: AppColors.muted, size: 20),
+            ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GroupContactList extends StatelessWidget {
+  const _GroupContactList({
+    required this.keyword,
+    required this.currentUserid,
+    required this.onOpenGroup,
+  });
+
+  final String keyword;
+  final String currentUserid;
+  final Future<void> Function(ChatConversation conversation) onOpenGroup;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final query = keyword.trim().toLowerCase();
+    final groups = state.conversations.where((conversation) {
+      if (conversation.type != 'group') return false;
+      if (query.isEmpty) return true;
+      final memberText = conversation.members
+          .map((member) => '${member.fullname} ${member.userid}')
+          .join(' ')
+          .toLowerCase();
+      return conversation
+              .titleFor(currentUserid)
+              .toLowerCase()
+              .contains(query) ||
+          memberText.contains(query);
+    }).toList()
+      ..sort((first, second) {
+        final firstTime = first.lastMessage?.createdAt ??
+            DateTime.fromMillisecondsSinceEpoch(0);
+        final secondTime = second.lastMessage?.createdAt ??
+            DateTime.fromMillisecondsSinceEpoch(0);
+        final byLatestMessage = secondTime.compareTo(firstTime);
+        if (byLatestMessage != 0) return byLatestMessage;
+        return second.id.compareTo(first.id);
+      });
+
+    if (groups.isEmpty) {
+      return EmptyState(
+        icon: Icons.groups_outlined,
+        text: context.l10n.t('noMatchingGroups'),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+      itemCount: groups.length,
+      itemBuilder: (context, index) {
+        final conversation = groups[index];
+        return _ConversationItem(
+          conversation: conversation,
+          currentUserid: currentUserid,
+          selected: state.selectedConversation?.id == conversation.id,
+          onTap: () => onOpenGroup(conversation),
         );
       },
     );
@@ -984,6 +2053,8 @@ class _Thread extends StatefulWidget {
     required this.onForward,
     required this.onDownload,
     required this.onInfo,
+    required this.onAddContact,
+    required this.onEditNickname,
     required this.onCreatePoll,
     required this.onSend,
     required this.onPickFiles,
@@ -1002,6 +2073,8 @@ class _Thread extends StatefulWidget {
   final ValueChanged<ChatMessage> onForward;
   final ValueChanged<ChatAttachment> onDownload;
   final VoidCallback onInfo;
+  final Future<void> Function() onAddContact;
+  final Future<void> Function() onEditNickname;
   final VoidCallback onCreatePoll;
   final VoidCallback onSend;
   final VoidCallback onPickFiles;
@@ -1015,6 +2088,8 @@ class _Thread extends StatefulWidget {
 class _ThreadState extends State<_Thread> {
   late final ScrollController _scrollController;
   final Map<int, GlobalKey> _messageKeys = {};
+  bool _showLatestButton = false;
+  int _lastMessageFocusSequence = 0;
 
   @override
   void initState() {
@@ -1032,9 +2107,22 @@ class _ThreadState extends State<_Thread> {
   void _onScroll() {
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
+    final shouldShowLatest = position.pixels > 220;
+    if (shouldShowLatest != _showLatestButton && mounted) {
+      setState(() => _showLatestButton = shouldShowLatest);
+    }
     if (position.pixels >= position.maxScrollExtent - 180) {
       context.read<AppState>().loadOlderMessages();
     }
+  }
+
+  Future<void> _scrollToLatest() async {
+    if (!_scrollController.hasClients) return;
+    await _scrollController.animateTo(
+      0,
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   Future<void> _scrollToMessage(int messageId) async {
@@ -1084,6 +2172,21 @@ class _ThreadState extends State<_Thread> {
       );
     }
 
+    if (state.messageFocusConversationId == conversation.id &&
+        state.messageFocusSequence > _lastMessageFocusSequence &&
+        state.messageFocusId > 0) {
+      final focusSequence = state.messageFocusSequence;
+      _lastMessageFocusSequence = focusSequence;
+      final messageId = state.messageFocusId;
+      final appState = state;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (mounted) await _scrollToMessage(messageId);
+        if (mounted) {
+          appState.clearMessageFocus(focusSequence);
+        }
+      });
+    }
+
     return Container(
       color: AppColors.canvas,
       child: SafeArea(
@@ -1097,44 +2200,95 @@ class _ThreadState extends State<_Thread> {
               wide: widget.wide,
               onBack: widget.onBack,
               onInfo: widget.onInfo,
+              onAddContact: widget.onAddContact,
+              onEditNickname: widget.onEditNickname,
             ),
             Expanded(
-              child: ListView.builder(
-                controller: _scrollController,
-                padding: const EdgeInsets.fromLTRB(12, 16, 12, 12),
-                reverse: true,
-                itemCount: state.messages.length +
-                    (state.hasMoreMessages || state.loadingOlderMessages
-                        ? 1
-                        : 0),
-                itemBuilder: (context, index) {
-                  if (index == state.messages.length) {
-                    return _OlderMessagesLoader(
-                        loading: state.loadingOlderMessages);
-                  }
-                  final message = state.messages.reversed.elementAt(index);
-                  final key = _messageKeys.putIfAbsent(message.id,
-                      () => GlobalKey(debugLabel: 'm-${message.id}'));
-                  return KeyedSubtree(
-                    key: key,
-                    child: MessageBubble(
-                      message: message,
-                      mine: message.senderUserid == widget.currentUserid,
-                      resolveUrl: state.apiClient.absoluteUrl,
-                      onReply: widget.onReply,
-                      onForward: widget.onForward,
-                      onDownload: widget.onDownload,
-                      mentionLabels: _mentionLabels(conversation),
-                      onOpenReference: _scrollToMessage,
-                      onVotePoll: (message, optionIds, customOption) => context
-                          .read<AppState>()
-                          .votePoll(message, optionIds,
-                              customOption: customOption),
-                      onClosePoll: (message) =>
-                          context.read<AppState>().closePoll(message),
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: _ChatBackground(
+                      imageUrl: conversation.background.trim().isEmpty
+                          ? null
+                          : state.apiClient
+                              .absoluteUrl(conversation.background.trim()),
                     ),
-                  );
-                },
+                  ),
+                  ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.fromLTRB(10, 8, 10, 7),
+                    reverse: true,
+                    itemCount: state.messages.length +
+                        (state.hasMoreMessages || state.loadingOlderMessages
+                            ? 1
+                            : 0),
+                    itemBuilder: (context, index) {
+                      if (index == state.messages.length) {
+                        return _OlderMessagesLoader(
+                            loading: state.loadingOlderMessages);
+                      }
+                      final message = state.messages.reversed.elementAt(index);
+                      final sender = conversation.members
+                          .where(
+                              (member) => member.userid == message.senderUserid)
+                          .firstOrNull;
+                      final key = _messageKeys.putIfAbsent(message.id,
+                          () => GlobalKey(debugLabel: 'm-${message.id}'));
+                      return KeyedSubtree(
+                        key: key,
+                        child: MessageBubble(
+                          message: message,
+                          mine: message.senderUserid == widget.currentUserid,
+                          resolveUrl: state.apiClient.absoluteUrl,
+                          onReply: widget.onReply,
+                          onForward: widget.onForward,
+                          onDownload: widget.onDownload,
+                          mentionUsers: conversation.type == 'group'
+                              ? conversation.members
+                              : const [],
+                          onOpenMentionProfile: conversation.type == 'group'
+                              ? (member) => _showChatUserProfile(
+                                  context, member, conversation)
+                              : null,
+                          onOpenSenderProfile:
+                              conversation.type == 'group' && sender != null
+                                  ? () => _showChatUserProfile(
+                                      context, sender, conversation)
+                                  : null,
+                          onOpenReference: _scrollToMessage,
+                          onVotePoll: (message, optionIds, customOption) =>
+                              context.read<AppState>().votePoll(
+                                  message, optionIds,
+                                  customOption: customOption),
+                          onClosePoll: (message) =>
+                              context.read<AppState>().closePoll(message),
+                        ),
+                      );
+                    },
+                  ),
+                  if (_showLatestButton)
+                    Positioned(
+                      right: 14,
+                      bottom: 14,
+                      child: Material(
+                        color: AppColors.brand,
+                        elevation: 4,
+                        shape: const CircleBorder(),
+                        child: InkWell(
+                          onTap: _scrollToLatest,
+                          customBorder: const CircleBorder(),
+                          child: const Padding(
+                            padding: EdgeInsets.all(8),
+                            child: Icon(
+                              Icons.keyboard_double_arrow_down,
+                              color: Colors.white,
+                              size: 20,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
             _Composer(
@@ -1156,6 +2310,31 @@ class _ThreadState extends State<_Thread> {
   }
 }
 
+class _ChatBackground extends StatelessWidget {
+  const _ChatBackground({required this.imageUrl});
+
+  final String? imageUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    if (imageUrl == null) {
+      return const ColoredBox(color: AppColors.canvas);
+    }
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Image.network(
+          imageUrl!,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) =>
+              const ColoredBox(color: AppColors.canvas),
+        ),
+        ColoredBox(color: AppColors.canvas.withValues(alpha: 0.82)),
+      ],
+    );
+  }
+}
+
 class _OlderMessagesLoader extends StatelessWidget {
   const _OlderMessagesLoader({required this.loading});
 
@@ -1164,10 +2343,10 @@ class _OlderMessagesLoader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!loading) {
-      return const SizedBox(height: 10);
+      return const SizedBox(height: 6);
     }
     return const Padding(
-      padding: EdgeInsets.only(bottom: 12),
+      padding: EdgeInsets.only(bottom: 8),
       child: Center(
         child: SizedBox.square(
           dimension: 20,
@@ -1185,6 +2364,8 @@ class _ChatHeader extends StatelessWidget {
     required this.wide,
     required this.onBack,
     required this.onInfo,
+    required this.onAddContact,
+    required this.onEditNickname,
   });
 
   final ChatConversation conversation;
@@ -1192,19 +2373,29 @@ class _ChatHeader extends StatelessWidget {
   final bool wide;
   final VoidCallback onBack;
   final VoidCallback onInfo;
+  final Future<void> Function() onAddContact;
+  final Future<void> Function() onEditNickname;
 
   @override
   Widget build(BuildContext context) {
     final state = context.read<AppState>();
     final title = conversation.titleFor(currentUserid);
     final member = _presenceMember(conversation, currentUserid);
+    final canAddContact = conversation.type == 'direct' &&
+        member != null &&
+        !state.contacts.any((contact) =>
+            contact.userid.toLowerCase() == member.userid.toLowerCase());
+    final canEditNickname = conversation.type == 'direct' &&
+        member != null &&
+        state.contacts.any((contact) =>
+            contact.userid.toLowerCase() == member.userid.toLowerCase());
     final imageUrl = conversation.avatar.isNotEmpty
         ? state.apiClient.absoluteUrl(conversation.avatar)
         : member?.avatarUrl(state);
 
     return Container(
-      constraints: const BoxConstraints(minHeight: 64),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      constraints: const BoxConstraints(minHeight: 50),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
       decoration: const BoxDecoration(
         color: Colors.white,
         border: Border(bottom: BorderSide(color: AppColors.line)),
@@ -1218,14 +2409,14 @@ class _ChatHeader extends StatelessWidget {
               icon: const Icon(Icons.arrow_back),
             ),
           if (conversation.type == 'group' && conversation.avatar.isEmpty)
-            _GroupAvatar(count: conversation.memberCount)
+            _GroupAvatar(count: conversation.memberCount, size: 34)
           else
             YSAvatar(
                 label: title,
                 imageUrl: imageUrl,
                 online: member?.isOnline,
-                size: 42),
-          const SizedBox(width: 10),
+                size: 34),
+          const SizedBox(width: 8),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1237,7 +2428,7 @@ class _ChatHeader extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                       color: AppColors.ink,
-                      fontSize: 16,
+                      fontSize: 15,
                       fontWeight: FontWeight.w900),
                 ),
                 const SizedBox(height: 2),
@@ -1251,7 +2442,7 @@ class _ChatHeader extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                       color: AppColors.muted,
-                      fontSize: 12,
+                      fontSize: 11,
                       fontWeight: FontWeight.w700),
                 ),
               ],
@@ -1262,6 +2453,18 @@ class _ChatHeader extends StatelessWidget {
               tooltip: context.l10n.t('call'),
               onPressed: () => context.read<AppState>().startAudioCall(),
               icon: const Icon(Icons.phone_outlined),
+            ),
+          if (canAddContact)
+            IconButton(
+              tooltip: context.l10n.t('addContact'),
+              onPressed: () => onAddContact(),
+              icon: const Icon(Icons.person_add_alt_1_outlined),
+            ),
+          if (canEditNickname)
+            IconButton(
+              tooltip: context.l10n.t('setNickname'),
+              onPressed: () => onEditNickname(),
+              icon: const Icon(Icons.edit_outlined),
             ),
           IconButton(
             tooltip: context.l10n.t('info'),
@@ -1397,7 +2600,7 @@ class _ComposerState extends State<_Composer> {
     return SafeArea(
       top: false,
       child: Container(
-        padding: const EdgeInsets.fromLTRB(10, 9, 10, 10),
+        padding: const EdgeInsets.fromLTRB(8, 4, 8, 5),
         decoration: const BoxDecoration(
           color: Colors.white,
           border: Border(top: BorderSide(color: AppColors.line)),
@@ -1407,9 +2610,8 @@ class _ComposerState extends State<_Composer> {
           children: [
             if (widget.replyingTo != null)
               Container(
-                margin: const EdgeInsets.only(bottom: 8),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                margin: const EdgeInsets.only(bottom: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                 decoration: BoxDecoration(
                   color: AppColors.brandSoftest,
                   borderRadius: BorderRadius.circular(8),
@@ -1529,17 +2731,17 @@ class _ComposerState extends State<_Composer> {
                     decoration: InputDecoration(
                       hintText: context.l10n.t('typeMessage'),
                       contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 11, vertical: 10),
+                          horizontal: 10, vertical: 8),
                     ),
                   ),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 6),
                 InkWell(
                   onTap: widget.onSend,
                   borderRadius: BorderRadius.circular(8),
                   child: Container(
-                    width: 40,
-                    height: 40,
+                    width: 36,
+                    height: 36,
                     decoration: BoxDecoration(
                       color: AppColors.brand,
                       borderRadius: BorderRadius.circular(8),
@@ -1552,7 +2754,7 @@ class _ComposerState extends State<_Composer> {
                       ],
                     ),
                     child:
-                        const Icon(Icons.send, color: Colors.white, size: 20),
+                        const Icon(Icons.send, color: Colors.white, size: 18),
                   ),
                 ),
               ],
@@ -1585,15 +2787,15 @@ class _ComposerButton extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(8),
         child: Container(
-          width: 36,
-          height: 40,
+          width: 32,
+          height: 36,
           decoration: BoxDecoration(
             color: active ? const Color(0xfffee2e2) : Colors.transparent,
             borderRadius: BorderRadius.circular(8),
           ),
           child: Icon(icon,
               color: active ? AppColors.danger : const Color(0xff596779),
-              size: 21),
+              size: 19),
         ),
       ),
     );
@@ -1932,6 +3134,272 @@ class _PasswordSheetState extends State<_PasswordSheet> {
   }
 }
 
+class _CreateGroupDraft {
+  const _CreateGroupDraft({required this.name, required this.memberUserids});
+
+  final String name;
+  final List<String> memberUserids;
+}
+
+class _CreateGroupSheet extends StatefulWidget {
+  const _CreateGroupSheet({
+    required this.contacts,
+    required this.currentUserid,
+  });
+
+  final List<ChatUser> contacts;
+  final String currentUserid;
+
+  @override
+  State<_CreateGroupSheet> createState() => _CreateGroupSheetState();
+}
+
+class _CreateGroupSheetState extends State<_CreateGroupSheet> {
+  final _nameController = TextEditingController();
+  final _memberCodeController = TextEditingController();
+  final _contactFilterController = TextEditingController();
+  final Map<String, ChatUser> _selected = {};
+  bool _lookingUp = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameController.addListener(_refresh);
+    _contactFilterController.addListener(_refresh);
+  }
+
+  @override
+  void dispose() {
+    _nameController.removeListener(_refresh);
+    _contactFilterController.removeListener(_refresh);
+    _nameController.dispose();
+    _memberCodeController.dispose();
+    _contactFilterController.dispose();
+    super.dispose();
+  }
+
+  void _refresh() {
+    if (mounted) setState(() {});
+  }
+
+  void _toggle(ChatUser user) {
+    setState(() {
+      final key = user.userid.toLowerCase();
+      if (_selected.containsKey(key)) {
+        _selected.remove(key);
+      } else {
+        _selected[key] = user;
+      }
+    });
+  }
+
+  Future<void> _addByCode() async {
+    final query = _memberCodeController.text.trim();
+    if (query.isEmpty || _lookingUp) return;
+    setState(() => _lookingUp = true);
+    try {
+      final users = await context.read<AppState>().apiClient.searchUsers(query);
+      final user = users
+          .where((item) =>
+              item.userid.toLowerCase() == query.toLowerCase() &&
+              item.userid.toLowerCase() != widget.currentUserid.toLowerCase())
+          .firstOrNull;
+      if (!mounted) return;
+      if (user == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(context.l10n.t('noUsersFound'))),
+        );
+        return;
+      }
+      setState(() {
+        _selected[user.userid.toLowerCase()] = user;
+        _memberCodeController.clear();
+      });
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('noUsersFound'))),
+      );
+    } finally {
+      if (mounted) setState(() => _lookingUp = false);
+    }
+  }
+
+  void _submit() {
+    final name = _nameController.text.trim();
+    if (name.isEmpty || _selected.isEmpty) return;
+    Navigator.of(context).pop(_CreateGroupDraft(
+      name: name,
+      memberUserids: _selected.values.map((user) => user.userid).toList(),
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filter = _contactFilterController.text.trim().toLowerCase();
+    final contacts = widget.contacts.where((contact) {
+      if (filter.isEmpty) return true;
+      return contact.displayName.toLowerCase().contains(filter) ||
+          contact.fullname.toLowerCase().contains(filter) ||
+          contact.userid.toLowerCase().contains(filter);
+    }).toList()
+      ..sort((first, second) => first.displayName
+          .toLowerCase()
+          .compareTo(second.displayName.toLowerCase()));
+    final canCreate =
+        _nameController.text.trim().isNotEmpty && _selected.isNotEmpty;
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          16,
+          10,
+          16,
+          14 + MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.82,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 42,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: AppColors.line,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                context.l10n.t('createGroup'),
+                style: const TextStyle(
+                  color: AppColors.ink,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _nameController,
+                maxLength: 160,
+                decoration: InputDecoration(
+                  labelText: context.l10n.t('groupName'),
+                  hintText: context.l10n.t('groupNamePlaceholder'),
+                  prefixIcon: const Icon(Icons.groups_outlined),
+                ),
+              ),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _memberCodeController,
+                      textInputAction: TextInputAction.done,
+                      onSubmitted: (_) => _addByCode(),
+                      decoration: InputDecoration(
+                        hintText: context.l10n.t('memberCodePlaceholder'),
+                        prefixIcon: const Icon(Icons.badge_outlined),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton.filled(
+                    tooltip: context.l10n.t('addMemberByCode'),
+                    onPressed: _lookingUp ? null : _addByCode,
+                    icon: _lookingUp
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.person_add_alt_1_outlined),
+                  ),
+                ],
+              ),
+              if (_selected.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 40,
+                  child: ListView.separated(
+                    scrollDirection: Axis.horizontal,
+                    itemCount: _selected.length,
+                    separatorBuilder: (_, __) => const SizedBox(width: 6),
+                    itemBuilder: (context, index) {
+                      final user = _selected.values.elementAt(index);
+                      return InputChip(
+                        label: Text(user.displayName),
+                        onDeleted: () => _toggle(user),
+                      );
+                    },
+                  ),
+                ),
+              ],
+              const SizedBox(height: 8),
+              TextField(
+                controller: _contactFilterController,
+                decoration: InputDecoration(
+                  hintText: context.l10n.t('searchContacts'),
+                  prefixIcon: const Icon(Icons.search),
+                  suffixIcon: filter.isEmpty
+                      ? null
+                      : IconButton(
+                          onPressed: _contactFilterController.clear,
+                          icon: const Icon(Icons.close),
+                        ),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Expanded(
+                child: contacts.isEmpty
+                    ? EmptyState(
+                        icon: Icons.people_outline,
+                        text: context.l10n.t('noMatchingContacts'),
+                      )
+                    : ListView.builder(
+                        itemCount: contacts.length,
+                        itemBuilder: (context, index) {
+                          final contact = contacts[index];
+                          final selected = _selected
+                              .containsKey(contact.userid.toLowerCase());
+                          return CheckboxListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            value: selected,
+                            onChanged: (_) => _toggle(contact),
+                            secondary: YSAvatar(
+                              label: contact.displayName,
+                              size: 34,
+                            ),
+                            title: Text(
+                              contact.displayName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: Text(contact.userid),
+                          );
+                        },
+                      ),
+              ),
+              const SizedBox(height: 8),
+              FilledButton.icon(
+                onPressed: canCreate ? _submit : null,
+                icon: const Icon(Icons.group_add_outlined),
+                label: Text(_selected.isEmpty
+                    ? context.l10n.t('groupNeedsMember')
+                    : context.l10n.t('createGroup')),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _UserSearchSheet extends StatelessWidget {
   const _UserSearchSheet({required this.users});
 
@@ -1946,20 +3414,21 @@ class _UserSearchSheet extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Chon nguoi dung',
-              style: TextStyle(
+            Text(
+              context.l10n.t('chooseUser'),
+              style: const TextStyle(
                   color: AppColors.ink,
                   fontSize: 18,
                   fontWeight: FontWeight.w900),
             ),
             const SizedBox(height: 10),
             if (users.isEmpty)
-              const Padding(
-                padding: EdgeInsets.symmetric(vertical: 36),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 36),
                 child: EmptyState(
-                    icon: Icons.person_search_outlined,
-                    text: 'Khong tim thay nguoi dung'),
+                  icon: Icons.person_search_outlined,
+                  text: context.l10n.t('noUsersFound'),
+                ),
               )
             else
               Flexible(
@@ -1968,9 +3437,7 @@ class _UserSearchSheet extends StatelessWidget {
                   itemCount: users.length,
                   itemBuilder: (context, index) {
                     final user = users[index];
-                    final display = user.fullname.trim().isEmpty
-                        ? user.userid
-                        : user.fullname;
+                    final display = user.displayName;
                     return ListTile(
                       contentPadding: EdgeInsets.zero,
                       leading: YSAvatar(label: display, size: 42),
@@ -2345,6 +3812,26 @@ class _InfoPanel extends StatefulWidget {
 
 class _InfoPanelState extends State<_InfoPanel> {
   _InfoPanelMode _mode = _InfoPanelMode.overview;
+  bool _loadingHistory = true;
+  bool _historyRequested = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_historyRequested) return;
+    _historyRequested = true;
+    unawaited(_loadHistory());
+  }
+
+  Future<void> _loadHistory() async {
+    try {
+      await context.read<AppState>().loadAllMessages();
+    } catch (_) {
+      // Keep the currently loaded previews when older history is unavailable.
+    } finally {
+      if (mounted) setState(() => _loadingHistory = false);
+    }
+  }
 
   void _openMode(_InfoPanelMode mode) => setState(() => _mode = mode);
 
@@ -2402,6 +3889,10 @@ class _InfoPanelState extends State<_InfoPanel> {
                 showBack: _mode != _InfoPanelMode.overview,
                 onBack: _backToOverview,
               ),
+              if (_loadingHistory) ...[
+                const SizedBox(height: 6),
+                const LinearProgressIndicator(minHeight: 2),
+              ],
               const SizedBox(height: 18),
               if (_mode == _InfoPanelMode.overview) ...[
                 if (isGroup)
@@ -2449,16 +3940,25 @@ class _InfoPanelState extends State<_InfoPanel> {
                 ),
               ] else if (_mode == _InfoPanelMode.members) ...[
                 ...conversation.members.map((member) {
-                  final display = member.fullname.trim().isEmpty
-                      ? member.userid
-                      : member.fullname;
+                  final display = member.displayName;
                   return ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: YSAvatar(
-                        label: display, size: 38, online: member.isOnline),
+                      label: display,
+                      imageUrl: member.avatar.isNotEmpty
+                          ? state.apiClient.absoluteUrl(member.avatar)
+                          : null,
+                      size: 38,
+                      online: member.isOnline,
+                    ),
                     title: Text(display,
                         maxLines: 1, overflow: TextOverflow.ellipsis),
-                    subtitle: Text(member.userid),
+                    subtitle: Text(member.nickname.trim().isEmpty
+                        ? member.userid
+                        : '${member.fullname} · ${member.userid}'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () =>
+                        _showChatUserProfile(context, member, conversation),
                   );
                 }),
               ] else if (_mode == _InfoPanelMode.media) ...[
@@ -2478,6 +3978,286 @@ class _InfoPanelState extends State<_InfoPanel> {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+Future<void> _showChatUserProfile(
+  BuildContext context,
+  ChatUser member,
+  ChatConversation conversation,
+) async {
+  final state = context.read<AppState>();
+  final currentUserid = state.tokenStore.userid ?? '';
+  final contact =
+      state.contacts.where((item) => item.userid == member.userid).firstOrNull;
+  final isGroup = conversation.type == 'group';
+  final profileMember = isGroup ? member : (contact ?? member);
+  await showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    builder: (_) => _MemberProfileSheet(
+      member: profileMember,
+      isCurrentUser: member.userid == currentUserid,
+      isContact: contact != null,
+      canSetNickname: isGroup || contact != null,
+      imageUrl: member.avatar.isNotEmpty
+          ? state.apiClient.absoluteUrl(member.avatar)
+          : null,
+      onAddContact: () => state.addContact(member.userid),
+      onOpenChat: () => state.openDirectConversation(member.userid),
+      onSetNickname: (nickname) => isGroup
+          ? state.updateConversationMemberNickname(
+              conversation.id,
+              member.userid,
+              nickname,
+            )
+          : state.updateContactNickname(member.userid, nickname),
+    ),
+  );
+}
+
+Future<String?> _requestNickname(
+  BuildContext context, {
+  required ChatUser contact,
+  required String initialValue,
+}) async {
+  final controller = TextEditingController(text: initialValue);
+  final result = await showDialog<String>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text(context.l10n.t('setNickname')),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            contact.fullname.trim().isEmpty ? contact.userid : contact.fullname,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: controller,
+            autofocus: true,
+            maxLength: 80,
+            textInputAction: TextInputAction.done,
+            decoration: InputDecoration(
+              labelText: context.l10n.t('nickname'),
+              hintText: context.l10n.t('nicknamePlaceholder'),
+              prefixIcon: const Icon(Icons.edit_outlined),
+            ),
+            onSubmitted: (value) =>
+                Navigator.of(dialogContext).pop(value.trim()),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop(),
+          child: Text(context.l10n.t('cancel')),
+        ),
+        FilledButton(
+          onPressed: () =>
+              Navigator.of(dialogContext).pop(controller.text.trim()),
+          child: Text(context.l10n.t('save')),
+        ),
+      ],
+    ),
+  );
+  controller.dispose();
+  return result;
+}
+
+class _MemberProfileSheet extends StatefulWidget {
+  const _MemberProfileSheet({
+    required this.member,
+    required this.isCurrentUser,
+    required this.isContact,
+    required this.canSetNickname,
+    required this.imageUrl,
+    required this.onAddContact,
+    required this.onOpenChat,
+    required this.onSetNickname,
+  });
+
+  final ChatUser member;
+  final bool isCurrentUser;
+  final bool isContact;
+  final bool canSetNickname;
+  final String? imageUrl;
+  final Future<void> Function() onAddContact;
+  final Future<void> Function() onOpenChat;
+  final Future<void> Function(String nickname) onSetNickname;
+
+  @override
+  State<_MemberProfileSheet> createState() => _MemberProfileSheetState();
+}
+
+class _MemberProfileSheetState extends State<_MemberProfileSheet> {
+  late bool _isContact = widget.isContact;
+  late bool _canSetNickname = widget.canSetNickname;
+  late String _nickname = widget.member.nickname;
+  bool _adding = false;
+  bool _savingNickname = false;
+
+  Future<void> _addContact() async {
+    if (_adding || _isContact) return;
+    setState(() => _adding = true);
+    try {
+      await widget.onAddContact();
+      if (!mounted) return;
+      setState(() {
+        _isContact = true;
+        _canSetNickname = true;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('contactAdded'))),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('addContactFailed'))),
+      );
+    } finally {
+      if (mounted) setState(() => _adding = false);
+    }
+  }
+
+  Future<void> _openPrivateChat() async {
+    Navigator.of(context).pop();
+    await widget.onOpenChat();
+  }
+
+  Future<void> _editNickname() async {
+    if (_savingNickname || !_canSetNickname) return;
+    final nickname = await _requestNickname(
+      context,
+      contact: widget.member,
+      initialValue: _nickname,
+    );
+    if (nickname == null || !mounted) return;
+    setState(() => _savingNickname = true);
+    try {
+      await widget.onSetNickname(nickname);
+      if (!mounted) return;
+      setState(() => _nickname = nickname);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(context.l10n
+              .t(nickname.isEmpty ? 'nicknameRemoved' : 'nicknameSaved')),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('nicknameFailed'))),
+      );
+    } finally {
+      if (mounted) setState(() => _savingNickname = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final fullname = widget.member.fullname.trim().isEmpty
+        ? widget.member.userid
+        : widget.member.fullname.trim();
+    final display = _nickname.trim().isEmpty ? fullname : _nickname.trim();
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 42,
+              height: 4,
+              decoration: BoxDecoration(
+                color: AppColors.line,
+                borderRadius: BorderRadius.circular(99),
+              ),
+            ),
+            const SizedBox(height: 20),
+            YSAvatar(
+              label: display,
+              imageUrl: widget.imageUrl,
+              size: 84,
+              online: widget.member.isOnline,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              display,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: AppColors.ink,
+                fontSize: 19,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 4),
+            if (_nickname.trim().isNotEmpty)
+              Text(
+                fullname,
+                style: const TextStyle(
+                  color: AppColors.muted,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            Text(
+              widget.member.userid,
+              style: const TextStyle(color: AppColors.muted),
+            ),
+            const SizedBox(height: 18),
+            if (!widget.isCurrentUser) ...[
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: _openPrivateChat,
+                  icon: const Icon(Icons.chat_bubble_outline),
+                  label: Text(context.l10n.t('sendMessage')),
+                ),
+              ),
+              if (!_isContact) ...[
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _adding ? null : _addContact,
+                    icon: _adding
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: AppColors.brand,
+                            ),
+                          )
+                        : const Icon(Icons.person_add_alt_1_outlined),
+                    label: Text(context.l10n.t('addContact')),
+                  ),
+                ),
+              ],
+            ],
+            if (_canSetNickname) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _savingNickname ? null : _editNickname,
+                  icon: _savingNickname
+                      ? const SizedBox.square(
+                          dimension: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.edit_outlined),
+                  label: Text(context.l10n.t('setNickname')),
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -2714,8 +4494,8 @@ class _DocumentPreviewList extends StatelessWidget {
       children: documents
           .map((file) => ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.insert_drive_file_outlined,
-                    color: AppColors.brand),
+                leading:
+                    Icon(_documentIcon(file), color: _documentAccent(file)),
                 title: Text(
                   _attachmentDisplayName(file),
                   maxLines: 1,
@@ -2753,15 +4533,16 @@ class _InfoSectionTitle extends StatelessWidget {
 }
 
 class _GroupAvatar extends StatelessWidget {
-  const _GroupAvatar({required this.count});
+  const _GroupAvatar({required this.count, this.size = 44});
 
   final int count;
+  final double size;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 44,
-      height: 44,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
         color: AppColors.brandSoft,
         shape: BoxShape.circle,
@@ -2770,11 +4551,11 @@ class _GroupAvatar extends StatelessWidget {
       child: Stack(
         alignment: Alignment.center,
         children: [
-          const Icon(Icons.groups_outlined,
-              color: AppColors.brandDark, size: 22),
+          Icon(Icons.groups_outlined,
+              color: AppColors.brandDark, size: size * 0.5),
           Positioned(
-            right: 4,
-            bottom: 4,
+            right: size * 0.08,
+            bottom: size * 0.08,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
               decoration: BoxDecoration(
@@ -2799,10 +4580,74 @@ ChatUser? _presenceMember(ChatConversation conversation, String currentUserid) {
       .firstOrNull;
 }
 
+const _contactLetterGroups = <String, String>{
+  'A': 'AÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬ',
+  'B': 'B',
+  'C': 'C',
+  'D': 'DĐ',
+  'E': 'EÈÉẺẼẸÊỀẾỂỄỆ',
+  'F': 'F',
+  'G': 'G',
+  'H': 'H',
+  'I': 'IÌÍỈĨỊ',
+  'J': 'J',
+  'K': 'K',
+  'L': 'L',
+  'M': 'M',
+  'N': 'N',
+  'O': 'OÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢ',
+  'P': 'P',
+  'Q': 'Q',
+  'R': 'R',
+  'S': 'S',
+  'T': 'T',
+  'U': 'UÙÚỦŨỤƯỪỨỬỮỰ',
+  'V': 'V',
+  'W': 'W',
+  'X': 'X',
+  'Y': 'YỲÝỶỸỴ',
+  'Z': 'Z',
+};
+
+int _compareDirectoryContacts(ChatUser first, ChatUser second) {
+  final firstName = first.displayName;
+  final secondName = second.displayName;
+  final byName =
+      _contactSortKey(firstName).compareTo(_contactSortKey(secondName));
+  if (byName != 0) return byName;
+  return first.userid.toLowerCase().compareTo(second.userid.toLowerCase());
+}
+
+String _contactSortKey(String value) {
+  var normalized = value.trim().toUpperCase();
+  for (final entry in _contactLetterGroups.entries) {
+    for (final character in entry.value.characters) {
+      normalized = normalized.replaceAll(character, entry.key);
+    }
+  }
+  return normalized;
+}
+
+String _contactDirectoryLetter(String value) {
+  final trimmed = value.trim();
+  if (trimmed.isEmpty) return '#';
+  final first = trimmed.characters.first.toUpperCase();
+  for (final entry in _contactLetterGroups.entries) {
+    if (entry.value.contains(first)) return entry.key;
+  }
+  return '#';
+}
+
 String _lastMessagePreview(
     BuildContext context, ChatConversation conversation) {
   final message = conversation.lastMessage;
   if (message == null) return '';
+  if (message.type == 'call') {
+    final callLog = ChatCallLog.tryParse(message.content);
+    return context.l10n.t(
+      callLog?.isMissed == true ? 'missedCall' : 'voiceCall',
+    );
+  }
   if (message.content.trim().isNotEmpty) return message.content.trim();
   final attachment = message.attachments.firstOrNull;
   if (attachment != null) return attachment.fileName;
@@ -2812,6 +4657,12 @@ String _lastMessagePreview(
 }
 
 String _messagePreview(BuildContext context, ChatMessage message) {
+  if (message.type == 'call') {
+    final callLog = ChatCallLog.tryParse(message.content);
+    return context.l10n.t(
+      callLog?.isMissed == true ? 'missedCall' : 'voiceCall',
+    );
+  }
   if (message.content.trim().isNotEmpty) return message.content.trim();
   if (message.attachments.any(_isImageAttachment)) {
     return context.l10n.t('imagePreview');
@@ -2831,32 +4682,36 @@ String _attachmentDisplayName(ChatAttachment attachment) {
   return 'Attachment';
 }
 
-List<String> _mentionLabels(ChatConversation conversation) {
-  final labels = <String>[];
-  final seen = <String>{};
+IconData _documentIcon(ChatAttachment attachment) {
+  final name = (attachment.fileName.isNotEmpty
+          ? attachment.fileName
+          : attachment.relativePath)
+      .toLowerCase();
+  final ext = name.contains('.') ? name.split('.').last : '';
+  if (['doc', 'docx'].contains(ext)) return Icons.description_outlined;
+  if (['xls', 'xlsx', 'csv'].contains(ext)) return Icons.table_chart_outlined;
+  if (['ppt', 'pptx'].contains(ext)) return Icons.slideshow_outlined;
+  if (ext == 'pdf') return Icons.picture_as_pdf_outlined;
+  if (['zip', 'rar', '7z', 'tar', 'gz'].contains(ext)) {
+    return Icons.folder_zip_outlined;
+  }
+  return Icons.insert_drive_file_outlined;
+}
 
-  void addLabel(String value) {
-    final normalized = value.trim();
-    if (normalized.length <= 1) return;
-    final key = normalized.toLowerCase();
-    if (seen.contains(key)) return;
-    seen.add(key);
-    labels.add(normalized);
+Color _documentAccent(ChatAttachment attachment) {
+  final name = (attachment.fileName.isNotEmpty
+          ? attachment.fileName
+          : attachment.relativePath)
+      .toLowerCase();
+  final ext = name.contains('.') ? name.split('.').last : '';
+  if (['doc', 'docx'].contains(ext)) return const Color(0xff2563eb);
+  if (['xls', 'xlsx', 'csv'].contains(ext)) return const Color(0xff16a34a);
+  if (['ppt', 'pptx'].contains(ext)) return const Color(0xffea580c);
+  if (ext == 'pdf') return const Color(0xffdc2626);
+  if (['zip', 'rar', '7z', 'tar', 'gz'].contains(ext)) {
+    return const Color(0xff7c3aed);
   }
-
-  if (conversation.type == 'group') {
-    addLabel('@All');
-  }
-  for (final member in conversation.members) {
-    final display = member.fullname.trim().isNotEmpty
-        ? member.fullname.trim()
-        : member.userid.trim();
-    addLabel('@$display');
-    addLabel('@${member.fullname}');
-    addLabel('@${member.userid}');
-  }
-  labels.sort((a, b) => b.length.compareTo(a.length));
-  return labels;
+  return AppColors.brand;
 }
 
 List<_MentionOption> _mentionOptions(ChatConversation conversation) {
@@ -2880,9 +4735,7 @@ List<_MentionOption> _mentionOptions(ChatConversation conversation) {
   }
 
   for (final member in conversation.members) {
-    final label = member.fullname.trim().isNotEmpty
-        ? member.fullname.trim()
-        : member.userid.trim();
+    final label = member.displayName;
     if (label.isEmpty) continue;
     addOption(_MentionOption(
       label: label,

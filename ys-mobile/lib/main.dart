@@ -31,7 +31,8 @@ Future<void> main() async {
       final tokenStore = TokenStore();
       final apiClient = ApiClient(AppConfig.apiBaseUrl, tokenStore);
       final realtimeService = RealtimeService(AppConfig.apiBaseUrl, tokenStore);
-      final pushService = PushService(apiClient);
+      final pushService = PushService(apiClient, tokenStore);
+      await pushService.initialize();
       final appState = AppState(
         apiClient: apiClient,
         tokenStore: tokenStore,

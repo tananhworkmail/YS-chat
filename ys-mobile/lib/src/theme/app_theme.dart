@@ -30,6 +30,8 @@ ThemeData buildYSTheme() {
   );
 
   return base.copyWith(
+    visualDensity: VisualDensity.compact,
+    textTheme: base.textTheme.apply(fontSizeFactor: 0.93),
     appBarTheme: const AppBarTheme(
       elevation: 0,
       scrolledUnderElevation: 0,
@@ -38,7 +40,7 @@ ThemeData buildYSTheme() {
       foregroundColor: AppColors.ink,
       titleTextStyle: TextStyle(
         color: AppColors.ink,
-        fontSize: 18,
+        fontSize: 17,
         fontWeight: FontWeight.w900,
       ),
     ),
@@ -46,7 +48,7 @@ ThemeData buildYSTheme() {
       filled: true,
       fillColor: const Color(0xfffbfdff),
       isDense: true,
-      contentPadding: const EdgeInsets.symmetric(horizontal: 13, vertical: 13),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
       border: OutlineInputBorder(
         borderRadius: BorderRadius.circular(8),
         borderSide: const BorderSide(color: AppColors.line),
@@ -67,15 +69,19 @@ ThemeData buildYSTheme() {
     ),
     filledButtonTheme: FilledButtonThemeData(
       style: FilledButton.styleFrom(
-        minimumSize: const Size.fromHeight(46),
+        minimumSize: const Size.fromHeight(38),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         backgroundColor: AppColors.brand,
         foregroundColor: Colors.white,
-        textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800),
+        textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800),
       ),
     ),
     iconButtonTheme: IconButtonThemeData(
       style: IconButton.styleFrom(
+        minimumSize: const Size(38, 38),
+        padding: const EdgeInsets.all(7),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        visualDensity: VisualDensity.compact,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
     ),
@@ -219,12 +225,12 @@ class EmptyState extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.all(18),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(icon, size: 30, color: AppColors.muted),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             Text(
               text,
               textAlign: TextAlign.center,

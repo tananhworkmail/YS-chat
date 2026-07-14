@@ -177,10 +177,14 @@ func (s *ChatService) SearchUsers(currentUserid, keyword string) ([]types.ChatUs
 	}
 
 	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		return []types.ChatUser{}, nil
+	}
 	query := db.Table("users u").
 		Select(`
 			u.userid,
 			COALESCE(u.fullname, u.userid) AS fullname,
+			COALESCE(cc.nickname, '') AS nickname,
 			COALESCE(u.avatar, '') AS avatar,
 			CASE WHEN cc.id IS NULL THEN 0 ELSE 1 END AS is_contact
 		`).
@@ -189,10 +193,8 @@ func (s *ChatService) SearchUsers(currentUserid, keyword string) ([]types.ChatUs
 		Limit(30).
 		Order("is_contact DESC, fullname ASC")
 
-	if keyword != "" {
-		like := "%" + keyword + "%"
-		query = query.Where("u.userid LIKE ? OR u.fullname LIKE ?", like, like)
-	}
+	like := "%" + keyword + "%"
+	query = query.Where("u.userid LIKE ? OR u.fullname LIKE ? OR cc.nickname LIKE ?", like, like, like)
 
 	var users []types.ChatUser
 	if err := query.Scan(&users).Error; err != nil {
@@ -212,12 +214,13 @@ func (s *ChatService) ListContacts(currentUserid string) ([]types.ChatUser, erro
 	if err := db.Raw(`
 		SELECT u.userid,
 			COALESCE(u.fullname, u.userid) AS fullname,
+			COALESCE(c.nickname, '') AS nickname,
 			COALESCE(u.avatar, '') AS avatar,
 			1 AS is_contact
 		FROM chat_contacts c
 		JOIN users u ON u.userid = c.contact_userid
 		WHERE c.owner_userid = ?
-		ORDER BY u.fullname ASC, u.userid ASC
+		ORDER BY COALESCE(NULLIF(c.nickname, ''), u.fullname, u.userid) ASC, u.userid ASC
 	`, currentUserid).Scan(&contacts).Error; err != nil {
 		return nil, errors.New(ErrSystem)
 	}
@@ -364,8 +367,56 @@ func (s *ChatService) AddContact(currentUserid string, req request.AddContactReq
 	).Error; err != nil {
 		return nil, errors.New(ErrSystem)
 	}
+	var nicknameRow struct {
+		Nickname string `gorm:"column:nickname"`
+	}
+	if err := db.Table("chat_contacts").
+		Select("COALESCE(nickname, '') AS nickname").
+		Where("owner_userid = ? AND contact_userid = ?", currentUserid, contactUserid).
+		Scan(&nicknameRow).Error; err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+	contact.Nickname = nicknameRow.Nickname
 
 	contact.IsContact = true
+	contact.IsOnline = RealtimeHubInstance.IsOnline(contact.Userid)
+	return &contact, nil
+}
+
+func (s *ChatService) UpdateContactNickname(currentUserid, contactUserid string, req request.UpdateContactNicknameRequest) (*types.ChatUser, error) {
+	db, err := s.chatDB()
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+
+	contactUserid = strings.TrimSpace(contactUserid)
+	nickname := strings.TrimSpace(req.Nickname)
+	if contactUserid == "" || contactUserid == currentUserid || len([]rune(nickname)) > 80 {
+		return nil, errors.New(ErrInvalidInput)
+	}
+
+	result := db.Table("chat_contacts").
+		Where("owner_userid = ? AND contact_userid = ?", currentUserid, contactUserid).
+		Update("nickname", nickname)
+	if result.Error != nil {
+		return nil, errors.New(ErrSystem)
+	}
+	var contact types.ChatUser
+	if err := db.Raw(`
+		SELECT u.userid,
+			COALESCE(u.fullname, u.userid) AS fullname,
+			COALESCE(c.nickname, '') AS nickname,
+			COALESCE(u.avatar, '') AS avatar,
+			1 AS is_contact
+		FROM chat_contacts c
+		JOIN users u ON u.userid = c.contact_userid
+		WHERE c.owner_userid = ? AND c.contact_userid = ?
+	`, currentUserid, contactUserid).Scan(&contact).Error; err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+	if contact.Userid == "" {
+		return nil, errors.New(ErrChatUserNotFound)
+	}
 	contact.IsOnline = RealtimeHubInstance.IsOnline(contact.Userid)
 	return &contact, nil
 }
@@ -377,7 +428,8 @@ func (s *ChatService) RegisterDeviceToken(currentUserid string, req request.Regi
 	}
 
 	token := strings.TrimSpace(req.Token)
-	if token == "" {
+	deviceID := strings.TrimSpace(req.DeviceID)
+	if token == "" || deviceID == "" {
 		return errors.New(ErrInvalidInput)
 	}
 
@@ -388,14 +440,48 @@ func (s *ChatService) RegisterDeviceToken(currentUserid string, req request.Regi
 		platform = "unknown"
 	}
 
+	// A Firebase token belongs to an app installation, not to a login session.
+	// Clear every previous account association for this installation before
+	// assigning the token to the account that just logged in.
+	if err := db.Exec(
+		"DELETE FROM chat_device_tokens WHERE device_id = ?",
+		deviceID,
+	).Error; err != nil {
+		return errors.New(ErrSystem)
+	}
+
 	if err := db.Exec(`
-		INSERT INTO chat_device_tokens (userid, token, platform, updated_at, created_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO chat_device_tokens (userid, token, device_id, platform, updated_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			userid = VALUES(userid),
+			device_id = VALUES(device_id),
 			platform = VALUES(platform),
 			updated_at = VALUES(updated_at)
-	`, currentUserid, token, platform, time.Now(), time.Now()).Error; err != nil {
+	`, currentUserid, token, deviceID, platform, time.Now(), time.Now()).Error; err != nil {
+		return errors.New(ErrSystem)
+	}
+	return nil
+}
+
+func (s *ChatService) UnregisterDeviceToken(currentUserid string, req request.UnregisterDeviceTokenRequest) error {
+	db, err := s.chatDB()
+	if err != nil {
+		return errors.New(ErrSystem)
+	}
+
+	deviceID := strings.TrimSpace(req.DeviceID)
+	if deviceID == "" {
+		return errors.New(ErrInvalidInput)
+	}
+
+	where := "userid = ? AND device_id = ?"
+	args := []interface{}{currentUserid, deviceID}
+	if token := strings.TrimSpace(req.Token); token != "" {
+		where += " AND token = ?"
+		args = append(args, token)
+	}
+	if err := db.Exec("DELETE FROM chat_device_tokens WHERE "+where, args...).Error; err != nil {
 		return errors.New(ErrSystem)
 	}
 	return nil
@@ -665,6 +751,13 @@ func (s *ChatService) UpdateMemberNickname(currentUserid string, conversationID 
 	} else if !ok {
 		return nil, errors.New(ErrChatNoPermission)
 	}
+	conversationType, err := s.conversationType(db, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conversationType != "group" {
+		return nil, errors.New(ErrInvalidInput)
+	}
 
 	if ok, err := s.isConversationMember(db, conversationID, targetUserid); err != nil {
 		return nil, errors.New(ErrSystem)
@@ -797,16 +890,21 @@ func (s *ChatService) ListMessages(currentUserid string, conversationID uint64, 
 	var rows []messageRow
 	query := `
 		SELECT m.id, m.conversation_id, m.sender_userid,
-			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid) AS sender_name,
+			CASE
+				WHEN c.type = 'direct' THEN COALESCE(NULLIF(cc_sender.nickname, ''), u.fullname, m.sender_userid)
+				ELSE COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid)
+			END AS sender_name,
 			COALESCE(u.avatar, '') AS sender_avatar,
 			m.message_type, COALESCE(m.content, '') AS content,
 			m.reply_to_message_id, m.forwarded_from_message_id, m.created_at
 		FROM chat_messages m
+		JOIN chat_conversations c ON c.id = m.conversation_id
 		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = m.conversation_id AND cm_sender.userid = m.sender_userid
+		LEFT JOIN chat_contacts cc_sender ON cc_sender.owner_userid = ? AND cc_sender.contact_userid = m.sender_userid
 		LEFT JOIN users u ON u.userid = m.sender_userid
 		WHERE m.conversation_id = ?
 	`
-	args := []interface{}{conversationID}
+	args := []interface{}{currentUserid, conversationID}
 	if beforeID > 0 {
 		query += " AND m.id < ?"
 		args = append(args, beforeID)
@@ -848,7 +946,7 @@ func (s *ChatService) SendMessage(currentUserid string, conversationID uint64, r
 	if !isValidMessageType(messageType) {
 		return nil, errors.New(ErrChatInvalidMessageType)
 	}
-	if (messageType == "text" || messageType == "link") && content == "" {
+	if (messageType == "text" || messageType == "link" || messageType == "call") && content == "" {
 		return nil, errors.New(ErrChatEmptyMessage)
 	}
 	if (messageType == "file" || messageType == "folder" || messageType == "voice") && len(req.Attachments) == 0 {
@@ -1324,6 +1422,7 @@ func ensureChatSchema(db *gorm.DB) error {
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 			owner_userid VARCHAR(64) NOT NULL,
 			contact_userid VARCHAR(64) NOT NULL,
+			nickname VARCHAR(80) NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (id),
 			UNIQUE KEY uk_chat_contacts_owner_contact (owner_userid, contact_userid),
@@ -1334,6 +1433,7 @@ func ensureChatSchema(db *gorm.DB) error {
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 			userid VARCHAR(64) NOT NULL,
 			token VARCHAR(512) NOT NULL,
+			device_id VARCHAR(128) NOT NULL DEFAULT '',
 			platform VARCHAR(32) NOT NULL DEFAULT 'unknown',
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -1418,6 +1518,9 @@ func ensureChatSchema(db *gorm.DB) error {
 	if err := ensureColumn(db, "chat_members", "nickname", "VARCHAR(80) NULL AFTER role"); err != nil {
 		return err
 	}
+	if err := ensureColumn(db, "chat_contacts", "nickname", "VARCHAR(80) NULL AFTER contact_userid"); err != nil {
+		return err
+	}
 	if err := ensureColumn(db, "chat_conversations", "background", "VARCHAR(1024) NULL AFTER avatar"); err != nil {
 		return err
 	}
@@ -1425,6 +1528,9 @@ func ensureChatSchema(db *gorm.DB) error {
 		return err
 	}
 	if err := ensureColumn(db, "chat_messages", "forwarded_from_message_id", "BIGINT UNSIGNED NULL AFTER reply_to_message_id"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "chat_device_tokens", "device_id", "VARCHAR(128) NOT NULL DEFAULT '' AFTER token"); err != nil {
 		return err
 	}
 	if err := ensureColumn(db, "chat_polls", "is_closed", "TINYINT(1) NOT NULL DEFAULT 0 AFTER show_voters"); err != nil {
@@ -1648,7 +1754,10 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 			c.created_at, c.updated_at,
 			m.id AS last_message_id,
 			COALESCE(m.sender_userid, '') AS last_sender_userid,
-			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid, '') AS last_sender_name,
+			CASE
+				WHEN c.type = 'direct' THEN COALESCE(NULLIF(cc_sender.nickname, ''), u.fullname, m.sender_userid, '')
+				ELSE COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid, '')
+			END AS last_sender_name,
 			COALESCE(u.avatar, '') AS last_sender_avatar,
 			COALESCE(m.message_type, '') AS last_message_type,
 			COALESCE(m.content, '') AS last_content,
@@ -1663,8 +1772,9 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 		)
 		LEFT JOIN users u ON u.userid = m.sender_userid
 		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = c.id AND cm_sender.userid = m.sender_userid
+		LEFT JOIN chat_contacts cc_sender ON cc_sender.owner_userid = ? AND cc_sender.contact_userid = m.sender_userid
 	`
-	args := []interface{}{currentUserid}
+	args := []interface{}{currentUserid, currentUserid}
 	if conversationID > 0 {
 		query += " WHERE c.id = ?"
 		args = append(args, conversationID)
@@ -1683,7 +1793,7 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 		ids = append(ids, row.ID)
 	}
 
-	membersByConversation, err := s.loadMembers(db, ids)
+	membersByConversation, err := s.loadMembers(db, currentUserid, ids)
 	if err != nil {
 		return nil, errors.New(ErrSystem)
 	}
@@ -1742,20 +1852,25 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 	return conversations, nil
 }
 
-func (s *ChatService) loadMembers(db *gorm.DB, conversationIDs []uint64) (map[uint64][]types.ChatUser, error) {
+func (s *ChatService) loadMembers(db *gorm.DB, currentUserid string, conversationIDs []uint64) (map[uint64][]types.ChatUser, error) {
 	var rows []memberRow
 	if err := db.Raw(`
 		SELECT cm.conversation_id,
 			COALESCE(u.userid, cm.userid) AS userid,
 			COALESCE(u.fullname, cm.userid) AS fullname,
-			COALESCE(cm.nickname, '') AS nickname,
+			CASE
+				WHEN c.type = 'direct' THEN COALESCE(cc.nickname, '')
+				ELSE COALESCE(cm.nickname, '')
+			END AS nickname,
 			COALESCE(u.avatar, '') AS avatar,
 			COALESCE(cm.role, 'member') AS role
 		FROM chat_members cm
+		JOIN chat_conversations c ON c.id = cm.conversation_id
 		LEFT JOIN users u ON u.userid = cm.userid
+		LEFT JOIN chat_contacts cc ON cc.owner_userid = ? AND cc.contact_userid = cm.userid
 		WHERE cm.conversation_id IN ?
 		ORDER BY cm.joined_at ASC
-	`, conversationIDs).Scan(&rows).Error; err != nil {
+	`, currentUserid, conversationIDs).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
@@ -1804,15 +1919,20 @@ func (s *ChatService) loadMessageByID(db *gorm.DB, currentUserid string, message
 	var rows []messageRow
 	if err := db.Raw(`
 		SELECT m.id, m.conversation_id, m.sender_userid,
-			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid) AS sender_name,
+			CASE
+				WHEN c.type = 'direct' THEN COALESCE(NULLIF(cc_sender.nickname, ''), u.fullname, m.sender_userid)
+				ELSE COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid)
+			END AS sender_name,
 			COALESCE(u.avatar, '') AS sender_avatar,
 			m.message_type, COALESCE(m.content, '') AS content,
 			m.reply_to_message_id, m.forwarded_from_message_id, m.created_at
 		FROM chat_messages m
+		JOIN chat_conversations c ON c.id = m.conversation_id
 		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = m.conversation_id AND cm_sender.userid = m.sender_userid
+		LEFT JOIN chat_contacts cc_sender ON cc_sender.owner_userid = ? AND cc_sender.contact_userid = m.sender_userid
 		LEFT JOIN users u ON u.userid = m.sender_userid
 		WHERE m.id = ?
-	`, messageID).Scan(&rows).Error; err != nil {
+	`, currentUserid, messageID).Scan(&rows).Error; err != nil {
 		return nil, errors.New(ErrSystem)
 	}
 	messages, err := s.buildMessages(db, currentUserid, rows)
@@ -1853,7 +1973,7 @@ func (s *ChatService) buildMessages(db *gorm.DB, currentUserid string, rows []me
 	if err != nil {
 		return nil, errors.New(ErrSystem)
 	}
-	referencesByID, err := s.loadMessageReferences(db, referenceIDs)
+	referencesByID, err := s.loadMessageReferences(db, currentUserid, referenceIDs)
 	if err != nil {
 		return nil, errors.New(ErrSystem)
 	}
@@ -2048,7 +2168,7 @@ func (s *ChatService) pollUserOptionIDs(db *gorm.DB, pollID uint64, userid strin
 	return optionIDs, err
 }
 
-func (s *ChatService) loadMessageReferences(db *gorm.DB, messageIDs []uint64) (map[uint64]*types.ChatMessageReference, error) {
+func (s *ChatService) loadMessageReferences(db *gorm.DB, currentUserid string, messageIDs []uint64) (map[uint64]*types.ChatMessageReference, error) {
 	result := make(map[uint64]*types.ChatMessageReference)
 	if len(messageIDs) == 0 {
 		return result, nil
@@ -2057,13 +2177,18 @@ func (s *ChatService) loadMessageReferences(db *gorm.DB, messageIDs []uint64) (m
 	var rows []messageReferenceRow
 	if err := db.Raw(`
 		SELECT m.id, m.sender_userid,
-			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid) AS sender_name,
+			CASE
+				WHEN c.type = 'direct' THEN COALESCE(NULLIF(cc_sender.nickname, ''), u.fullname, m.sender_userid)
+				ELSE COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid)
+			END AS sender_name,
 			m.message_type, COALESCE(m.content, '') AS content
 		FROM chat_messages m
+		JOIN chat_conversations c ON c.id = m.conversation_id
 		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = m.conversation_id AND cm_sender.userid = m.sender_userid
+		LEFT JOIN chat_contacts cc_sender ON cc_sender.owner_userid = ? AND cc_sender.contact_userid = m.sender_userid
 		LEFT JOIN users u ON u.userid = m.sender_userid
 		WHERE m.id IN ?
-	`, messageIDs).Scan(&rows).Error; err != nil {
+	`, currentUserid, messageIDs).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
@@ -2110,15 +2235,16 @@ func (s *ChatService) searchContacts(db *gorm.DB, currentUserid, keyword string,
 	if err := db.Raw(`
 		SELECT u.userid,
 			COALESCE(u.fullname, u.userid) AS fullname,
+			COALESCE(c.nickname, '') AS nickname,
 			COALESCE(u.avatar, '') AS avatar,
 			1 AS is_contact
 		FROM chat_contacts c
 		JOIN users u ON u.userid = c.contact_userid
 		WHERE c.owner_userid = ?
-			AND (u.userid LIKE ? OR u.fullname LIKE ?)
-		ORDER BY u.fullname ASC, u.userid ASC
+			AND (u.userid LIKE ? OR u.fullname LIKE ? OR c.nickname LIKE ?)
+		ORDER BY COALESCE(NULLIF(c.nickname, ''), u.fullname, u.userid) ASC, u.userid ASC
 		LIMIT ?
-	`, currentUserid, like, like, limit).Scan(&contacts).Error; err != nil {
+	`, currentUserid, like, like, like, limit).Scan(&contacts).Error; err != nil {
 		return nil, err
 	}
 	applyUserPresence(contacts)
@@ -2130,18 +2256,24 @@ func (s *ChatService) searchMessages(db *gorm.DB, currentUserid, keyword string,
 	var rows []messageRow
 	if err := db.Raw(`
 		SELECT m.id, m.conversation_id, m.sender_userid,
-			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid) AS sender_name,
+			CASE
+				WHEN c.type = 'direct' THEN COALESCE(NULLIF(cc_sender.nickname, ''), u.fullname, m.sender_userid)
+				ELSE COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid)
+			END AS sender_name,
 			COALESCE(u.avatar, '') AS sender_avatar,
 			m.message_type, COALESCE(m.content, '') AS content,
 			m.reply_to_message_id, m.forwarded_from_message_id, m.created_at
 		FROM chat_messages m
+		JOIN chat_conversations c ON c.id = m.conversation_id
 		JOIN chat_members cm_self ON cm_self.conversation_id = m.conversation_id AND cm_self.userid = ?
 		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = m.conversation_id AND cm_sender.userid = m.sender_userid
+		LEFT JOIN chat_contacts cc_sender ON cc_sender.owner_userid = ? AND cc_sender.contact_userid = m.sender_userid
 		LEFT JOIN users u ON u.userid = m.sender_userid
-		WHERE COALESCE(m.content, '') LIKE ?
+		WHERE m.message_type NOT IN ('call', 'system')
+			AND COALESCE(m.content, '') LIKE ?
 		ORDER BY m.id DESC
 		LIMIT ?
-	`, currentUserid, like, limit).Scan(&rows).Error; err != nil {
+	`, currentUserid, currentUserid, like, limit).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	return s.buildMessages(db, currentUserid, rows)
@@ -2152,19 +2284,25 @@ func (s *ChatService) searchFiles(db *gorm.DB, currentUserid, keyword string, li
 	var rows []messageRow
 	if err := db.Raw(`
 		SELECT DISTINCT m.id, m.conversation_id, m.sender_userid,
-			COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid) AS sender_name,
+			CASE
+				WHEN c.type = 'direct' THEN COALESCE(NULLIF(cc_sender.nickname, ''), u.fullname, m.sender_userid)
+				ELSE COALESCE(NULLIF(cm_sender.nickname, ''), u.fullname, m.sender_userid)
+			END AS sender_name,
 			COALESCE(u.avatar, '') AS sender_avatar,
 			m.message_type, COALESCE(m.content, '') AS content,
 			m.reply_to_message_id, m.forwarded_from_message_id, m.created_at
 		FROM chat_message_attachments a
 		JOIN chat_messages m ON m.id = a.message_id
+		JOIN chat_conversations c ON c.id = m.conversation_id
 		JOIN chat_members cm_self ON cm_self.conversation_id = m.conversation_id AND cm_self.userid = ?
 		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = m.conversation_id AND cm_sender.userid = m.sender_userid
+		LEFT JOIN chat_contacts cc_sender ON cc_sender.owner_userid = ? AND cc_sender.contact_userid = m.sender_userid
 		LEFT JOIN users u ON u.userid = m.sender_userid
-		WHERE a.file_name LIKE ? OR a.relative_path LIKE ?
+		WHERE m.message_type NOT IN ('call', 'system')
+			AND (a.file_name LIKE ? OR a.relative_path LIKE ?)
 		ORDER BY m.id DESC
 		LIMIT ?
-	`, currentUserid, like, like, limit).Scan(&rows).Error; err != nil {
+	`, currentUserid, currentUserid, like, like, limit).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	return s.buildMessages(db, currentUserid, rows)
@@ -2335,7 +2473,7 @@ func boolInt(value bool) int {
 
 func isValidMessageType(messageType string) bool {
 	switch messageType {
-	case "text", "link", "file", "folder", "voice":
+	case "text", "link", "file", "folder", "voice", "call":
 		return true
 	default:
 		return false

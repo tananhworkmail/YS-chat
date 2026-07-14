@@ -30,6 +30,10 @@ export const addContact = (userid) => {
   return api.post("/chat/contacts", { userid });
 };
 
+export const updateContactNickname = (userid, nickname) => {
+  return api.put(`/chat/contacts/${encodeURIComponent(userid)}/nickname`, { nickname });
+};
+
 export const registerDeviceToken = (token, platform) => {
   return api.post("/chat/devices", { token, platform });
 };
@@ -128,6 +132,7 @@ export default {
   searchChat,
   getContacts,
   addContact,
+  updateContactNickname,
   registerDeviceToken,
   getConversations,
   createDirectConversation,

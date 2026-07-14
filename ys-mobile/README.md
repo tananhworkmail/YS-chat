@@ -86,9 +86,45 @@ APK hien dang cho phep HTTP cleartext de dung backend noi bo `192.168.71.87`. Kh
 
 Backend da co endpoint `POST /api/v1/chat/devices` va Firebase sender. Flutter app se tu dang ky FCM token neu Firebase duoc cau hinh.
 
-Can lam sau khi sinh wrapper:
+Android da cau hinh san Google Services plugin. Plugin chi duoc apply khi file config ton tai, nen project van build duoc khi chua co Firebase.
 
-- Android: them `android/app/google-services.json`, cau hinh Gradle theo Firebase Flutter docs.
-- iOS: them `ios/Runner/GoogleService-Info.plist`, bat Push Notifications va Background Modes trong Xcode.
+Can tao app trong Firebase Console voi package:
+
+```text
+com.tythac.ys_mobile
+```
+
+Sau do tai file Android config va dat vao:
+
+```text
+android/app/google-services.json
+```
+
+iOS can tao app Firebase voi bundle id:
+
+```text
+com.tythac.ysMobile
+```
+
+Sau do tai file iOS config va dat vao:
+
+```text
+ios/Runner/GoogleService-Info.plist
+```
+
+Voi iOS, mo Xcode va bat capability `Push Notifications`; `Info.plist` da bat san `remote-notification` background mode.
+
+Backend can Firebase Admin credentials bang mot trong hai bien moi truong:
+
+```text
+FIREBASE_SERVICE_ACCOUNT_JSON=<noi dung service-account json>
+```
+
+hoac:
+
+```text
+GOOGLE_APPLICATION_CREDENTIALS=/duong/dan/firebase-service-account.json
+FIREBASE_PROJECT_ID=<firebase-project-id>
+```
 
 Neu chua co Firebase config, app van chay chat realtime/upload binh thuong; push token registration se duoc bo qua an toan.

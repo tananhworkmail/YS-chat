@@ -1,4 +1,5 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:uuid/uuid.dart';
 
 class TokenStore {
   static const _tokenKey = 'user_token';
@@ -6,6 +7,7 @@ class TokenStore {
   static const _fullnameKey = 'fullname';
   static const _accountIdKey = 'account_id';
   static const _languageKey = 'language_code';
+  static const _deviceIdKey = 'device_id';
 
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
 
@@ -13,6 +15,7 @@ class TokenStore {
   String? userid;
   String? fullname;
   String? accountId;
+  String? deviceId;
   String languageCode = 'vi';
 
   Future<void> load() async {
@@ -21,7 +24,9 @@ class TokenStore {
       userid = await _storage.read(key: _useridKey);
       fullname = await _storage.read(key: _fullnameKey);
       accountId = await _storage.read(key: _accountIdKey);
+      deviceId = await _storage.read(key: _deviceIdKey);
       languageCode = await _storage.read(key: _languageKey) ?? 'vi';
+      await ensureDeviceId();
     } catch (_) {
       await clear();
     }
@@ -48,15 +53,26 @@ class TokenStore {
     userid = null;
     fullname = null;
     accountId = null;
-    final language = languageCode;
     try {
-      await _storage.deleteAll();
-      languageCode = language;
-      await _storage.write(key: _languageKey, value: languageCode);
+      await _storage.delete(key: _tokenKey);
+      await _storage.delete(key: _useridKey);
+      await _storage.delete(key: _fullnameKey);
+      await _storage.delete(key: _accountIdKey);
     } catch (_) {
       // If Android restores an old encrypted preferences backup, the keystore
       // can be unreadable. Keep the app bootable and let the next login replace it.
     }
+  }
+
+  Future<String> ensureDeviceId() async {
+    final existing = deviceId?.trim() ?? '';
+    if (existing.isNotEmpty) return existing;
+    final generated = const Uuid().v4();
+    deviceId = generated;
+    try {
+      await _storage.write(key: _deviceIdKey, value: generated);
+    } catch (_) {}
+    return generated;
   }
 
   Future<void> saveLanguage(String code) async {

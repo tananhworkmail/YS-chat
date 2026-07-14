@@ -208,31 +208,40 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ),
         child: SafeArea(
-          child: Center(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(18),
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 460),
-                child: Card(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        const _AuthBrandHeader(),
-                        const SizedBox(height: 22),
-                        _AuthModeTabs(mode: _mode, onChanged: _switchMode),
-                        const SizedBox(height: 20),
-                        AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 180),
-                          child: _buildForm(loading),
+          child: Stack(
+            children: [
+              Center(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(18, 72, 18, 18),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 460),
+                    child: Card(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 22, 20, 20),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            const _AuthBrandHeader(),
+                            const SizedBox(height: 22),
+                            _AuthModeTabs(mode: _mode, onChanged: _switchMode),
+                            const SizedBox(height: 20),
+                            AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 180),
+                              child: _buildForm(loading),
+                            ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
+              const Positioned(
+                top: 12,
+                right: 14,
+                child: _AuthLanguageMenu(),
+              ),
+            ],
           ),
         ),
       ),
@@ -411,6 +420,63 @@ class _LoginScreenState extends State<LoginScreen> {
       case _AuthMode.forgot:
         return context.l10n.t('verify');
     }
+  }
+}
+
+class _AuthLanguageMenu extends StatelessWidget {
+  const _AuthLanguageMenu();
+
+  @override
+  Widget build(BuildContext context) {
+    final languageCode = context.select(
+      (AppState state) => state.languageCode,
+    );
+
+    return PopupMenuButton<String>(
+      tooltip: context.l10n.t('language'),
+      initialValue: languageCode,
+      onSelected: (code) => context.read<AppState>().setLanguage(code),
+      itemBuilder: (context) => const ['vi', 'en', 'zh']
+          .map(
+            (code) => PopupMenuItem(
+              value: code,
+              child: Text(AppLocalizations.languageName(code)),
+            ),
+          )
+          .toList(),
+      child: Container(
+        height: 40,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.92),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: AppColors.line),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xff0f172a).withValues(alpha: 0.08),
+              blurRadius: 18,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.language, color: AppColors.brandDark, size: 19),
+            const SizedBox(width: 7),
+            Text(
+              languageCode.toUpperCase(),
+              style: const TextStyle(
+                color: AppColors.ink,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(width: 2),
+            const Icon(Icons.expand_more, color: AppColors.muted, size: 18),
+          ],
+        ),
+      ),
+    );
   }
 }
 

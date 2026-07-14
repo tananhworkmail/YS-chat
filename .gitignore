@@ -21,6 +21,11 @@ Thumbs.db
 !.env.*.example
 *.local
 
+# Firebase server credentials (keep mobile google-services.json tracked)
+*firebase-adminsdk*.json
+firebase-service-account*.json
+ys-web-api/secrets/
+
 # Logs
 logs/
 log/

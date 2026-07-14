@@ -1,0 +1,4 @@
+<resources>
+    <string name="default_notification_channel_id">ys_chat_messages</string>
+    <string name="default_notification_channel_name">YS Chat messages</string>
+</resources>

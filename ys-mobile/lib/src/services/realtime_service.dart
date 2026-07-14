@@ -14,6 +14,8 @@ class RealtimeService {
   final TokenStore _tokenStore;
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
+  final List<Map<String, dynamic>> _pendingCallEvents = [];
+  bool _ready = false;
 
   void connect({
     required void Function(RealtimeEvent event) onEvent,
@@ -24,6 +26,7 @@ class RealtimeService {
     final oldChannel = _channel;
     _subscription = null;
     _channel = null;
+    _ready = false;
     unawaited(oldSubscription?.cancel() ?? Future<void>.value());
     unawaited(oldChannel?.sink.close() ?? Future<void>.value());
 
@@ -38,6 +41,15 @@ class RealtimeService {
     );
     final channel = WebSocketChannel.connect(wsUri);
     _channel = channel;
+    unawaited(channel.ready.then((_) {
+      if (!identical(_channel, channel)) return;
+      _ready = true;
+      final pending = List<Map<String, dynamic>>.from(_pendingCallEvents);
+      _pendingCallEvents.clear();
+      for (final event in pending) {
+        channel.sink.add(jsonEncode(event));
+      }
+    }).catchError((_) {}));
     _subscription = channel.stream.listen(
       (raw) {
         final decoded = jsonDecode('$raw');
@@ -52,7 +64,15 @@ class RealtimeService {
   }
 
   void sendCallEvent(Map<String, dynamic> event) {
-    _channel?.sink.add(jsonEncode(event));
+    final channel = _channel;
+    if (channel == null || !_ready) {
+      _pendingCallEvents.add(Map<String, dynamic>.from(event));
+      if (_pendingCallEvents.length > 64) {
+        _pendingCallEvents.removeAt(0);
+      }
+      return;
+    }
+    channel.sink.add(jsonEncode(event));
   }
 
   Future<void> disconnect() async {
@@ -60,6 +80,8 @@ class RealtimeService {
     final channel = _channel;
     _subscription = null;
     _channel = null;
+    _ready = false;
+    _pendingCallEvents.clear();
     await subscription?.cancel();
     await channel?.sink.close();
   }

@@ -21,8 +21,10 @@ class MessageBubble extends StatelessWidget {
     required this.onDownload,
     required this.onVotePoll,
     required this.onClosePoll,
-    required this.mentionLabels,
+    required this.mentionUsers,
     required this.onOpenReference,
+    this.onOpenMentionProfile,
+    this.onOpenSenderProfile,
   });
 
   final ChatMessage message;
@@ -34,13 +36,24 @@ class MessageBubble extends StatelessWidget {
   final void Function(
       ChatMessage message, List<int> optionIds, String customOption) onVotePoll;
   final ValueChanged<ChatMessage> onClosePoll;
-  final List<String> mentionLabels;
+  final List<ChatUser> mentionUsers;
   final ValueChanged<int> onOpenReference;
+  final ValueChanged<ChatUser>? onOpenMentionProfile;
+  final VoidCallback? onOpenSenderProfile;
 
   @override
   Widget build(BuildContext context) {
     if (message.type == 'system') {
       return _SystemNotice(message: message);
+    }
+    if (message.type == 'call') {
+      final callLog = ChatCallLog.tryParse(message.content);
+      if (callLog == null) return const SizedBox.shrink();
+      return _CallLogBubble(
+        message: message,
+        callLog: callLog,
+        mine: mine,
+      );
     }
     if (message.type == 'poll' && message.poll != null) {
       return _PollBubble(
@@ -57,16 +70,29 @@ class MessageBubble extends StatelessWidget {
     final files = message.attachments
         .where((item) => !_isImage(item) && !_isVideo(item) && !_isVoice(item))
         .toList();
-    final textColor = mine ? Colors.white : AppColors.ink;
-    final metaColor =
-        mine ? Colors.white.withValues(alpha: 0.72) : AppColors.muted;
+    final hasTextContent = message.content.trim().isNotEmpty ||
+        message.replyTo != null ||
+        message.forwardedFrom != null;
+    final specialOnly = !hasTextContent &&
+        (images.isNotEmpty ||
+            videos.isNotEmpty ||
+            voices.isNotEmpty ||
+            files.isNotEmpty);
+    final textColor = specialOnly
+        ? AppColors.ink
+        : mine
+            ? Colors.white
+            : AppColors.ink;
+    final metaColor = specialOnly
+        ? AppColors.muted
+        : mine
+            ? Colors.white.withValues(alpha: 0.72)
+            : AppColors.muted;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: GestureDetector(
-        onHorizontalDragEnd: (details) {
-          if ((details.primaryVelocity ?? 0) < -240) onReply(message);
-        },
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: _SwipeToReply(
+        onReply: () => onReply(message),
         onLongPress: () => _showOptions(context),
         child: Row(
           mainAxisAlignment:
@@ -74,34 +100,50 @@ class MessageBubble extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
             if (!mine) ...[
-              YSAvatar(
-                  label: message.senderName, imageUrl: _avatarUrl, size: 30),
-              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: onOpenSenderProfile,
+                child: YSAvatar(
+                  label: message.senderName,
+                  imageUrl: _avatarUrl,
+                  size: 27,
+                ),
+              ),
+              const SizedBox(width: 6),
             ],
             Flexible(
               child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 330),
+                constraints: const BoxConstraints(maxWidth: 310),
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: mine ? AppColors.brand : Colors.white,
+                    color: specialOnly
+                        ? Colors.transparent
+                        : mine
+                            ? AppColors.brand
+                            : Colors.white,
                     borderRadius: BorderRadius.only(
                       topLeft: const Radius.circular(8),
                       topRight: const Radius.circular(8),
                       bottomLeft: Radius.circular(mine ? 8 : 3),
                       bottomRight: Radius.circular(mine ? 3 : 8),
                     ),
-                    border: mine ? null : Border.all(color: AppColors.line),
-                    boxShadow: [
-                      BoxShadow(
-                        color: const Color(0xff0f172a)
-                            .withValues(alpha: mine ? 0.10 : 0.05),
-                        blurRadius: 16,
-                        offset: const Offset(0, 6),
-                      ),
-                    ],
+                    border: specialOnly || mine
+                        ? null
+                        : Border.all(color: AppColors.line),
+                    boxShadow: specialOnly
+                        ? null
+                        : [
+                            BoxShadow(
+                              color: const Color(0xff0f172a)
+                                  .withValues(alpha: mine ? 0.10 : 0.05),
+                              blurRadius: 16,
+                              offset: const Offset(0, 6),
+                            ),
+                          ],
                   ),
                   child: Padding(
-                    padding: const EdgeInsets.fromLTRB(9, 7, 9, 6),
+                    padding: specialOnly
+                        ? EdgeInsets.zero
+                        : const EdgeInsets.fromLTRB(8, 5, 8, 4),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
@@ -109,14 +151,17 @@ class MessageBubble extends StatelessWidget {
                         if (!mine)
                           Padding(
                             padding: const EdgeInsets.only(bottom: 3),
-                            child: Text(
-                              message.senderName,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: AppColors.brandDark,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w900,
+                            child: GestureDetector(
+                              onTap: onOpenSenderProfile,
+                              child: Text(
+                                message.senderName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: AppColors.brandDark,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w900,
+                                ),
                               ),
                             ),
                           ),
@@ -145,7 +190,8 @@ class MessageBubble extends StatelessWidget {
                           _MessageText(
                             content: message.content,
                             color: textColor,
-                            mentionLabels: mentionLabels,
+                            mentionUsers: mentionUsers,
+                            onOpenMentionProfile: onOpenMentionProfile,
                           ),
                         if (images.isNotEmpty)
                           Padding(
@@ -171,7 +217,7 @@ class MessageBubble extends StatelessWidget {
                             padding: const EdgeInsets.only(top: 7),
                             child: _VoiceList(
                               attachments: voices,
-                              mine: mine,
+                              mine: specialOnly ? false : mine,
                               resolveUrl: resolveUrl,
                             ),
                           ),
@@ -180,13 +226,13 @@ class MessageBubble extends StatelessWidget {
                             padding: const EdgeInsets.only(top: 7),
                             child: _FileList(
                               attachments: files,
-                              mine: mine,
+                              mine: specialOnly ? false : mine,
                               onDownload: onDownload,
                             ),
                           ),
                         if (message.createdAt != null)
                           Padding(
-                            padding: const EdgeInsets.only(top: 5),
+                            padding: const EdgeInsets.only(top: 4),
                             child: Text(
                               DateFormat('HH:mm')
                                   .format(message.createdAt!.toLocal()),
@@ -266,6 +312,75 @@ class MessageBubble extends StatelessWidget {
   }
 }
 
+class _SwipeToReply extends StatefulWidget {
+  const _SwipeToReply({
+    required this.child,
+    required this.onReply,
+    required this.onLongPress,
+  });
+
+  final Widget child;
+  final VoidCallback onReply;
+  final VoidCallback onLongPress;
+
+  @override
+  State<_SwipeToReply> createState() => _SwipeToReplyState();
+}
+
+class _SwipeToReplyState extends State<_SwipeToReply> {
+  static const _maxDrag = 58.0;
+  static const _replyThreshold = 42.0;
+  double _drag = 0;
+
+  void _updateDrag(DragUpdateDetails details) {
+    final next = (_drag + details.delta.dx).clamp(-_maxDrag, 0.0);
+    setState(() => _drag = next);
+  }
+
+  void _finishDrag() {
+    final shouldReply = _drag <= -_replyThreshold;
+    setState(() => _drag = 0);
+    if (shouldReply) widget.onReply();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = (-_drag / _maxDrag).clamp(0.0, 1.0);
+    return GestureDetector(
+      onHorizontalDragUpdate: _updateDrag,
+      onHorizontalDragEnd: (_) => _finishDrag(),
+      onHorizontalDragCancel: () => setState(() => _drag = 0),
+      onLongPress: widget.onLongPress,
+      child: Stack(
+        alignment: Alignment.centerRight,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(right: 7),
+            child: Opacity(
+              opacity: progress,
+              child: Transform.scale(
+                scale: 0.72 + (progress * 0.28),
+                child: const Icon(
+                  Icons.reply,
+                  color: AppColors.brand,
+                  size: 19,
+                ),
+              ),
+            ),
+          ),
+          AnimatedContainer(
+            duration:
+                _drag == 0 ? const Duration(milliseconds: 180) : Duration.zero,
+            curve: Curves.easeOutCubic,
+            transform: Matrix4.translationValues(_drag, 0, 0),
+            child: widget.child,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _SystemNotice extends StatelessWidget {
   const _SystemNotice({required this.message});
 
@@ -290,6 +405,119 @@ class _SystemNotice extends StatelessWidget {
             fontWeight: FontWeight.w800,
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _CallLogBubble extends StatelessWidget {
+  const _CallLogBubble({
+    required this.message,
+    required this.callLog,
+    required this.mine,
+  });
+
+  final ChatMessage message;
+  final ChatCallLog callLog;
+  final bool mine;
+
+  @override
+  Widget build(BuildContext context) {
+    final missed = callLog.isMissed;
+    final color = missed ? AppColors.danger : const Color(0xff07845b);
+    final title = missed
+        ? context.l10n.t(mine ? 'unansweredCall' : 'missedCall')
+        : context.l10n.t(mine ? 'outgoingCall' : 'incomingCallHistory');
+    final subtitle = missed
+        ? context.l10n.t('voiceCall')
+        : '${context.l10n.t('callCompleted')} · '
+            '${_formatDuration(Duration(seconds: callLog.duration))}';
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment:
+            mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+        children: [
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 310),
+            child: Material(
+              color: const Color(0xfff8fafc),
+              borderRadius: BorderRadius.circular(8),
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 7),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.line),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 36,
+                      height: 36,
+                      decoration: BoxDecoration(
+                        color: color.withValues(alpha: 0.12),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        missed
+                            ? Icons.phone_missed_outlined
+                            : mine
+                                ? Icons.phone_forwarded_outlined
+                                : Icons.phone_callback_outlined,
+                        color: color,
+                        size: 19,
+                      ),
+                    ),
+                    const SizedBox(width: 9),
+                    Flexible(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.ink,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.muted,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          if (message.createdAt != null) ...[
+                            const SizedBox(height: 3),
+                            Text(
+                              DateFormat('HH:mm')
+                                  .format(message.createdAt!.toLocal()),
+                              style: const TextStyle(
+                                color: AppColors.muted,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -504,12 +732,14 @@ class _MessageText extends StatefulWidget {
   const _MessageText({
     required this.content,
     required this.color,
-    required this.mentionLabels,
+    required this.mentionUsers,
+    required this.onOpenMentionProfile,
   });
 
   final String content;
   final Color color;
-  final List<String> mentionLabels;
+  final List<ChatUser> mentionUsers;
+  final ValueChanged<ChatUser>? onOpenMentionProfile;
 
   @override
   State<_MessageText> createState() => _MessageTextState();
@@ -533,7 +763,7 @@ class _MessageTextState extends State<_MessageText> {
     }
     _recognizers.clear();
 
-    final parts = _messageParts(widget.content, widget.mentionLabels);
+    final parts = _messageParts(widget.content, widget.mentionUsers);
     if (parts.isEmpty) {
       return Text(widget.content,
           style: TextStyle(color: widget.color, fontSize: 14.2, height: 1.32));
@@ -555,8 +785,15 @@ class _MessageTextState extends State<_MessageText> {
           ),
         ));
       } else if (part.isMention) {
+        TapGestureRecognizer? recognizer;
+        if (part.mentionUser != null && widget.onOpenMentionProfile != null) {
+          recognizer = TapGestureRecognizer()
+            ..onTap = () => widget.onOpenMentionProfile!(part.mentionUser!);
+          _recognizers.add(recognizer);
+        }
         spans.add(TextSpan(
           text: part.text,
+          recognizer: recognizer,
           style: const TextStyle(
               color: Color(0xff2563eb), fontWeight: FontWeight.w900),
         ));
@@ -945,7 +1182,8 @@ class _FileRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final foreground = mine ? Colors.white : AppColors.ink;
+    final accent = _fileAccent(attachment);
+    final foreground = mine ? Colors.white : accent;
     final muted = mine ? Colors.white.withValues(alpha: 0.74) : AppColors.muted;
     final panelColor =
         mine ? Colors.white.withValues(alpha: 0.12) : const Color(0xfff8fbff);
@@ -978,11 +1216,11 @@ class _FileRow extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: mine
                         ? Colors.white.withValues(alpha: 0.13)
-                        : AppColors.brandSoft,
+                        : accent.withValues(alpha: 0.13),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child:
-                      Icon(_fileIcon(attachment), size: 20, color: foreground),
+                      Icon(_fileIcon(attachment), size: 21, color: foreground),
                 ),
                 const SizedBox(width: 9),
                 Expanded(
@@ -1023,7 +1261,7 @@ class _FileRow extends StatelessWidget {
                   onPressed: onDownload,
                   icon: Icon(
                     Icons.file_open_outlined,
-                    color: mine ? Colors.white : AppColors.brand,
+                    color: mine ? Colors.white : accent,
                     size: 18,
                   ),
                 ),
@@ -1354,16 +1592,25 @@ Future<void> _openVideoViewer(BuildContext context, String url) async {
   );
 }
 
-List<_TextPart> _messageParts(String content, List<String> mentionLabels) {
+List<_TextPart> _messageParts(String content, List<ChatUser> mentionUsers) {
   if (content.isEmpty) return const [];
-  final labels = mentionLabels
-      .map((label) => label.trim())
-      .where((label) => label.length > 1)
-      .toSet()
-      .toList()
-    ..sort((a, b) => b.length.compareTo(a.length));
-  final lowerLabels =
-      labels.map((label) => (text: label, lower: label.toLowerCase())).toList();
+  final labels = <({String text, String lower, ChatUser? user})>[];
+  final seen = <String>{};
+
+  void addLabel(String value, ChatUser? user) {
+    final text = value.trim();
+    final lower = text.toLowerCase();
+    if (text.length <= 1 || !seen.add(lower)) return;
+    labels.add((text: text, lower: lower, user: user));
+  }
+
+  addLabel('@All', null);
+  for (final user in mentionUsers) {
+    addLabel('@${user.displayName}', user);
+    addLabel('@${user.fullname}', user);
+    addLabel('@${user.userid}', user);
+  }
+  labels.sort((a, b) => b.text.length.compareTo(a.text.length));
   final linkMatches = _linkPattern
       .allMatches(content)
       .map((match) => _TextRange(match.start, match.end, isLink: true))
@@ -1371,10 +1618,10 @@ List<_TextPart> _messageParts(String content, List<String> mentionLabels) {
   final ranges = <_TextRange>[...linkMatches];
   final lowerContent = content.toLowerCase();
   var cursor = 0;
-  while (cursor < content.length && lowerLabels.isNotEmpty) {
-    ({String text, String lower})? nextLabel;
+  while (cursor < content.length && labels.isNotEmpty) {
+    ({String text, String lower, ChatUser? user})? nextLabel;
     var nextIndex = -1;
-    for (final label in lowerLabels) {
+    for (final label in labels) {
       final index = lowerContent.indexOf(label.lower, cursor);
       if (index < 0 || _overlaps(index, index + label.text.length, ranges)) {
         continue;
@@ -1389,7 +1636,12 @@ List<_TextPart> _messageParts(String content, List<String> mentionLabels) {
     if (nextLabel == null) break;
     final end = nextIndex + nextLabel.text.length;
     if (_hasMentionBoundary(content, nextIndex, end)) {
-      ranges.add(_TextRange(nextIndex, end, isMention: true));
+      ranges.add(_TextRange(
+        nextIndex,
+        end,
+        isMention: true,
+        mentionUser: nextLabel.user,
+      ));
     }
     cursor = end;
   }
@@ -1407,6 +1659,7 @@ List<_TextPart> _messageParts(String content, List<String> mentionLabels) {
       content.substring(range.start, range.end),
       isLink: range.isLink,
       isMention: range.isMention,
+      mentionUser: range.mentionUser,
     ));
     index = range.end;
   }
@@ -1433,20 +1686,23 @@ final _linkPattern = RegExp(
 
 class _TextRange {
   const _TextRange(this.start, this.end,
-      {this.isLink = false, this.isMention = false});
+      {this.isLink = false, this.isMention = false, this.mentionUser});
 
   final int start;
   final int end;
   final bool isLink;
   final bool isMention;
+  final ChatUser? mentionUser;
 }
 
 class _TextPart {
-  const _TextPart(this.text, {this.isLink = false, this.isMention = false});
+  const _TextPart(this.text,
+      {this.isLink = false, this.isMention = false, this.mentionUser});
 
   final String text;
   final bool isLink;
   final bool isMention;
+  final ChatUser? mentionUser;
 }
 
 String _fileExt(ChatAttachment attachment) {
@@ -1470,6 +1726,19 @@ IconData _fileIcon(ChatAttachment attachment) {
   return Icons.insert_drive_file_outlined;
 }
 
+Color _fileAccent(ChatAttachment attachment) {
+  final ext = _fileExt(attachment);
+  if (['doc', 'docx'].contains(ext)) return const Color(0xff2563eb);
+  if (['xls', 'xlsx', 'csv'].contains(ext)) return const Color(0xff16a34a);
+  if (['ppt', 'pptx'].contains(ext)) return const Color(0xffea580c);
+  if (ext == 'pdf') return const Color(0xffdc2626);
+  if (['zip', 'rar', '7z', 'tar', 'gz'].contains(ext)) {
+    return const Color(0xff7c3aed);
+  }
+  if (['txt', 'md', 'rtf'].contains(ext)) return const Color(0xff475569);
+  return AppColors.brand;
+}
+
 String _formatBytes(int bytes) {
   if (bytes < 1024) return '$bytes B';
   if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
@@ -1484,6 +1753,7 @@ String _formatDuration(Duration duration) {
 }
 
 String _referencePreview(BuildContext context, ChatMessageReference reference) {
+  if (reference.type == 'call') return context.l10n.t('voiceCall');
   if (reference.content.trim().isNotEmpty) return reference.content.trim();
   if (reference.type == 'voice') return context.l10n.t('voicePreview');
   if (reference.type == 'file') return context.l10n.t('attachmentPreview');

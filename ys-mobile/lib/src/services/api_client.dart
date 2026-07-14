@@ -112,6 +112,20 @@ class ApiClient {
         .toList();
   }
 
+  Future<ChatConversation> updateConversationMemberNickname(
+    int conversationId,
+    String userid,
+    String nickname,
+  ) async {
+    final response = await _dio.put(
+      '/chat/conversations/$conversationId/members/${Uri.encodeComponent(userid)}/nickname',
+      data: {'nickname': nickname},
+    );
+    return ChatConversation.fromJson(
+      Map<String, dynamic>.from(response.data['conversation'] as Map),
+    );
+  }
+
   Future<ChatMessagePage> messages(int conversationId,
       {int limit = 50, int beforeId = 0}) async {
     final response = await _dio.get(
@@ -214,10 +228,38 @@ class ApiClient {
     return _maps(response.data['contacts']).map(ChatUser.fromJson).toList();
   }
 
+  Future<ChatUser> addContact(String userid) async {
+    final response = await _dio.post('/chat/contacts', data: {
+      'userid': userid,
+    });
+    return ChatUser.fromJson(
+        Map<String, dynamic>.from(response.data['contact'] as Map));
+  }
+
+  Future<ChatUser> updateContactNickname(String userid, String nickname) async {
+    final response = await _dio.put(
+      '/chat/contacts/${Uri.encodeComponent(userid)}/nickname',
+      data: {'nickname': nickname},
+    );
+    return ChatUser.fromJson(
+      Map<String, dynamic>.from(response.data['contact'] as Map),
+    );
+  }
+
   Future<List<ChatUser>> searchUsers(String keyword) async {
     final response =
         await _dio.get('/chat/users', queryParameters: {'keyword': keyword});
     return _maps(response.data['users']).map(ChatUser.fromJson).toList();
+  }
+
+  Future<ChatSearchResults> searchChat(String keyword, String scope) async {
+    final response = await _dio.get(
+      '/chat/search',
+      queryParameters: {'keyword': keyword, 'scope': scope},
+    );
+    return ChatSearchResults.fromJson(
+      Map<String, dynamic>.from(response.data['results'] as Map),
+    );
   }
 
   Future<ChatConversation> createDirectConversation(String userid) async {
@@ -227,9 +269,55 @@ class ApiClient {
         Map<String, dynamic>.from(response.data['conversation'] as Map));
   }
 
-  Future<void> registerDeviceToken(String token, String platform) async {
-    await _dio
-        .post('/chat/devices', data: {'token': token, 'platform': platform});
+  Future<ChatConversation> createGroupConversation(
+    String name,
+    List<String> memberUserids,
+  ) async {
+    final response = await _dio.post('/chat/conversations/group', data: {
+      'name': name,
+      'memberUserids': memberUserids,
+    });
+    return ChatConversation.fromJson(
+      Map<String, dynamic>.from(response.data['conversation'] as Map),
+    );
+  }
+
+  Future<void> registerDeviceToken({
+    required String token,
+    required String platform,
+    required String deviceId,
+  }) async {
+    await _dio.post('/chat/devices', data: {
+      'token': token,
+      'platform': platform,
+      'deviceId': deviceId,
+    });
+  }
+
+  Future<void> unregisterDeviceToken({
+    required String deviceId,
+    String token = '',
+  }) async {
+    await _dio.delete('/chat/devices', data: {
+      'token': token,
+      'deviceId': deviceId,
+    });
+  }
+
+  Future<void> sendCallControlEvent({
+    required String type,
+    required int conversationId,
+    required String callId,
+    required String deviceId,
+    String token = '',
+  }) async {
+    await _dio.post('/chat/calls/events', data: {
+      'type': type,
+      'conversationId': conversationId,
+      'callId': callId,
+      'deviceId': deviceId,
+      if (token.isNotEmpty) 'token': token,
+    });
   }
 
   String absoluteUrl(String maybeRelativeUrl) {

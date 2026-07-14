@@ -12,6 +12,15 @@ $mobileRoot = Resolve-Path (Join-Path $scriptRoot "..")
 $repoRoot = Resolve-Path (Join-Path $mobileRoot "..")
 $webDownloadsDir = Join-Path $repoRoot "ys-web\public\downloads"
 $targetApk = Join-Path $webDownloadsDir "YSChat.apk"
+$googleServicesConfig = Join-Path $mobileRoot "android\app\google-services.json"
+
+if (-not (Test-Path -LiteralPath $googleServicesConfig)) {
+    Write-Warning @"
+Firebase Android config is missing: $googleServicesConfig
+The APK can be built, but background messages and incoming calls will not work
+until google-services.json for applicationId com.tythac.ys_mobile is added.
+"@
+}
 
 function Remove-StaleFlutterDirectory {
     param(
@@ -44,6 +53,30 @@ function Remove-StaleFlutterDirectory {
             }
             Start-Sleep -Milliseconds 500
         }
+    }
+}
+
+function Clear-FlutterBuildReadOnlyAttributes {
+    $buildRoot = Join-Path $mobileRoot "build"
+    if (-not (Test-Path -LiteralPath $buildRoot)) {
+        return
+    }
+
+    $resolvedBuildRoot = Resolve-Path -LiteralPath $buildRoot
+    if (-not $resolvedBuildRoot.Path.StartsWith($mobileRoot.Path, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to modify attributes outside mobile project: $($resolvedBuildRoot.Path)"
+    }
+
+    Write-Host "Preparing existing Flutter build cache..."
+    Get-ChildItem -LiteralPath $resolvedBuildRoot.Path -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        if (($_.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+            $_.Attributes = $_.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+        }
+    }
+
+    $rootItem = Get-Item -LiteralPath $resolvedBuildRoot.Path -Force
+    if (($rootItem.Attributes -band [System.IO.FileAttributes]::ReadOnly) -ne 0) {
+        $rootItem.Attributes = $rootItem.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
     }
 }
 
@@ -104,15 +137,16 @@ Push-Location $mobileRoot
 try {
     Stop-GradleDaemon
     Stop-BuildJavaDaemons
+    Clear-FlutterBuildReadOnlyAttributes
     Remove-StaleFlutterDirectory "ios\Flutter\ephemeral\Packages\.packages"
     Remove-StaleFlutterDirectory "build\unit_test_assets"
     Remove-StaleFlutterDirectory "build\app"
 
     if ($DebugBuild) {
-        Invoke-FlutterBuild -Arguments @("build", "apk", "--debug", "--target-platform", "android-arm64,android-x64", "--dart-define=YS_API_URL=$ApiUrl")
+        Invoke-FlutterBuild -Arguments @("build", "apk", "--debug", "--no-android-gradle-daemon", "--target-platform", "android-arm64,android-x64", "--dart-define=YS_API_URL=$ApiUrl")
         $sourceApk = Join-Path $mobileRoot "build\app\outputs\flutter-apk\app-debug.apk"
     } else {
-        Invoke-FlutterBuild -Arguments @("build", "apk", "--release", "--target-platform", "android-arm64,android-x64", "--dart-define=YS_API_URL=$ApiUrl")
+        Invoke-FlutterBuild -Arguments @("build", "apk", "--release", "--no-android-gradle-daemon", "--target-platform", "android-arm64,android-x64", "--dart-define=YS_API_URL=$ApiUrl")
         $sourceApk = Join-Path $mobileRoot "build\app\outputs\flutter-apk\app-release.apk"
     }
 
@@ -128,5 +162,7 @@ try {
     Write-Host ("Size: {0:N2} MB" -f ($apk.Length / 1MB))
     Write-Host "Web download URL: /downloads/YSChat.apk"
 } finally {
+    Stop-GradleDaemon
+    Stop-BuildJavaDaemons
     Pop-Location
 }

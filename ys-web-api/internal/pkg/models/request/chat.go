@@ -26,9 +26,27 @@ type AddContactRequest struct {
 	Userid string `json:"userid" binding:"required"`
 }
 
+type UpdateContactNicknameRequest struct {
+	Nickname string `json:"nickname"`
+}
+
 type RegisterDeviceTokenRequest struct {
 	Token    string `json:"token" binding:"required"`
 	Platform string `json:"platform"`
+	DeviceID string `json:"deviceId" binding:"required"`
+}
+
+type UnregisterDeviceTokenRequest struct {
+	Token    string `json:"token"`
+	DeviceID string `json:"deviceId" binding:"required"`
+}
+
+type SendCallEventRequest struct {
+	Type           string `json:"type" binding:"required"`
+	ConversationID uint64 `json:"conversationId" binding:"required"`
+	CallID         string `json:"callId" binding:"required"`
+	DeviceID       string `json:"deviceId" binding:"required"`
+	Token          string `json:"token"`
 }
 
 type SendChatMessageRequest struct {

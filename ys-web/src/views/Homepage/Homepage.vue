@@ -197,6 +197,43 @@
       <div v-if="panelMode !== 'contacts' && hasSearchKeyword" class="search-results">
         <div v-if="searchingChat" class="list-state compact">{{ homeT("search.searching") }}</div>
 
+        <section v-if="shouldShowSearchSection('contacts') && chatSearchUserResult" class="result-section">
+          <div class="result-title">{{ homeT("search.contacts") }}</div>
+          <div class="user-result">
+            <div class="avatar-presence-wrap">
+              <el-avatar :size="40" :src="chatSearchUserResult.avatar || undefined">
+                {{ initials(displayName(chatSearchUserResult)) }}
+              </el-avatar>
+              <span
+                v-if="shouldShowPresence(chatSearchUserResult)"
+                class="presence-dot"
+                :class="{ online: isUserOnline(chatSearchUserResult) }"
+                :title="presenceLabel(chatSearchUserResult)"
+              ></span>
+            </div>
+            <div class="user-result-main">
+              <strong>{{ displayName(chatSearchUserResult) }}</strong>
+              <span>{{ chatSearchUserResult.userid }}</span>
+            </div>
+            <button
+              v-if="chatSearchUserResult.isContact"
+              class="result-action ghost"
+              type="button"
+              @click="startDirectChat(chatSearchUserResult.userid)"
+            >
+              {{ homeT("actions.message") }}
+            </button>
+            <button
+              v-else
+              class="result-action"
+              type="button"
+              @click="addContactFromSearchUser(chatSearchUserResult)"
+            >
+              {{ homeT("actions.add") }}
+            </button>
+          </div>
+        </section>
+
         <section v-if="shouldShowSearchSection('contacts') && visibleFilteredConversations.length" class="result-section">
           <div class="result-title">{{ homeT("search.conversations") }}</div>
           <button
@@ -595,13 +632,35 @@
                 <Phone :size="20" />
               </button>
             </el-tooltip>
+            <el-tooltip
+              v-if="activeConversation.type === 'direct' && directConversationPeer(activeConversation) && !isContactUser(directConversationPeer(activeConversation).userid)"
+              :content="homeT('actions.addContact')"
+              placement="bottom"
+            >
+              <button class="icon-button" type="button" @click="addActiveConversationContact">
+                <UserPlus :size="20" />
+              </button>
+            </el-tooltip>
+            <el-tooltip
+              v-if="activeConversation.type === 'direct' && directConversationPeer(activeConversation) && isContactUser(directConversationPeer(activeConversation).userid)"
+              :content="homeT('info.setNickname')"
+              placement="bottom"
+            >
+              <button
+                class="icon-button"
+                type="button"
+                @click="openNicknameDialog(directConversationPeer(activeConversation), 'contact')"
+              >
+                <Pencil :size="19" />
+              </button>
+            </el-tooltip>
             <el-tooltip v-if="activeConversation.type === 'group'" :content="homeT('chat.addMember')" placement="bottom">
               <button class="icon-button" type="button" @click="openAddMemberDialog">
                 <UserPlus :size="20" />
               </button>
             </el-tooltip>
             <el-tooltip :content="homeT('chat.info')" placement="bottom">
-              <button class="icon-button" type="button" @click="infoPanelOpen = true">
+              <button class="icon-button" type="button" @click="openInfoPanel">
                 <Info :size="20" />
               </button>
             </el-tooltip>
@@ -651,7 +710,13 @@
               'pinned-message': isPinnedMessage(message),
             }"
           >
-            <div v-if="!isOwnMessage(message) && !isCenteredMessage(message)" class="avatar-presence-wrap message-avatar-wrap">
+            <button
+              v-if="!isOwnMessage(message) && !isCenteredMessage(message)"
+              class="avatar-presence-wrap message-avatar-wrap message-profile-trigger"
+              type="button"
+              :title="homeT('profile.title')"
+              @click="openMessageSenderProfile(message)"
+            >
               <el-avatar :size="32" :src="message.senderAvatar || undefined">
                 {{ initials(message.senderName) }}
               </el-avatar>
@@ -660,15 +725,17 @@
                 :class="{ online: isUserOnline(presenceUserByUserid(message.senderUserid)) }"
                 :title="presenceLabel(presenceUserByUserid(message.senderUserid))"
               ></span>
-            </div>
+            </button>
 
             <div class="message-stack">
-              <span
+              <button
                 v-if="activeConversation.type === 'group' && !isOwnMessage(message) && !isCenteredMessage(message)"
                 class="sender-name"
+                type="button"
+                @click="openMessageSenderProfile(message)"
               >
                 {{ message.senderName }}
-              </span>
+              </button>
 
               <div class="message-content-row">
                 <div class="message-bubble" :class="message.type">
@@ -689,6 +756,29 @@
 
                 <div v-if="message.type === 'system'" class="system-notice">
                   {{ message.content }}
+                </div>
+
+                <div
+                  v-else-if="message.type === 'call'"
+                  class="call-message-card"
+                  :class="{
+                    missed: callMessageInfo(message).status === 'missed',
+                    incoming: callMessageDirection(message) === 'incoming',
+                    outgoing: callMessageDirection(message) === 'outgoing',
+                  }"
+                >
+                  <span class="call-message-icon">
+                    <component :is="callMessageIcon(message)" :size="19" />
+                  </span>
+                  <span class="call-message-copy">
+                    <strong>{{ callMessageTitle(message) }}</strong>
+                    <small>
+                      {{ callMessageStatus(message) }}
+                      <template v-if="callMessageInfo(message).duration > 0">
+                        · {{ formatDuration(callMessageInfo(message).duration) }}
+                      </template>
+                    </small>
+                  </span>
                 </div>
 
                 <a
@@ -779,13 +869,20 @@
                 </div>
 
                 <p v-else-if="message.content" class="message-text">
-                  <span
+                  <template
                     v-for="(part, index) in messageTextParts(message.content)"
                     :key="`${message.id}-${index}`"
-                    :class="{ mention: part.isMention }"
                   >
-                    {{ part.text }}
-                  </span>
+                    <button
+                      v-if="part.isMention && part.member"
+                      class="mention mention-button"
+                      type="button"
+                      @click="openMemberProfile(part.member)"
+                    >
+                      {{ part.text }}
+                    </button>
+                    <span v-else :class="{ mention: part.isMention }">{{ part.text }}</span>
+                  </template>
                 </p>
 
                 <div
@@ -1104,6 +1201,9 @@
       <button class="info-panel-close" type="button" :aria-label="homeT('chat.closeInfo')" @click="infoPanelOpen = false">
         <X :size="18" />
       </button>
+      <div v-if="loadingInfoPanelHistory" class="message-history-loader info-history-loader">
+        {{ homeT("chat.loadingOlderMessages") }}
+      </div>
       <template v-if="infoPanelView === 'storage'">
         <section class="storage-view">
           <header class="storage-header">
@@ -1260,10 +1360,13 @@
           type="file"
           @change="handleGroupImageSelected($event, 'background')"
         />
-        <span>{{ activeConversation.memberCount }} {{ homeT("chat.members") }}</span>
+        <span v-if="activeConversation.type === 'group'">
+          {{ activeConversation.memberCount }} {{ homeT("chat.members") }}
+        </span>
+        <span v-else>{{ directConversationPeer(activeConversation)?.userid }}</span>
       </div>
 
-      <section class="info-section">
+      <section v-if="activeConversation.type === 'group'" class="info-section">
         <div class="section-title">
           <h4>{{ homeT("info.groupMembers") }}</h4>
           <button v-if="activeConversation.type === 'group'" type="button" @click="openAddMemberDialog">
@@ -1279,8 +1382,17 @@
           <Users :size="20" />
           <strong>{{ activeConversation.memberCount }} {{ homeT("chat.members") }}</strong>
         </button>
-        <div v-if="activeConversation.type !== 'group' || membersExpanded" class="member-list">
-          <div v-for="member in activeConversation.members" :key="member.userid" class="member-item">
+        <div v-if="membersExpanded" class="member-list">
+          <div
+            v-for="member in activeConversation.members"
+            :key="member.userid"
+            class="member-item"
+            role="button"
+            tabindex="0"
+            @click="openMemberProfile(member)"
+            @keydown.enter="openMemberProfile(member)"
+            @keydown.space.prevent="openMemberProfile(member)"
+          >
             <div class="avatar-presence-wrap">
               <el-avatar :size="32" :src="member.avatar || undefined">
                 {{ initials(displayName(member)) }}
@@ -1308,7 +1420,7 @@
                 class="member-action-button"
                 type="button"
                 :aria-label="homeT('info.setNicknameFor', { name: member.fullname || member.userid })"
-                @click="openNicknameDialog(member)"
+                @click.stop="openNicknameDialog(member)"
               >
                 <Pencil :size="15" />
               </button>
@@ -1322,7 +1434,7 @@
                 class="member-action-button danger"
                 type="button"
                 :aria-label="homeT('info.removeMemberFromGroup', { name: member.fullname || member.userid })"
-                @click="removeMemberFromGroup(member)"
+                @click.stop="removeMemberFromGroup(member)"
               >
                 <Trash2 :size="15" />
               </button>
@@ -1519,6 +1631,56 @@
           <button class="password-open-button" type="button" @click="openPasswordDialog">
             <KeyRound :size="17" />
             <span>{{ homeT("profile.changePassword") }}</span>
+          </button>
+        </div>
+      </div>
+    </el-dialog>
+
+    <el-dialog
+      v-model="memberProfileDialogVisible"
+      :title="homeT('profile.title')"
+      width="380px"
+      class="chat-dialog"
+    >
+      <div v-if="memberProfileTarget" class="member-profile-card">
+        <el-avatar :size="82" :src="memberProfileTarget.avatar || undefined">
+          {{ initials(displayName(memberProfileTarget)) }}
+        </el-avatar>
+        <strong>{{ displayName(memberProfileTarget) }}</strong>
+        <span>{{ memberProfileTarget.userid }}</span>
+        <small
+          class="member-profile-presence"
+          :class="{ online: isUserOnline(memberProfileTarget) }"
+        >
+          {{ presenceLabel(memberProfileTarget) }}
+        </small>
+        <div class="member-profile-actions">
+          <button
+            v-if="!useridsMatch(memberProfileTarget.userid, currentUserid) && !isContactUser(memberProfileTarget.userid)"
+            class="dialog-button primary"
+            type="button"
+            @click="addContactFromMemberProfile"
+          >
+            <UserPlus :size="16" />
+            {{ homeT("actions.addContact") }}
+          </button>
+          <button
+            v-if="!useridsMatch(memberProfileTarget.userid, currentUserid)"
+            class="dialog-button ghost"
+            type="button"
+            @click="startPrivateChatFromMemberProfile"
+          >
+            <MessageCircle :size="16" />
+            {{ homeT("actions.message") }}
+          </button>
+          <button
+            v-if="!useridsMatch(memberProfileTarget.userid, currentUserid) && (activeConversation?.type === 'group' || isContactUser(memberProfileTarget.userid))"
+            class="dialog-button ghost"
+            type="button"
+            @click="openNicknameFromMemberProfile"
+          >
+            <Pencil :size="16" />
+            {{ homeT("info.setNickname") }}
           </button>
         </div>
       </div>
@@ -1893,7 +2055,10 @@ import {
   Pin,
   Phone,
   PhoneCall,
+  PhoneIncoming,
+  PhoneMissed,
   PhoneOff,
+  PhoneOutgoing,
   Plus,
   Presentation,
   Reply,
@@ -1942,6 +2107,7 @@ const loadingConversations = ref(false);
 const loadingContacts = ref(false);
 const loadingMessages = ref(false);
 const loadingOlderMessages = ref(false);
+const loadingInfoPanelHistory = ref(false);
 const messagesHasMore = ref(false);
 const sending = ref(false);
 const uploading = ref(false);
@@ -1951,6 +2117,7 @@ const searchKeyword = ref("");
 const searchScope = ref("all");
 const contactSearchKeyword = ref("");
 const chatSearchResults = ref({ contacts: [], messages: [], files: [] });
+const chatSearchUserResult = ref(null);
 const searchingChat = ref(false);
 const conversationSearchKeyword = ref("");
 const conversationSearchIndex = ref(0);
@@ -1990,11 +2157,14 @@ const addMemberUserids = ref([]);
 const nicknameDialogVisible = ref(false);
 const nicknameTarget = ref(null);
 const nicknameValue = ref("");
+const nicknameScope = ref("group");
 const contactDialogVisible = ref(false);
 const contactUserid = ref("");
 const contactLookupUsers = ref([]);
 const contactLookupLoading = ref(false);
 const profileDialogVisible = ref(false);
+const memberProfileDialogVisible = ref(false);
+const memberProfileTarget = ref(null);
 const passwordDialogVisible = ref(false);
 const infoPanelOpen = ref(false);
 const infoPanelView = ref("details");
@@ -2147,6 +2317,7 @@ const hasVisibleSearchResults = computed(() => {
     if (searchScope.value !== "all") return filteredConversations.value.length > 0 || chatSearchContacts.value.length > 0;
     return true;
   }
+  if (shouldShowSearchSection("contacts") && chatSearchUserResult.value) return true;
   if (shouldShowSearchSection("messages") && chatSearchMessages.value.length) return true;
   if (shouldShowSearchSection("files") && chatSearchFiles.value.length) return true;
   return false;
@@ -2391,6 +2562,7 @@ watch([searchKeyword, searchScope], ([value, scope]) => {
   if (!keyword) {
     searchRequestId += 1;
     chatSearchResults.value = { contacts: [], messages: [], files: [] };
+    chatSearchUserResult.value = null;
     searchingChat.value = false;
     if (scope !== "all") searchScope.value = "all";
     return;
@@ -3249,6 +3421,7 @@ const clearPanelSearch = () => {
   searchKeyword.value = "";
   searchScope.value = "all";
   chatSearchResults.value = { contacts: [], messages: [], files: [] };
+  chatSearchUserResult.value = null;
 };
 
 const clearConversationSearch = () => {
@@ -3282,6 +3455,7 @@ const isConversationSearchMatch = (messageId) =>
   conversationSearchMatches.value.some((message) => message.id === messageId);
 
 const messageMatchesKeyword = (message = {}, keyword) => {
+  if (message.type === "call" || message.type === "system") return false;
   const text = normalizeDirectoryText(`${message.senderName} ${message.content}`);
   if (text.includes(keyword)) return true;
   return (message.attachments || []).some((attachment) =>
@@ -3309,9 +3483,13 @@ const withContactState = (user) => ({
 });
 
 const sortUsers = (users) =>
-  [...users].sort((first, second) =>
-    (first.fullname || first.userid || "").localeCompare(second.fullname || second.userid || "", sortLocale.value),
-  );
+  [...users].sort((first, second) => {
+    const firstName = (first.nickname || first.fullname || "").trim() || first.userid || "";
+    const secondName = (second.nickname || second.fullname || "").trim() || second.userid || "";
+    const byName = firstName.localeCompare(secondName, sortLocale.value);
+    if (byName !== 0) return byName;
+    return String(first.userid || "").localeCompare(String(second.userid || ""), sortLocale.value);
+  });
 
 const loadContacts = async () => {
   try {
@@ -3333,14 +3511,21 @@ const loadContacts = async () => {
 const searchChatRealtime = async (keyword, scope) => {
   const requestId = ++searchRequestId;
   try {
-    const res = await chatApi.searchChat(keyword, scope);
+    const [res, userRes] = await Promise.all([
+      chatApi.searchChat(keyword, scope),
+      chatApi.searchUsers(keyword),
+    ]);
     if (requestId !== searchRequestId || keyword !== searchKeyword.value.trim() || scope !== searchScope.value) return;
     const results = res.data?.results || {};
+    const exactUser = (userRes.data?.users || []).find((user) =>
+      useridsMatch(user.userid, keyword),
+    );
     chatSearchResults.value = {
       contacts: (results.contacts || []).map(withContactState),
       messages: results.messages || [],
       files: results.files || [],
     };
+    chatSearchUserResult.value = exactUser ? withContactState(exactUser) : null;
   } catch (error) {
     if (requestId === searchRequestId) showApiError(error);
   } finally {
@@ -3353,7 +3538,10 @@ const searchContactLookup = async (keyword) => {
   try {
     const res = await chatApi.searchUsers(keyword);
     if (requestId !== contactLookupRequestId || keyword !== contactUserid.value.trim()) return;
-    contactLookupUsers.value = (res.data?.users || []).map(withContactState).slice(0, 5);
+    const exactUser = (res.data?.users || []).find((user) =>
+      useridsMatch(user.userid, keyword),
+    );
+    contactLookupUsers.value = exactUser ? [withContactState(exactUser)] : [];
   } catch (error) {
     if (requestId === contactLookupRequestId) showApiError(error);
   } finally {
@@ -3383,7 +3571,14 @@ const upsertContact = (contact) => {
   );
 };
 
-const addContactByUserid = async (userid) => {
+const findExactUserByUserid = async (userid) => {
+  const query = String(userid || "").trim();
+  if (!query) return null;
+  const res = await chatApi.searchUsers(query);
+  return (res.data?.users || []).find((user) => useridsMatch(user.userid, query)) || null;
+};
+
+const addContactByUserid = async (userid, verifiedUser = null) => {
   const contactUseridValue = String(userid || "").trim();
   if (!contactUseridValue) {
     ElMessage.warning(homeT("messages.enterUserid"));
@@ -3394,7 +3589,15 @@ const addContactByUserid = async (userid) => {
     return null;
   }
 
-  const res = await chatApi.addContact(contactUseridValue);
+  const user = verifiedUser && useridsMatch(verifiedUser.userid, contactUseridValue)
+    ? verifiedUser
+    : await findExactUserByUserid(contactUseridValue);
+  if (!user) {
+    ElMessage.warning(homeT("search.noResults"));
+    return null;
+  }
+
+  const res = await chatApi.addContact(user.userid);
   const contact = res.data?.contact;
   upsertContact(contact);
   ElMessage.success(homeT("messages.contactAdded"));
@@ -3403,7 +3606,24 @@ const addContactByUserid = async (userid) => {
 
 const addContactFromUser = async (user) => {
   try {
-    await addContactByUserid(user.userid);
+    await addContactByUserid(user.userid, user);
+  } catch (error) {
+    showApiError(error);
+  }
+};
+
+const addContactFromSearchUser = async (user) => {
+  await addContactFromUser(user);
+  if (user?.userid && isContactUser(user.userid)) {
+    chatSearchUserResult.value = withContactState(user);
+  }
+};
+
+const addActiveConversationContact = async () => {
+  const peer = directConversationPeer(activeConversation.value);
+  if (!peer?.userid) return;
+  try {
+    await addContactByUserid(peer.userid, peer);
   } catch (error) {
     showApiError(error);
   }
@@ -3450,6 +3670,45 @@ const openProfileDialog = async () => {
   passwordForm.value = { currentPassword: "", newPassword: "", confirmPassword: "" };
   passwordDialogVisible.value = false;
   await loadProfile();
+};
+
+const openMemberProfile = (member) => {
+  if (!member?.userid) return;
+  memberProfileTarget.value = member;
+  memberProfileDialogVisible.value = true;
+};
+
+const openMessageSenderProfile = (message) => {
+  if (!message?.senderUserid) return;
+  const member = (activeConversation.value?.members || []).find((item) =>
+    useridsMatch(item.userid, message.senderUserid),
+  );
+  if (member) openMemberProfile(member);
+};
+
+const addContactFromMemberProfile = async () => {
+  const member = memberProfileTarget.value;
+  if (!member?.userid) return;
+  try {
+    const contact = await addContactByUserid(member.userid, member);
+    if (contact) {
+      memberProfileTarget.value = {
+        ...member,
+        ...contact,
+        nickname: activeConversation.value?.type === "group" ? member.nickname : contact.nickname,
+        isContact: true,
+      };
+    }
+  } catch (error) {
+    showApiError(error);
+  }
+};
+
+const startPrivateChatFromMemberProfile = async () => {
+  const userid = memberProfileTarget.value?.userid;
+  if (!userid) return;
+  memberProfileDialogVisible.value = false;
+  await startDirectChat(userid);
 };
 
 const openPasswordDialog = () => {
@@ -3680,6 +3939,27 @@ const loadOlderMessages = async () => {
   }
 };
 
+const openInfoPanel = async () => {
+  infoPanelOpen.value = true;
+  if (loadingInfoPanelHistory.value || !messagesHasMore.value) return;
+
+  const conversationId = activeConversationId.value;
+  loadingInfoPanelHistory.value = true;
+  try {
+    while (conversationId === activeConversationId.value && messagesHasMore.value) {
+      if (loadingOlderMessages.value) {
+        await new Promise((resolve) => window.setTimeout(resolve, 60));
+        continue;
+      }
+      const previousCount = messages.value.length;
+      await loadOlderMessages();
+      if (messages.value.length === previousCount && messagesHasMore.value) break;
+    }
+  } finally {
+    loadingInfoPanelHistory.value = false;
+  }
+};
+
 const handleMessageListScroll = () => {
   const listEl = messageListRef.value;
   if (!listEl || listEl.scrollTop > 80) return;
@@ -3842,28 +4122,51 @@ const removeMemberFromGroup = async (member) => {
   }
 };
 
-const openNicknameDialog = (member) => {
-  if (!activeConversationId.value || !member?.userid) return;
+const openNicknameDialog = (member, scope = "") => {
+  if (!member?.userid) return;
+  const resolvedScope = scope || (activeConversation.value?.type === "group" ? "group" : "contact");
+  if (resolvedScope === "group" && !activeConversationId.value) return;
+  if (resolvedScope === "contact" && !isContactUser(member.userid)) return;
+  nicknameScope.value = resolvedScope;
   nicknameTarget.value = member;
   nicknameValue.value = member.nickname || "";
   nicknameDialogVisible.value = true;
 };
 
+const openNicknameFromMemberProfile = async () => {
+  const member = memberProfileTarget.value;
+  if (!member?.userid) return;
+  const scope = activeConversation.value?.type === "group" ? "group" : "contact";
+  memberProfileDialogVisible.value = false;
+  await nextTick();
+  openNicknameDialog(member, scope);
+};
+
 const submitNickname = async () => {
-  if (!activeConversationId.value || !nicknameTarget.value?.userid) return;
+  if (!nicknameTarget.value?.userid) return;
 
   try {
-    await chatApi.updateConversationMemberNickname(
-      activeConversationId.value,
-      nicknameTarget.value.userid,
-      nicknameValue.value,
-    );
+    const targetUserid = nicknameTarget.value.userid;
+    if (nicknameScope.value === "contact") {
+      const res = await chatApi.updateContactNickname(targetUserid, nicknameValue.value);
+      upsertContact(res.data?.contact);
+    } else {
+      if (!activeConversationId.value) return;
+      await chatApi.updateConversationMemberNickname(
+        activeConversationId.value,
+        targetUserid,
+        nicknameValue.value,
+      );
+    }
     nicknameDialogVisible.value = false;
     const conversationId = activeConversationId.value;
     await loadConversations(false);
     if (conversationId) {
       await loadMessages(conversationId, false);
     }
+    memberProfileTarget.value = memberProfileTarget.value?.userid === targetUserid
+      ? { ...memberProfileTarget.value, nickname: nicknameValue.value }
+      : memberProfileTarget.value;
     ElMessage.success(nicknameValue.value ? homeT("messages.nicknameSaved") : homeT("messages.nicknameRemoved"));
   } catch (error) {
     showApiError(error);
@@ -4635,6 +4938,7 @@ const cloneAttachments = (attachments = []) =>
   }));
 
 const copyableMessageText = (message = {}) => {
+  if (message.type === "call") return callMessageTitle(message);
   const content = String(message.content || "").trim();
   if (content) return content;
 
@@ -4648,9 +4952,76 @@ const copyableMessageText = (message = {}) => {
   return attachmentText || messageReferencePreview(message);
 };
 
+const callMessageInfo = (message = {}) => {
+  let parsed = {};
+  try {
+    const content = String(message.content || "").trim();
+    if (content.startsWith("{")) parsed = JSON.parse(content);
+  } catch (_) {
+    parsed = {};
+  }
+
+  const duration = Number(parsed.duration);
+  return {
+    status: parsed.status === "missed" ? "missed" : "completed",
+    duration: Number.isFinite(duration) && duration > 0 ? Math.floor(duration) : 0,
+  };
+};
+
+const callMessageDirection = (message = {}) =>
+  useridsMatch(message.senderUserid, currentUserid) ? "outgoing" : "incoming";
+
+const callMessageCopy = (key) => {
+  const labels = {
+    vi: {
+      incoming: "Cu\u1ed9c g\u1ecd\u0069 \u0111\u1ebfn",
+      outgoing: "Cu\u1ed9c g\u1ecd\u0069 \u0111\u0069",
+      missed: "Cu\u1ed9c g\u1ecd\u0069 nh\u1ee1",
+      completed: "\u0110\u00e3 k\u1ebft th\u00fac",
+      notAnswered: "Kh\u00f4ng tr\u1ea3 l\u1eddi",
+      call: "Cu\u1ed9c g\u1ecd\u0069",
+    },
+    en: {
+      incoming: "Incoming call",
+      outgoing: "Outgoing call",
+      missed: "Missed call",
+      completed: "Ended",
+      notAnswered: "Not answered",
+      call: "Call",
+    },
+    cn: {
+      incoming: "\u6765\u7535",
+      outgoing: "\u62e8\u51fa\u7535\u8bdd",
+      missed: "\u672a\u63a5\u6765\u7535",
+      completed: "\u5df2\u7ed3\u675f",
+      notAnswered: "\u65e0\u4eba\u63a5\u542c",
+      call: "\u7535\u8bdd",
+    },
+  };
+  return labels[locale.value]?.[key] || labels.en[key] || labels.en.call;
+};
+
+const callMessageTitle = (message = {}) => {
+  const info = callMessageInfo(message);
+  if (info.status === "missed") return callMessageCopy("missed");
+  return callMessageCopy(callMessageDirection(message));
+};
+
+const callMessageStatus = (message = {}) => {
+  const info = callMessageInfo(message);
+  return info.status === "missed" ? callMessageCopy("notAnswered") : callMessageCopy("completed");
+};
+
+const callMessageIcon = (message = {}) => {
+  const info = callMessageInfo(message);
+  if (info.status === "missed") return PhoneMissed;
+  return callMessageDirection(message) === "incoming" ? PhoneIncoming : PhoneOutgoing;
+};
+
 const messageReferencePreview = (message = {}) => {
   if (message.type === "system") return message.content || homeT("previews.system");
   if (message.type === "poll") return message.content || homeT("previews.poll");
+  if (message.type === "call") return callMessageTitle(message);
   if (message.content) return message.content;
   if (message.type === "voice") return homeT("previews.voice");
   if (message.type === "folder") return homeT("previews.folderAttachment");
@@ -4661,7 +5032,7 @@ const messageReferencePreview = (message = {}) => {
 
 const messageTextParts = (content = "") => {
   const labels = mentionLabels();
-  if (!content || !labels.length) return [{ text: content, isMention: false }];
+  if (!content || !labels.length) return [{ text: content, isMention: false, member: null }];
 
   const parts = [];
   const lowerContent = content.toLowerCase();
@@ -4670,7 +5041,7 @@ const messageTextParts = (content = "") => {
   while (cursor < content.length) {
     let nextMatch = null;
     for (const label of labels) {
-      const index = lowerContent.indexOf(label.lower, cursor);
+      const index = findMentionIndex(content, lowerContent, label, cursor);
       if (index < 0) continue;
       if (!nextMatch || index < nextMatch.index || (index === nextMatch.index && label.text.length > nextMatch.text.length)) {
         nextMatch = { ...label, index };
@@ -4678,16 +5049,17 @@ const messageTextParts = (content = "") => {
     }
 
     if (!nextMatch) {
-      parts.push({ text: content.slice(cursor), isMention: false });
+      parts.push({ text: content.slice(cursor), isMention: false, member: null });
       break;
     }
 
     if (nextMatch.index > cursor) {
-      parts.push({ text: content.slice(cursor, nextMatch.index), isMention: false });
+      parts.push({ text: content.slice(cursor, nextMatch.index), isMention: false, member: null });
     }
     parts.push({
       text: content.slice(nextMatch.index, nextMatch.index + nextMatch.text.length),
       isMention: true,
+      member: nextMatch.member || null,
     });
     cursor = nextMatch.index + nextMatch.text.length;
   }
@@ -4701,7 +5073,7 @@ const mentionLabels = () => {
   const seen = new Set();
 
   if (isGroupConversation(activeConversation.value)) {
-    labels.push({ text: `@${allMentionLabel}`, lower: `@${allMentionLabel.toLowerCase()}` });
+    labels.push({ text: `@${allMentionLabel}`, lower: `@${allMentionLabel.toLowerCase()}`, member: null });
     seen.add(`@${allMentionLabel.toLowerCase()}`);
   }
 
@@ -4710,11 +5082,28 @@ const mentionLabels = () => {
       const normalized = label.trim();
       if (normalized.length <= 1 || seen.has(normalized.toLowerCase())) return;
       seen.add(normalized.toLowerCase());
-      labels.push({ text: normalized, lower: normalized.toLowerCase() });
+      labels.push({ text: normalized, lower: normalized.toLowerCase(), member });
     });
   });
 
   return labels.sort((first, second) => second.text.length - first.text.length);
+};
+
+const hasMentionBoundary = (content, start, end) => {
+  const before = start === 0 ? "" : content[start - 1];
+  const after = end >= content.length ? "" : content[end];
+  const beforeOk = !before || /\s|[([{]/.test(before);
+  const afterOk = !after || /\s|[.,!?;:)\]}]/.test(after);
+  return beforeOk && afterOk;
+};
+
+const findMentionIndex = (content, lowerContent, label, fromIndex) => {
+  let index = lowerContent.indexOf(label.lower, fromIndex);
+  while (index >= 0) {
+    if (hasMentionBoundary(content, index, index + label.text.length)) return index;
+    index = lowerContent.indexOf(label.lower, index + 1);
+  }
+  return -1;
 };
 
 const imageAttachments = (message) =>
@@ -4859,6 +5248,7 @@ const lastMessagePreview = (conversation) => {
   const message = conversation.lastMessage;
   if (!message) return homeT("previews.noMessages");
   const prefix = useridsMatch(message.senderUserid, currentUserid) ? homeT("previews.youPrefix") : "";
+  if (message.type === "call") return `${prefix}${callMessageTitle(message)}`;
   if (message.type === "voice") return `${prefix}${homeT("previews.voice")}`;
   if (message.type === "file") return `${prefix}${homeT("previews.fileAttachment")}`;
   if (message.type === "folder") return `${prefix}${homeT("previews.folderAttachment")}`;
@@ -6338,9 +6728,24 @@ a {
 
 .sender-name {
   margin: 0 0 4px 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: #637083;
   font-size: 12px;
   font-weight: 600;
+  cursor: pointer;
+}
+
+.sender-name:hover {
+  color: var(--brand-dark);
+}
+
+.message-profile-trigger {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
 }
 
 .message-bubble {
@@ -6363,6 +6768,71 @@ a {
 .message-row.own .message-bubble {
   background: var(--brand-soft);
   border-color: var(--brand-border);
+}
+
+.message-bubble.call {
+  min-width: 224px;
+  padding: 8px 10px;
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+
+.message-row.own .message-bubble.call {
+  background: #ecfeff;
+  border-color: #a5f3fc;
+}
+
+.call-message-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.call-message-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.call-message-card.outgoing .call-message-icon {
+  background: #cffafe;
+  color: #0e7490;
+}
+
+.call-message-card.missed .call-message-icon {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.call-message-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.call-message-copy strong,
+.call-message-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-message-copy strong {
+  color: #172033;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.call-message-copy small {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .message-row.poll-message .message-bubble,
@@ -6490,6 +6960,19 @@ a {
   background: #eff6ff;
   border-radius: 6px;
   padding: 1px 3px;
+}
+
+.message-text .mention-button {
+  display: inline;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  line-height: inherit;
+}
+
+.message-text .mention-button:hover {
+  background: #dbeafe;
+  text-decoration: underline;
 }
 
 .message-link {
@@ -7509,6 +7992,16 @@ textarea:focus,
   align-items: center;
   gap: 10px;
   min-width: 0;
+  padding: 5px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 0.18s ease;
+}
+
+.member-item:hover,
+.member-item:focus-visible {
+  outline: 0;
+  background: var(--brand-softest);
 }
 
 .member-meta {
@@ -7684,6 +8177,50 @@ textarea:focus,
 .profile-settings {
   display: grid;
   gap: 18px;
+}
+
+.member-profile-card {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 8px 0 4px;
+  text-align: center;
+}
+
+.member-profile-card > strong {
+  margin-top: 6px;
+  color: #172033;
+  font-size: 18px;
+}
+
+.member-profile-card > span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.member-profile-presence {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.member-profile-presence.online {
+  color: #15803d;
+}
+
+.member-profile-actions {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.member-profile-actions .dialog-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
 }
 
 .language-form {

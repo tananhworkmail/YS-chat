@@ -2,6 +2,7 @@ package services
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,8 @@ type RealtimeEvent struct {
 	Userid         string                  `json:"userid,omitempty"`
 	FromUserid     string                  `json:"fromUserid,omitempty"`
 	CallID         string                  `json:"callId,omitempty"`
+	SourceDeviceID string                  `json:"sourceDeviceId,omitempty"`
+	SourceToken    string                  `json:"-"`
 	Signal         json.RawMessage         `json:"signal,omitempty"`
 	IsOnline       bool                    `json:"isOnline,omitempty"`
 	Message        *types.ChatMessage      `json:"message,omitempty"`
@@ -196,29 +199,75 @@ func (client *realtimeClient) readPump(h *RealtimeHub) {
 }
 
 func (h *RealtimeHub) handleClientEvent(client *realtimeClient, event RealtimeEvent) {
+	event.SourceDeviceID = strings.TrimSpace(event.SourceDeviceID)
+	_ = h.relayCallEvent(client.userid, event)
+}
+
+func (h *RealtimeHub) RelayCallControlEvent(userid string, eventType string, conversationID uint64, callID string, sourceDeviceID string, sourceToken string) error {
+	switch strings.TrimSpace(eventType) {
+	case "call.invite", "call.accept", "call.reject", "call.busy", "call.cancel", "call.end":
+	default:
+		return errors.New(ErrInvalidInput)
+	}
+	return h.relayCallEvent(userid, RealtimeEvent{
+		Type:           eventType,
+		ConversationID: conversationID,
+		CallID:         callID,
+		SourceDeviceID: strings.TrimSpace(sourceDeviceID),
+		SourceToken:    strings.TrimSpace(sourceToken),
+	})
+}
+
+func (h *RealtimeHub) relayCallEvent(userid string, event RealtimeEvent) error {
 	event.Type = strings.TrimSpace(event.Type)
 	if !isCallRealtimeType(event.Type) {
-		return
+		return errors.New(ErrInvalidInput)
 	}
 
 	event.CallID = strings.TrimSpace(event.CallID)
 	if event.ConversationID == 0 || event.CallID == "" || len(event.CallID) > 128 {
-		return
+		return errors.New(ErrInvalidInput)
 	}
 
-	recipients, err := ChatServiceInstance.DirectCallRecipients(client.userid, event.ConversationID)
-	if err != nil || len(recipients) == 0 {
-		return
+	recipients, err := ChatServiceInstance.DirectCallRecipients(userid, event.ConversationID)
+	if err != nil {
+		return err
+	}
+	if len(recipients) == 0 {
+		return errors.New(ErrChatNoPermission)
 	}
 
-	event.Userid = client.userid
-	event.FromUserid = client.userid
+	event.Userid = userid
+	event.FromUserid = userid
 	event.Message = nil
 	event.Conversation = nil
 	event.IsOnline = false
 	event.SentAt = time.Now()
 
 	h.BroadcastToUsers(recipients, event)
+	if db, err := ChatServiceInstance.chatDB(); err == nil {
+		if event.Type == "call.invite" {
+			PushServiceInstance.SendCallInvitationNotification(
+				db,
+				userid,
+				event.ConversationID,
+				event.CallID,
+				event.SourceDeviceID,
+				event.SourceToken,
+			)
+		} else {
+			PushServiceInstance.SendCallControlNotification(
+				db,
+				userid,
+				event.ConversationID,
+				event.CallID,
+				event.Type,
+				event.SourceDeviceID,
+				event.SourceToken,
+			)
+		}
+	}
+	return nil
 }
 
 func isCallRealtimeType(eventType string) bool {

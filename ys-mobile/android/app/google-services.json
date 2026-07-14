@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "189502965731",
+    "project_id": "ys-chat-81539",
+    "storage_bucket": "ys-chat-81539.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:189502965731:android:56f7a3f8240c22bb8c82d6",
+        "android_client_info": {
+          "package_name": "com.tythac.ys_mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBAA-ZeJc9AJP1ngK94s4sErMPzob6yVN8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

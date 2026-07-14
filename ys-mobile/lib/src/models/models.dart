@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 class ChatUser {
   const ChatUser({
     required this.userid,
@@ -17,6 +19,13 @@ class ChatUser {
   final bool isContact;
   final bool isOnline;
 
+  String get displayName {
+    final alias = nickname.trim();
+    if (alias.isNotEmpty) return alias;
+    final name = fullname.trim();
+    return name.isEmpty ? userid : name;
+  }
+
   factory ChatUser.fromJson(Map<String, dynamic> json) {
     return ChatUser(
       userid: '${json['userid'] ?? ''}',
@@ -29,16 +38,64 @@ class ChatUser {
     );
   }
 
-  ChatUser copyWith({bool? isOnline}) {
+  ChatUser copyWith({String? nickname, bool? isContact, bool? isOnline}) {
     return ChatUser(
       userid: userid,
       fullname: fullname,
-      nickname: nickname,
+      nickname: nickname ?? this.nickname,
       avatar: avatar,
       role: role,
-      isContact: isContact,
+      isContact: isContact ?? this.isContact,
       isOnline: isOnline ?? this.isOnline,
     );
+  }
+}
+
+class ChatCallLog {
+  const ChatCallLog({
+    required this.status,
+    required this.duration,
+  });
+
+  final String status;
+  final int duration;
+
+  bool get isMissed => status == 'missed';
+
+  static ChatCallLog? tryParse(String content) {
+    final value = content.trim();
+    if (value.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(value);
+      if (decoded is Map) {
+        final status = '${decoded['status'] ?? ''}'.trim();
+        if (status != 'completed' && status != 'missed') return null;
+        final rawDuration = decoded['duration'];
+        final duration = rawDuration is int
+            ? rawDuration
+            : int.tryParse('$rawDuration') ?? 0;
+        return ChatCallLog(
+          status: status,
+          duration: duration < 0 ? 0 : duration,
+        );
+      }
+    } catch (_) {
+      // Support call records created by earlier mobile builds.
+    }
+
+    if (value.toLowerCase().contains('cuộc gọi nhỡ')) {
+      return const ChatCallLog(status: 'missed', duration: 0);
+    }
+    final durationMatch = RegExp(r'(\d{2,}):(\d{2})$').firstMatch(value);
+    if (durationMatch != null) {
+      final minutes = int.tryParse(durationMatch.group(1) ?? '') ?? 0;
+      final seconds = int.tryParse(durationMatch.group(2) ?? '') ?? 0;
+      return ChatCallLog(
+        status: 'completed',
+        duration: minutes * 60 + seconds,
+      );
+    }
+    return null;
   }
 }
 
@@ -318,9 +375,28 @@ class ChatConversation {
     if (name.trim().isNotEmpty) return name.trim();
     final other =
         members.where((user) => user.userid != currentUserid).firstOrNull;
-    return other?.fullname.trim().isNotEmpty == true
-        ? other!.fullname
-        : 'Cuoc tro chuyen #$id';
+    return other == null ? 'Cuoc tro chuyen #$id' : other.displayName;
+  }
+}
+
+class ChatSearchResults {
+  const ChatSearchResults({
+    this.contacts = const [],
+    this.messages = const [],
+    this.files = const [],
+  });
+
+  final List<ChatUser> contacts;
+  final List<ChatMessage> messages;
+  final List<ChatMessage> files;
+
+  factory ChatSearchResults.fromJson(Map<String, dynamic> json) {
+    return ChatSearchResults(
+      contacts: _listOfMaps(json['contacts']).map(ChatUser.fromJson).toList(),
+      messages:
+          _listOfMaps(json['messages']).map(ChatMessage.fromJson).toList(),
+      files: _listOfMaps(json['files']).map(ChatMessage.fromJson).toList(),
+    );
   }
 }
 

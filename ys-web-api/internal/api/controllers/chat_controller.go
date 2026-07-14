@@ -72,6 +72,27 @@ func (h *ChatController) AddContact(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"contact": contact})
 }
 
+func (h *ChatController) UpdateContactNickname(c *gin.Context) {
+	targetUserid := strings.TrimSpace(c.Param("userid"))
+	if targetUserid == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+
+	var req request.UpdateContactNicknameRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+
+	contact, err := services.ChatServiceInstance.UpdateContactNickname(currentUserid(c), targetUserid, req)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"contact": contact})
+}
+
 func (h *ChatController) Realtime(c *gin.Context) {
 	conn, err := chatRealtimeUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -99,6 +120,42 @@ func (h *ChatController) RegisterDeviceToken(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "DEVICE_TOKEN_REGISTERED"})
+}
+
+func (h *ChatController) UnregisterDeviceToken(c *gin.Context) {
+	var req request.UnregisterDeviceTokenRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+
+	if err := services.ChatServiceInstance.UnregisterDeviceToken(currentUserid(c), req); err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "DEVICE_TOKEN_UNREGISTERED"})
+}
+
+func (h *ChatController) SendCallEvent(c *gin.Context) {
+	var req request.SendCallEventRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+
+	err := services.RealtimeHubInstance.RelayCallControlEvent(
+		currentUserid(c),
+		req.Type,
+		req.ConversationID,
+		req.CallID,
+		req.DeviceID,
+		req.Token,
+	)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "CALL_EVENT_SENT"})
 }
 
 func (h *ChatController) ListConversations(c *gin.Context) {
