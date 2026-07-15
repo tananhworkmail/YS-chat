@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:uuid/uuid.dart';
 
 import '../models/models.dart';
 import 'token_store.dart';
@@ -14,12 +15,15 @@ class RealtimeService {
   final TokenStore _tokenStore;
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
-  final List<Map<String, dynamic>> _pendingCallEvents = [];
+  final List<Map<String, dynamic>> _pendingEvents = [];
   bool _ready = false;
+
+  bool get isConnected => _ready && _channel != null;
 
   void connect({
     required void Function(RealtimeEvent event) onEvent,
     required void Function(Object error) onError,
+    void Function()? onConnected,
     void Function()? onDone,
   }) {
     final oldSubscription = _subscription;
@@ -44,8 +48,9 @@ class RealtimeService {
     unawaited(channel.ready.then((_) {
       if (!identical(_channel, channel)) return;
       _ready = true;
-      final pending = List<Map<String, dynamic>>.from(_pendingCallEvents);
-      _pendingCallEvents.clear();
+      onConnected?.call();
+      final pending = List<Map<String, dynamic>>.from(_pendingEvents);
+      _pendingEvents.clear();
       for (final event in pending) {
         channel.sink.add(jsonEncode(event));
       }
@@ -63,16 +68,47 @@ class RealtimeService {
     );
   }
 
+  bool sendEvent(
+    String type, {
+    required int conversationId,
+    int messageId = 0,
+    Map<String, dynamic> payload = const {},
+    bool queueWhenDisconnected = false,
+  }) {
+    final now = DateTime.now().toUtc();
+    final eventId = const Uuid().v4();
+    final event = <String, dynamic>{
+      'type': type,
+      'eventId': eventId,
+      'serverTimestamp': now.toIso8601String(),
+      'conversationId': conversationId,
+      if (messageId > 0) 'messageId': messageId,
+      'version': 1,
+      'payload': payload,
+      // Legacy top-level fields are kept until older servers are retired.
+      ...payload,
+    };
+    return _sendRaw(event, queueWhenDisconnected: queueWhenDisconnected);
+  }
+
   void sendCallEvent(Map<String, dynamic> event) {
+    _sendRaw(event, queueWhenDisconnected: true);
+  }
+
+  bool _sendRaw(Map<String, dynamic> event,
+      {required bool queueWhenDisconnected}) {
     final channel = _channel;
     if (channel == null || !_ready) {
-      _pendingCallEvents.add(Map<String, dynamic>.from(event));
-      if (_pendingCallEvents.length > 64) {
-        _pendingCallEvents.removeAt(0);
+      if (queueWhenDisconnected) {
+        _pendingEvents.add(Map<String, dynamic>.from(event));
+        if (_pendingEvents.length > 64) {
+          _pendingEvents.removeAt(0);
+        }
       }
-      return;
+      return false;
     }
     channel.sink.add(jsonEncode(event));
+    return true;
   }
 
   Future<void> disconnect() async {
@@ -81,7 +117,7 @@ class RealtimeService {
     _subscription = null;
     _channel = null;
     _ready = false;
-    _pendingCallEvents.clear();
+    _pendingEvents.clear();
     await subscription?.cancel();
     await channel?.sink.close();
   }

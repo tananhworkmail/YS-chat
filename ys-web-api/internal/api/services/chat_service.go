@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"web-api/internal/pkg/database"
@@ -12,6 +13,7 @@ import (
 	"web-api/internal/pkg/models/types"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -29,6 +31,10 @@ const (
 	ErrChatPollNotFound              = "CHAT_POLL_NOT_FOUND"
 	ErrChatPollClosed                = "CHAT_POLL_CLOSED"
 	ErrChatPollCustomOptionsDisabled = "CHAT_POLL_CUSTOM_OPTIONS_DISABLED"
+	ErrChatMessageNotFound           = "CHAT_MESSAGE_NOT_FOUND"
+	ErrChatMessageVersionConflict    = "CHAT_MESSAGE_VERSION_CONFLICT"
+	ErrChatClientMessageIDConflict   = "CHAT_CLIENT_MESSAGE_ID_CONFLICT"
+	ErrChatRecallWindowExpired       = "CHAT_RECALL_WINDOW_EXPIRED"
 	defaultMessagePageSize           = 50
 	maxMessagePageSize               = 100
 	minPollOptions                   = 2
@@ -45,7 +51,7 @@ var ChatServiceInstance = &ChatService{}
 
 var (
 	chatSchemaMu    sync.Mutex
-	chatSchemaReady bool
+	chatSchemaReady atomic.Bool
 )
 
 type chatConversationRecord struct {
@@ -534,6 +540,9 @@ func (s *ChatService) CreateDirectConversation(currentUserid string, req request
 			return err
 		}
 		newID = conversation.ID
+		if err := lockChatConversationRows(tx, newID); err != nil {
+			return err
+		}
 
 		members := []map[string]interface{}{
 			{"conversation_id": newID, "userid": currentUserid, "role": "member", "joined_at": now},
@@ -592,6 +601,9 @@ func (s *ChatService) CreateGroupConversation(currentUserid string, req request.
 			return err
 		}
 		newID = conversation.ID
+		if err := lockChatConversationRows(tx, newID); err != nil {
+			return err
+		}
 
 		members := make([]map[string]interface{}, 0, len(memberUserids))
 		for _, userid := range memberUserids {
@@ -661,23 +673,9 @@ func (s *ChatService) UpdateConversationSettings(currentUserid string, conversat
 }
 
 func (s *ChatService) AddMembers(currentUserid string, conversationID uint64, req request.AddConversationMembersRequest) (*types.ChatConversation, error) {
-	db, err := s.chatDB()
+	db, err := s.productionDB()
 	if err != nil {
 		return nil, errors.New(ErrSystem)
-	}
-
-	if ok, err := s.isConversationMember(db, conversationID, currentUserid); err != nil {
-		return nil, errors.New(ErrSystem)
-	} else if !ok {
-		return nil, errors.New(ErrChatNoPermission)
-	}
-
-	conversationType, err := s.conversationType(db, conversationID)
-	if err != nil {
-		return nil, err
-	}
-	if conversationType == "direct" {
-		return nil, errors.New(ErrChatCannotAddDirectMember)
 	}
 
 	userids := normalizeUserids(req.Userids)
@@ -689,25 +687,54 @@ func (s *ChatService) AddMembers(currentUserid string, conversationID uint64, re
 		return nil, err
 	}
 
-	existingUserids, err := s.conversationExistingUserids(db, conversationID, userids)
-	if err != nil {
-		return nil, errors.New(ErrSystem)
-	}
-	newUserids := subtractUserids(userids, existingUserids)
-	if len(newUserids) == 0 {
-		return s.getConversation(db, currentUserid, conversationID)
-	}
-
+	var newUserids []string
 	var systemMessageID uint64
 	err = db.Transaction(func(tx *gorm.DB) error {
+		if lockErr := lockChatConversationRows(tx, conversationID); lockErr != nil {
+			return lockErr
+		}
+		if ok, checkErr := s.isConversationMember(tx, conversationID, currentUserid); checkErr != nil {
+			return checkErr
+		} else if !ok {
+			return errors.New(ErrChatNoPermission)
+		}
+		conversationType, typeErr := s.conversationType(tx, conversationID)
+		if typeErr != nil {
+			return typeErr
+		}
+		if conversationType == "direct" {
+			return errors.New(ErrChatCannotAddDirectMember)
+		}
+		existingUserids, existingErr := s.conversationExistingUserids(tx, conversationID, userids)
+		if existingErr != nil {
+			return existingErr
+		}
+		newUserids = subtractUserids(userids, existingUserids)
+		if len(newUserids) == 0 {
+			return nil
+		}
 		now := time.Now()
+		var baseline struct {
+			MessageID *uint64    `gorm:"column:message_id"`
+			MessageAt *time.Time `gorm:"column:message_at"`
+		}
+		if err := tx.Raw("SELECT MAX(id) AS message_id, MAX(created_at) AS message_at FROM chat_messages WHERE conversation_id = ? AND message_type <> 'system'", conversationID).Scan(&baseline).Error; err != nil {
+			return err
+		}
 		for _, userid := range newUserids {
-			if err := tx.Exec(
-				"INSERT IGNORE INTO chat_members (conversation_id, userid, role, joined_at) VALUES (?, ?, 'member', ?)",
-				conversationID,
-				userid,
-				now,
-			).Error; err != nil {
+			member := productionMemberInsertRecord{
+				ConversationID: conversationID, Userid: userid, Role: "member",
+				LastDeliveredMessageID: baseline.MessageID, LastReadMessageID: baseline.MessageID,
+				LastReadAt: baseline.MessageAt, UnreadCount: 0, JoinedAt: now,
+			}
+			if member.LastReadAt == nil {
+				baselineAt := coalesceTime(baseline.MessageAt, now)
+				member.LastReadAt = &baselineAt
+			}
+			if err := tx.Table("chat_members").Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "conversation_id"}, {Name: "userid"}},
+				DoNothing: true,
+			}).Create(&member).Error; err != nil {
 				return err
 			}
 		}
@@ -728,7 +755,12 @@ func (s *ChatService) AddMembers(currentUserid string, conversationID uint64, re
 		return err
 	})
 	if err != nil {
-		return nil, errors.New(ErrSystem)
+		switch err.Error() {
+		case ErrChatConversationNotFound, ErrChatNoPermission, ErrChatCannotAddDirectMember:
+			return nil, err
+		default:
+			return nil, errors.New(ErrSystem)
+		}
 	}
 
 	s.broadcastSystemMessageByID(db, currentUserid, conversationID, systemMessageID)
@@ -780,7 +812,7 @@ func (s *ChatService) UpdateMemberNickname(currentUserid string, conversationID 
 }
 
 func (s *ChatService) RemoveMember(currentUserid string, conversationID uint64, targetUserid string) (*types.ChatConversation, error) {
-	db, err := s.chatDB()
+	db, err := s.productionDB()
 	if err != nil {
 		return nil, errors.New(ErrSystem)
 	}
@@ -791,49 +823,47 @@ func (s *ChatService) RemoveMember(currentUserid string, conversationID uint64, 
 	}
 	isLeaving := targetUserid == currentUserid
 
-	if ok, err := s.isConversationMember(db, conversationID, currentUserid); err != nil {
-		return nil, errors.New(ErrSystem)
-	} else if !ok {
-		return nil, errors.New(ErrChatNoPermission)
-	}
-
-	conversationType, err := s.conversationType(db, conversationID)
-	if err != nil {
-		return nil, err
-	}
-	if conversationType == "direct" {
-		return nil, errors.New(ErrChatCannotRemoveDirectMember)
-	}
-
-	if !isLeaving {
-		if ok, err := s.isConversationOwner(db, conversationID, currentUserid); err != nil {
-			return nil, errors.New(ErrSystem)
-		} else if !ok {
-			return nil, errors.New(ErrChatOnlyOwnerCanManageMembers)
-		}
-	}
-
-	if ok, err := s.isConversationMember(db, conversationID, targetUserid); err != nil {
-		return nil, errors.New(ErrSystem)
-	} else if !ok {
-		return nil, errors.New(ErrChatMemberNotFound)
-	}
-
-	actorName, err := s.conversationUserDisplayName(db, conversationID, currentUserid)
-	if err != nil {
-		return nil, errors.New(ErrSystem)
-	}
-	targetName, err := s.conversationUserDisplayName(db, conversationID, targetUserid)
-	if err != nil {
-		return nil, errors.New(ErrSystem)
-	}
-	systemContent := targetName + " đã rời nhóm"
-	if !isLeaving {
-		systemContent = actorName + " đã xóa " + targetName + " khỏi nhóm"
-	}
-
 	var systemMessageID uint64
 	err = db.Transaction(func(tx *gorm.DB) error {
+		if lockErr := lockChatConversationRows(tx, conversationID); lockErr != nil {
+			return lockErr
+		}
+		if ok, checkErr := s.isConversationMember(tx, conversationID, currentUserid); checkErr != nil {
+			return checkErr
+		} else if !ok {
+			return errors.New(ErrChatNoPermission)
+		}
+		conversationType, typeErr := s.conversationType(tx, conversationID)
+		if typeErr != nil {
+			return typeErr
+		}
+		if conversationType == "direct" {
+			return errors.New(ErrChatCannotRemoveDirectMember)
+		}
+		if !isLeaving {
+			if ok, ownerErr := s.isConversationOwner(tx, conversationID, currentUserid); ownerErr != nil {
+				return ownerErr
+			} else if !ok {
+				return errors.New(ErrChatOnlyOwnerCanManageMembers)
+			}
+		}
+		if ok, checkErr := s.isConversationMember(tx, conversationID, targetUserid); checkErr != nil {
+			return checkErr
+		} else if !ok {
+			return errors.New(ErrChatMemberNotFound)
+		}
+		actorName, nameErr := s.conversationUserDisplayName(tx, conversationID, currentUserid)
+		if nameErr != nil {
+			return nameErr
+		}
+		targetName, nameErr := s.conversationUserDisplayName(tx, conversationID, targetUserid)
+		if nameErr != nil {
+			return nameErr
+		}
+		systemContent := targetName + " đã rời nhóm"
+		if !isLeaving {
+			systemContent = actorName + " đã xóa " + targetName + " khỏi nhóm"
+		}
 		now := time.Now()
 		result := tx.Exec(
 			"DELETE FROM chat_members WHERE conversation_id = ? AND userid = ?",
@@ -855,10 +885,12 @@ func (s *ChatService) RemoveMember(currentUserid string, conversationID uint64, 
 		return err
 	})
 	if err != nil {
-		if err.Error() == ErrChatMemberNotFound {
-			return nil, errors.New(ErrChatMemberNotFound)
+		switch err.Error() {
+		case ErrChatConversationNotFound, ErrChatNoPermission, ErrChatCannotRemoveDirectMember, ErrChatOnlyOwnerCanManageMembers, ErrChatMemberNotFound:
+			return nil, err
+		default:
+			return nil, errors.New(ErrSystem)
 		}
-		return nil, errors.New(ErrSystem)
 	}
 
 	s.broadcastSystemMessageByID(db, currentUserid, conversationID, systemMessageID)
@@ -869,7 +901,7 @@ func (s *ChatService) RemoveMember(currentUserid string, conversationID uint64, 
 }
 
 func (s *ChatService) ListMessages(currentUserid string, conversationID uint64, limit int, beforeID uint64) ([]types.ChatMessage, bool, error) {
-	db, err := s.chatDB()
+	db, err := s.productionDB()
 	if err != nil {
 		return nil, false, errors.New(ErrSystem)
 	}
@@ -903,8 +935,9 @@ func (s *ChatService) ListMessages(currentUserid string, conversationID uint64, 
 		LEFT JOIN chat_contacts cc_sender ON cc_sender.owner_userid = ? AND cc_sender.contact_userid = m.sender_userid
 		LEFT JOIN users u ON u.userid = m.sender_userid
 		WHERE m.conversation_id = ?
+			AND NOT EXISTS (SELECT 1 FROM chat_message_user_deletions d WHERE d.message_id = m.id AND d.userid = ?)
 	`
-	args := []interface{}{currentUserid, conversationID}
+	args := []interface{}{currentUserid, conversationID, currentUserid}
 	if beforeID > 0 {
 		query += " AND m.id < ?"
 		args = append(args, beforeID)
@@ -929,7 +962,7 @@ func (s *ChatService) ListMessages(currentUserid string, conversationID uint64, 
 	return messages, hasMore, err
 }
 
-func (s *ChatService) SendMessage(currentUserid string, conversationID uint64, req request.SendChatMessageRequest) (*types.ChatMessage, error) {
+func (s *ChatService) sendMessageLegacy(currentUserid string, conversationID uint64, req request.SendChatMessageRequest) (*types.ChatMessage, error) {
 	db, err := s.chatDB()
 	if err != nil {
 		return nil, errors.New(ErrSystem)
@@ -955,7 +988,7 @@ func (s *ChatService) SendMessage(currentUserid string, conversationID uint64, r
 
 	var replyToMessageID *uint64
 	if req.ReplyToMessageID > 0 {
-		if ok, err := s.messageInConversation(db, conversationID, req.ReplyToMessageID); err != nil {
+		if ok, err := s.messageInConversation(db, currentUserid, conversationID, req.ReplyToMessageID); err != nil {
 			return nil, errors.New(ErrSystem)
 		} else if !ok {
 			return nil, errors.New(ErrChatNoPermission)
@@ -1026,23 +1059,9 @@ func (s *ChatService) SendMessage(currentUserid string, conversationID uint64, r
 }
 
 func (s *ChatService) CreatePoll(currentUserid string, conversationID uint64, req request.CreatePollRequest) (*types.ChatMessage, error) {
-	db, err := s.chatDB()
+	db, err := s.productionDB()
 	if err != nil {
 		return nil, errors.New(ErrSystem)
-	}
-
-	if ok, err := s.isConversationMember(db, conversationID, currentUserid); err != nil {
-		return nil, errors.New(ErrSystem)
-	} else if !ok {
-		return nil, errors.New(ErrChatNoPermission)
-	}
-
-	conversationType, err := s.conversationType(db, conversationID)
-	if err != nil {
-		return nil, err
-	}
-	if conversationType != "group" {
-		return nil, errors.New(ErrChatNoPermission)
 	}
 
 	question := strings.TrimSpace(req.Question)
@@ -1057,6 +1076,21 @@ func (s *ChatService) CreatePoll(currentUserid string, conversationID uint64, re
 	var systemMessageID uint64
 	var messageID uint64
 	err = db.Transaction(func(tx *gorm.DB) error {
+		if lockErr := lockChatConversationRows(tx, conversationID); lockErr != nil {
+			return lockErr
+		}
+		if ok, checkErr := s.isConversationMember(tx, conversationID, currentUserid); checkErr != nil {
+			return checkErr
+		} else if !ok {
+			return errors.New(ErrChatNoPermission)
+		}
+		conversationType, typeErr := s.conversationType(tx, conversationID)
+		if typeErr != nil {
+			return typeErr
+		}
+		if conversationType != "group" {
+			return errors.New(ErrChatNoPermission)
+		}
 		now := time.Now()
 		actorName, err := s.conversationUserDisplayName(tx, conversationID, currentUserid)
 		if err != nil {
@@ -1106,13 +1140,37 @@ func (s *ChatService) CreatePoll(currentUserid string, conversationID uint64, re
 				return err
 			}
 		}
+		if err := tx.Table("chat_messages").Where("id = ?", messageID).Update("server_sequence", messageID).Error; err != nil {
+			return err
+		}
+		if err := tx.Table("chat_members").Where("conversation_id = ? AND userid <> ?", conversationID, currentUserid).UpdateColumn("unread_count", gorm.Expr("unread_count + 1")).Error; err != nil {
+			return err
+		}
+		var recipientUserids []string
+		if err := tx.Table("chat_members").Where("conversation_id = ? AND userid <> ?", conversationID, currentUserid).Pluck("userid", &recipientUserids).Error; err != nil {
+			return err
+		}
+		if len(recipientUserids) > 0 {
+			receipts := make([]productionReceiptRecord, 0, len(recipientUserids))
+			for _, userid := range recipientUserids {
+				receipts = append(receipts, productionReceiptRecord{MessageID: messageID, ConversationID: conversationID, Userid: userid, CreatedAt: now, UpdatedAt: now})
+			}
+			if err := tx.Table("chat_message_receipts").CreateInBatches(receipts, 500).Error; err != nil {
+				return err
+			}
+		}
 
 		return tx.Table("chat_conversations").
 			Where("id = ?", conversationID).
 			Update("updated_at", now).Error
 	})
 	if err != nil {
-		return nil, errors.New(ErrSystem)
+		switch err.Error() {
+		case ErrChatConversationNotFound, ErrChatNoPermission:
+			return nil, err
+		default:
+			return nil, errors.New(ErrSystem)
+		}
 	}
 
 	systemMessage, err := s.loadMessageByID(db, currentUserid, systemMessageID)
@@ -1125,7 +1183,9 @@ func (s *ChatService) CreatePoll(currentUserid string, conversationID uint64, re
 	}
 	s.broadcastMessageCreated(db, conversationID, systemMessage)
 	s.broadcastMessageCreated(db, conversationID, message)
-	go PushServiceInstance.SendChatMessageNotification(db, currentUserid, conversationID, message.ID, message.Type, message.Content)
+	if chatDBOverride == nil {
+		go PushServiceInstance.SendChatMessageNotification(db, currentUserid, conversationID, message.ID, message.Type, message.Content)
+	}
 	return message, nil
 }
 
@@ -1146,6 +1206,11 @@ func (s *ChatService) VotePoll(currentUserid string, messageID uint64, req reque
 	if ok, err := s.isConversationMember(db, poll.ConversationID, currentUserid); err != nil {
 		return nil, errors.New(ErrSystem)
 	} else if !ok {
+		return nil, errors.New(ErrChatNoPermission)
+	}
+	if active, activeErr := s.isMessageActive(db, messageID); activeErr != nil {
+		return nil, errors.New(ErrSystem)
+	} else if !active {
 		return nil, errors.New(ErrChatNoPermission)
 	}
 	if poll.IsClosed {
@@ -1268,6 +1333,11 @@ func (s *ChatService) ClosePoll(currentUserid string, messageID uint64) (*types.
 	} else if !ok {
 		return nil, errors.New(ErrChatNoPermission)
 	}
+	if active, activeErr := s.isMessageActive(db, messageID); activeErr != nil {
+		return nil, errors.New(ErrSystem)
+	} else if !active {
+		return nil, errors.New(ErrChatNoPermission)
+	}
 	if poll.CreatedBy != currentUserid {
 		return nil, errors.New(ErrChatNoPermission)
 	}
@@ -1313,12 +1383,16 @@ func (s *ChatService) broadcastMessageCreated(db *gorm.DB, conversationID uint64
 		return
 	}
 
-	RealtimeHubInstance.BroadcastToUsers(userids, RealtimeEvent{
-		Type:           "chat.message.created",
-		ConversationID: conversationID,
-		Message:        message,
-		SentAt:         time.Now(),
-	})
+	for _, userid := range userids {
+		personalized, loadErr := s.loadMessageByID(db, userid, message.ID)
+		if loadErr != nil {
+			continue
+		}
+		RealtimeHubInstance.BroadcastToUsers([]string{userid}, RealtimeEvent{
+			Type: "chat.message.created", ConversationID: conversationID, Message: personalized,
+			Payload: map[string]interface{}{"message": personalized}, SentAt: time.Now(),
+		})
+	}
 }
 
 func (s *ChatService) broadcastPollUpdated(db *gorm.DB, conversationID uint64, message *types.ChatMessage) {
@@ -1366,6 +1440,9 @@ func (s *ChatService) createSystemMessage(db *gorm.DB, conversationID uint64, se
 	if err := db.Table("chat_messages").Create(&message).Error; err != nil {
 		return 0, err
 	}
+	if err := db.Table("chat_messages").Where("id = ?", message.ID).Update("server_sequence", message.ID).Error; err != nil {
+		return 0, err
+	}
 	return message.ID, nil
 }
 
@@ -1381,18 +1458,23 @@ func (s *ChatService) chatDB() (*gorm.DB, error) {
 }
 
 func ensureChatSchema(db *gorm.DB) error {
-	if chatSchemaReady {
+	if chatSchemaReady.Load() {
 		return nil
 	}
 
 	chatSchemaMu.Lock()
 	defer chatSchemaMu.Unlock()
 
-	if chatSchemaReady {
+	if chatSchemaReady.Load() {
 		return nil
 	}
 
 	statements := []string{
+		`CREATE TABLE IF NOT EXISTS chat_schema_migrations (
+			version VARCHAR(64) NOT NULL,
+			applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (version)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS chat_conversations (
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 			type VARCHAR(20) NOT NULL,
@@ -1449,9 +1531,18 @@ func ensureChatSchema(db *gorm.DB) error {
 			content TEXT NULL,
 			reply_to_message_id BIGINT UNSIGNED NULL,
 			forwarded_from_message_id BIGINT UNSIGNED NULL,
+			client_message_id CHAR(36) NULL,
+			server_sequence BIGINT UNSIGNED NULL,
+			version INT UNSIGNED NOT NULL DEFAULT 1,
+			edited_at DATETIME NULL,
+			deleted_at DATETIME NULL,
+			deleted_by VARCHAR(64) NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (id),
+			UNIQUE KEY uk_chat_messages_sender_client (sender_userid, client_message_id),
+			UNIQUE KEY uk_chat_messages_conversation_sequence (conversation_id, server_sequence),
 			INDEX idx_chat_messages_conversation_created (conversation_id, created_at),
+			INDEX idx_chat_messages_conversation_sender_created (conversation_id, sender_userid, created_at),
 			INDEX idx_chat_messages_sender (sender_userid)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS chat_message_attachments (
@@ -1465,6 +1556,20 @@ func ensureChatSchema(db *gorm.DB) error {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (id),
 			INDEX idx_chat_message_attachments_message (message_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS chat_pending_uploads (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			userid VARCHAR(64) NOT NULL,
+			file_url VARCHAR(1024) NOT NULL,
+			file_name VARCHAR(255) NOT NULL,
+			file_size BIGINT NOT NULL DEFAULT 0,
+			mime_type VARCHAR(160) NULL,
+			relative_path VARCHAR(1024) NULL,
+			claimed_message_id BIGINT UNSIGNED NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			UNIQUE KEY uk_chat_pending_uploads_url (file_url(191)),
+			INDEX idx_chat_pending_uploads_user_claimed (userid, claimed_message_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS chat_polls (
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -1507,6 +1612,56 @@ func ensureChatSchema(db *gorm.DB) error {
 			INDEX idx_chat_poll_votes_poll_user (poll_id, userid),
 			INDEX idx_chat_poll_votes_option (option_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS chat_message_receipts (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			message_id BIGINT UNSIGNED NOT NULL,
+			conversation_id BIGINT UNSIGNED NOT NULL,
+			userid VARCHAR(64) NOT NULL,
+			delivered_at DATETIME NULL,
+			read_at DATETIME NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			UNIQUE KEY uk_chat_message_receipts_message_user (message_id, userid),
+			INDEX idx_chat_message_receipts_conversation_user_message (conversation_id, userid, message_id),
+			INDEX idx_chat_message_receipts_message_state (message_id, read_at, delivered_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS chat_message_user_deletions (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			message_id BIGINT UNSIGNED NOT NULL,
+			conversation_id BIGINT UNSIGNED NOT NULL,
+			userid VARCHAR(64) NOT NULL,
+			deleted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			UNIQUE KEY uk_chat_message_user_deletions_message_user (message_id, userid),
+			INDEX idx_chat_message_user_deletions_user_conversation_message (userid, conversation_id, message_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS chat_message_reactions (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			message_id BIGINT UNSIGNED NOT NULL,
+			conversation_id BIGINT UNSIGNED NOT NULL,
+			userid VARCHAR(64) NOT NULL,
+			emoji VARCHAR(64) NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			UNIQUE KEY uk_chat_message_reactions_user_message_emoji (userid, message_id, emoji),
+			INDEX idx_chat_message_reactions_message_emoji (message_id, emoji)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS chat_message_audit (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			message_id BIGINT UNSIGNED NOT NULL,
+			conversation_id BIGINT UNSIGNED NOT NULL,
+			actor_userid VARCHAR(64) NOT NULL,
+			action VARCHAR(32) NOT NULL,
+			previous_version INT UNSIGNED NOT NULL DEFAULT 1,
+			new_version INT UNSIGNED NOT NULL DEFAULT 1,
+			snapshot_json LONGTEXT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			INDEX idx_chat_message_audit_message_created (message_id, created_at),
+			INDEX idx_chat_message_audit_actor_created (actor_userid, created_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	}
 
 	for _, statement := range statements {
@@ -1530,6 +1685,42 @@ func ensureChatSchema(db *gorm.DB) error {
 	if err := ensureColumn(db, "chat_messages", "forwarded_from_message_id", "BIGINT UNSIGNED NULL AFTER reply_to_message_id"); err != nil {
 		return err
 	}
+	messageColumns := []struct{ name, definition string }{
+		{"client_message_id", "CHAR(36) NULL AFTER forwarded_from_message_id"},
+		{"server_sequence", "BIGINT UNSIGNED NULL AFTER client_message_id"},
+		{"version", "INT UNSIGNED NOT NULL DEFAULT 1 AFTER server_sequence"},
+		{"edited_at", "DATETIME NULL AFTER version"},
+		{"deleted_at", "DATETIME NULL AFTER edited_at"},
+		{"deleted_by", "VARCHAR(64) NULL AFTER deleted_at"},
+	}
+	for _, column := range messageColumns {
+		if err := ensureColumn(db, "chat_messages", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	memberColumns := []struct{ name, definition string }{
+		{"last_delivered_message_id", "BIGINT UNSIGNED NULL AFTER nickname"},
+		{"last_read_message_id", "BIGINT UNSIGNED NULL AFTER last_delivered_message_id"},
+		{"last_read_at", "DATETIME NULL AFTER last_read_message_id"},
+		{"unread_count", "INT UNSIGNED NOT NULL DEFAULT 0 AFTER last_read_at"},
+		{"mute_until", "DATETIME NULL AFTER unread_count"},
+		{"pinned_at", "DATETIME NULL AFTER mute_until"},
+		{"archived_at", "DATETIME NULL AFTER pinned_at"},
+	}
+	for _, column := range memberColumns {
+		if err := ensureColumn(db, "chat_members", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	if err := ensureColumn(db, "chat_message_attachments", "deleted_at", "DATETIME NULL AFTER relative_path"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "chat_message_attachments", "deleted_by", "VARCHAR(64) NULL AFTER deleted_at"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "chat_pending_uploads", "relative_path", "VARCHAR(1024) NULL AFTER mime_type"); err != nil {
+		return err
+	}
 	if err := ensureColumn(db, "chat_device_tokens", "device_id", "VARCHAR(128) NOT NULL DEFAULT '' AFTER token"); err != nil {
 		return err
 	}
@@ -1545,9 +1736,101 @@ func ensureChatSchema(db *gorm.DB) error {
 	if err := ensureColumn(db, "chat_polls", "updated_at", "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at"); err != nil {
 		return err
 	}
+	sequenceIndexExists, err := hasIndex(db, "chat_messages", "uk_chat_messages_conversation_sequence")
+	if err != nil {
+		return err
+	}
+	if !sequenceIndexExists {
+		if err := db.Exec("UPDATE chat_messages SET server_sequence = id WHERE server_sequence IS NULL OR server_sequence = 0").Error; err != nil {
+			return err
+		}
+	}
+	indexes := []struct{ table, name, definition string }{
+		{"chat_messages", "uk_chat_messages_sender_client", "UNIQUE KEY uk_chat_messages_sender_client (sender_userid, client_message_id)"},
+		{"chat_messages", "uk_chat_messages_conversation_sequence", "UNIQUE KEY uk_chat_messages_conversation_sequence (conversation_id, server_sequence)"},
+		{"chat_messages", "idx_chat_messages_conversation_sender_created", "KEY idx_chat_messages_conversation_sender_created (conversation_id, sender_userid, created_at)"},
+		{"chat_messages", "idx_chat_messages_conversation_id", "KEY idx_chat_messages_conversation_id (conversation_id, id)"},
+		{"chat_messages", "idx_chat_messages_conversation_created_id", "KEY idx_chat_messages_conversation_created_id (conversation_id, created_at, id)"},
+		{"chat_messages", "idx_chat_messages_conversation_sender_id", "KEY idx_chat_messages_conversation_sender_id (conversation_id, sender_userid, id)"},
+		{"chat_members", "idx_chat_members_user_settings", "KEY idx_chat_members_user_settings (userid, archived_at, pinned_at)"},
+		{"chat_members", "idx_chat_members_conversation_read", "KEY idx_chat_members_conversation_read (conversation_id, last_read_message_id)"},
+		{"chat_messages", "ft_chat_messages_content", "FULLTEXT KEY ft_chat_messages_content (content)"},
+		{"chat_message_attachments", "ft_chat_attachments_name_path", "FULLTEXT KEY ft_chat_attachments_name_path (file_name, relative_path)"},
+		{"chat_message_attachments", "idx_chat_attachments_file_url_deleted", "KEY idx_chat_attachments_file_url_deleted (file_url(191), deleted_at)"},
+		{"chat_message_attachments", "idx_chat_attachments_mime_deleted_message", "KEY idx_chat_attachments_mime_deleted_message (mime_type, deleted_at, message_id)"},
+	}
+	for _, index := range indexes {
+		if err := ensureIndex(db, index.table, index.name, index.definition); err != nil {
+			return err
+		}
+	}
+	if err := runChatProductionBackfill(db); err != nil {
+		return err
+	}
 
-	chatSchemaReady = true
+	chatSchemaReady.Store(true)
 	return nil
+}
+
+func runChatProductionBackfill(db *gorm.DB) error {
+	const version = "20260715_001_chat_production_features"
+	var applied int64
+	if err := db.Table("chat_schema_migrations").Where("version = ?", version).Count(&applied).Error; err != nil {
+		return err
+	}
+	if applied > 0 {
+		return nil
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(`
+			INSERT IGNORE INTO chat_message_receipts
+				(message_id, conversation_id, userid, delivered_at, read_at, created_at, updated_at)
+			SELECT m.id, m.conversation_id, cm.userid, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, m.created_at, CURRENT_TIMESTAMP
+			FROM chat_messages m
+			JOIN chat_members cm ON cm.conversation_id = m.conversation_id
+				AND cm.userid <> m.sender_userid
+				AND m.created_at >= cm.joined_at
+			WHERE m.message_type <> 'system'
+		`).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(`
+			UPDATE chat_members cm
+			LEFT JOIN (
+				SELECT conversation_id, MAX(id) AS last_message_id, MAX(created_at) AS last_message_at
+				FROM chat_messages
+				WHERE message_type <> 'system'
+				GROUP BY conversation_id
+			) legacy ON legacy.conversation_id = cm.conversation_id
+			SET cm.last_delivered_message_id = legacy.last_message_id,
+				cm.last_read_message_id = legacy.last_message_id,
+				cm.last_read_at = COALESCE(legacy.last_message_at, cm.joined_at, CURRENT_TIMESTAMP),
+				cm.unread_count = 0
+			WHERE cm.last_read_message_id IS NULL
+		`).Error; err != nil {
+			return err
+		}
+		return tx.Exec("INSERT INTO chat_schema_migrations (version, applied_at) VALUES (?, ?)", version, time.Now().UTC()).Error
+	})
+}
+
+func ensureIndex(db *gorm.DB, tableName, indexName, definition string) error {
+	exists, err := hasIndex(db, tableName, indexName)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return db.Exec("ALTER TABLE " + tableName + " ADD " + definition).Error
+	}
+	return nil
+}
+
+func hasIndex(db *gorm.DB, tableName, indexName string) (bool, error) {
+	var count int64
+	if err := db.Raw(`SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?`, tableName, indexName).Scan(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func ensureColumn(db *gorm.DB, tableName, columnName, definition string) error {
@@ -1717,11 +2000,18 @@ func (s *ChatService) userDisplayName(db *gorm.DB, userid string) (string, error
 	return userid, nil
 }
 
-func (s *ChatService) messageInConversation(db *gorm.DB, conversationID uint64, messageID uint64) (bool, error) {
+func (s *ChatService) messageInConversation(db *gorm.DB, userid string, conversationID uint64, messageID uint64) (bool, error) {
 	var count int64
 	err := db.Table("chat_messages").
-		Where("id = ? AND conversation_id = ?", messageID, conversationID).
+		Where("id = ? AND conversation_id = ? AND deleted_at IS NULL", messageID, conversationID).
+		Where("NOT EXISTS (SELECT 1 FROM chat_message_user_deletions d WHERE d.message_id = chat_messages.id AND d.userid = ?)", userid).
 		Count(&count).Error
+	return count > 0, err
+}
+
+func (s *ChatService) isMessageActive(db *gorm.DB, messageID uint64) (bool, error) {
+	var count int64
+	err := db.Table("chat_messages").Where("id = ? AND deleted_at IS NULL", messageID).Count(&count).Error
 	return count > 0, err
 }
 
@@ -1729,7 +2019,8 @@ func (s *ChatService) canAccessMessage(db *gorm.DB, userid string, messageID uin
 	var count int64
 	err := db.Table("chat_messages m").
 		Joins("JOIN chat_members cm ON cm.conversation_id = m.conversation_id AND cm.userid = ?", userid).
-		Where("m.id = ?", messageID).
+		Where("m.id = ? AND m.deleted_at IS NULL", messageID).
+		Where("NOT EXISTS (SELECT 1 FROM chat_message_user_deletions d WHERE d.message_id = m.id AND d.userid = ?)", userid).
 		Count(&count).Error
 	return count > 0, err
 }
@@ -1767,6 +2058,7 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 		LEFT JOIN chat_messages m ON m.id = (
 			SELECT lm.id FROM chat_messages lm
 			WHERE lm.conversation_id = c.id
+				AND NOT EXISTS (SELECT 1 FROM chat_message_user_deletions d WHERE d.message_id = lm.id AND d.userid = ?)
 			ORDER BY lm.id DESC
 			LIMIT 1
 		)
@@ -1774,7 +2066,7 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = c.id AND cm_sender.userid = m.sender_userid
 		LEFT JOIN chat_contacts cc_sender ON cc_sender.owner_userid = ? AND cc_sender.contact_userid = m.sender_userid
 	`
-	args := []interface{}{currentUserid, currentUserid}
+	args := []interface{}{currentUserid, currentUserid, currentUserid}
 	if conversationID > 0 {
 		query += " WHERE c.id = ?"
 		args = append(args, conversationID)
@@ -1849,6 +2141,9 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 		conversations = append(conversations, conversation)
 	}
 
+	if err := s.enrichConversations(db, currentUserid, conversations); err != nil {
+		return nil, errors.New(ErrSystem)
+	}
 	return conversations, nil
 }
 
@@ -2006,6 +2301,9 @@ func (s *ChatService) buildMessages(db *gorm.DB, currentUserid string, rows []me
 			Poll:           pollsByMessage[row.ID],
 			CreatedAt:      row.CreatedAt,
 		})
+	}
+	if err := s.enrichMessages(db, currentUserid, messages); err != nil {
+		return nil, errors.New(ErrSystem)
 	}
 	return messages, nil
 }
@@ -2188,7 +2486,9 @@ func (s *ChatService) loadMessageReferences(db *gorm.DB, currentUserid string, m
 		LEFT JOIN chat_contacts cc_sender ON cc_sender.owner_userid = ? AND cc_sender.contact_userid = m.sender_userid
 		LEFT JOIN users u ON u.userid = m.sender_userid
 		WHERE m.id IN ?
-	`, currentUserid, messageIDs).Scan(&rows).Error; err != nil {
+			AND m.deleted_at IS NULL
+			AND NOT EXISTS (SELECT 1 FROM chat_message_user_deletions d WHERE d.message_id = m.id AND d.userid = ?)
+	`, currentUserid, messageIDs, currentUserid).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
@@ -2208,6 +2508,7 @@ func (s *ChatService) loadAttachments(db *gorm.DB, messageIDs []uint64) (map[uin
 	var rows []chatAttachmentRecord
 	if err := db.Table("chat_message_attachments").
 		Where("message_id IN ?", messageIDs).
+		Where("deleted_at IS NULL").
 		Order("id ASC").
 		Scan(&rows).Error; err != nil {
 		return nil, err
@@ -2252,9 +2553,8 @@ func (s *ChatService) searchContacts(db *gorm.DB, currentUserid, keyword string,
 }
 
 func (s *ChatService) searchMessages(db *gorm.DB, currentUserid, keyword string, limit int) ([]types.ChatMessage, error) {
-	like := "%" + keyword + "%"
 	var rows []messageRow
-	if err := db.Raw(`
+	query := `
 		SELECT m.id, m.conversation_id, m.sender_userid,
 			CASE
 				WHEN c.type = 'direct' THEN COALESCE(NULLIF(cc_sender.nickname, ''), u.fullname, m.sender_userid)
@@ -2270,19 +2570,35 @@ func (s *ChatService) searchMessages(db *gorm.DB, currentUserid, keyword string,
 		LEFT JOIN chat_contacts cc_sender ON cc_sender.owner_userid = ? AND cc_sender.contact_userid = m.sender_userid
 		LEFT JOIN users u ON u.userid = m.sender_userid
 		WHERE m.message_type NOT IN ('call', 'system')
-			AND COALESCE(m.content, '') LIKE ?
+			AND m.deleted_at IS NULL
+			AND NOT EXISTS (SELECT 1 FROM chat_message_user_deletions d WHERE d.message_id = m.id AND d.userid = ?)
+	`
+	args := []interface{}{currentUserid, currentUserid, currentUserid}
+	if db.Dialector.Name() == "mysql" {
+		booleanQuery := mysqlBooleanSearch(keyword)
+		if booleanQuery == "" {
+			return []types.ChatMessage{}, nil
+		}
+		query += " AND MATCH(m.content) AGAINST (? IN BOOLEAN MODE)"
+		args = append(args, booleanQuery)
+	} else {
+		query += " AND COALESCE(m.content, '') LIKE ?"
+		args = append(args, "%"+keyword+"%")
+	}
+	query += `
 		ORDER BY m.id DESC
 		LIMIT ?
-	`, currentUserid, currentUserid, like, limit).Scan(&rows).Error; err != nil {
+	`
+	args = append(args, limit)
+	if err := db.Raw(query, args...).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	return s.buildMessages(db, currentUserid, rows)
 }
 
 func (s *ChatService) searchFiles(db *gorm.DB, currentUserid, keyword string, limit int) ([]types.ChatMessage, error) {
-	like := "%" + keyword + "%"
 	var rows []messageRow
-	if err := db.Raw(`
+	query := `
 		SELECT DISTINCT m.id, m.conversation_id, m.sender_userid,
 			CASE
 				WHEN c.type = 'direct' THEN COALESCE(NULLIF(cc_sender.nickname, ''), u.fullname, m.sender_userid)
@@ -2299,10 +2615,28 @@ func (s *ChatService) searchFiles(db *gorm.DB, currentUserid, keyword string, li
 		LEFT JOIN chat_contacts cc_sender ON cc_sender.owner_userid = ? AND cc_sender.contact_userid = m.sender_userid
 		LEFT JOIN users u ON u.userid = m.sender_userid
 		WHERE m.message_type NOT IN ('call', 'system')
-			AND (a.file_name LIKE ? OR a.relative_path LIKE ?)
+			AND m.deleted_at IS NULL AND a.deleted_at IS NULL
+			AND NOT EXISTS (SELECT 1 FROM chat_message_user_deletions d WHERE d.message_id = m.id AND d.userid = ?)
+	`
+	args := []interface{}{currentUserid, currentUserid, currentUserid}
+	if db.Dialector.Name() == "mysql" {
+		booleanQuery := mysqlBooleanSearch(keyword)
+		if booleanQuery == "" {
+			return []types.ChatMessage{}, nil
+		}
+		query += " AND MATCH(a.file_name, a.relative_path) AGAINST (? IN BOOLEAN MODE)"
+		args = append(args, booleanQuery)
+	} else {
+		like := "%" + keyword + "%"
+		query += " AND (a.file_name LIKE ? OR a.relative_path LIKE ?)"
+		args = append(args, like, like)
+	}
+	query += `
 		ORDER BY m.id DESC
 		LIMIT ?
-	`, currentUserid, currentUserid, like, like, limit).Scan(&rows).Error; err != nil {
+	`
+	args = append(args, limit)
+	if err := db.Raw(query, args...).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	return s.buildMessages(db, currentUserid, rows)

@@ -18,8 +18,8 @@ export const searchUsers = (keyword = "") => {
   return api.get("/chat/users", { params: { keyword } });
 };
 
-export const searchChat = (keyword = "", scope = "all") => {
-  return api.get("/chat/search", { params: { keyword, scope } });
+export const searchChat = (keyword = "", scope = "all", filters = {}) => {
+  return api.get("/chat/search", { params: { keyword, scope, ...filters } });
 };
 
 export const getContacts = () => {
@@ -54,6 +54,13 @@ export const updateConversationSettings = (conversationId, payload) => {
   return api.put(`/chat/conversations/${conversationId}/settings`, payload);
 };
 
+// These settings belong to the authenticated member, never to the conversation
+// itself. Keeping them on a separate endpoint prevents an older client from
+// accidentally changing another member's preferences.
+export const updateConversationUserSettings = (conversationId, payload) => {
+  return api.patch(`/chat/conversations/${conversationId}/user-settings`, payload);
+};
+
 export const addConversationMembers = (conversationId, userids) => {
   return api.post(`/chat/conversations/${conversationId}/members`, { userids });
 };
@@ -70,8 +77,55 @@ export const getMessages = (conversationId, params = {}) => {
   return api.get(`/chat/conversations/${conversationId}/messages`, { params });
 };
 
+export const getMessageCatchUp = (conversationId, params = {}) => {
+  return api.get(`/chat/conversations/${conversationId}/messages/catch-up`, { params });
+};
+
+export const searchConversationMessages = (conversationId, params = {}) => {
+  return api.get(`/chat/conversations/${conversationId}/messages/search`, { params });
+};
+
 export const sendMessage = (conversationId, payload) => {
   return api.post(`/chat/conversations/${conversationId}/messages`, payload);
+};
+
+export const markConversationRead = (conversationId, lastReadMessageId) => {
+  return api.post(`/chat/conversations/${conversationId}/read`, { lastReadMessageId });
+};
+
+export const markMessageDelivered = (conversationId, messageId) => {
+  return api.post(`/chat/conversations/${conversationId}/delivered`, { messageId });
+};
+
+export const setTyping = (conversationId, isTyping) => {
+  return api.post(`/chat/conversations/${conversationId}/typing`, { isTyping });
+};
+
+export const editMessage = (messageId, content, version) => {
+  return api.patch(`/chat/messages/${messageId}`, {
+    content,
+    ...(version ? { version } : {}),
+  });
+};
+
+export const getMessageEditHistory = (messageId) => {
+  return api.get(`/chat/messages/${messageId}/edit-history`);
+};
+
+export const deleteMessageForMe = (messageId) => {
+  return api.delete(`/chat/messages/${messageId}`);
+};
+
+export const recallMessage = (messageId) => {
+  return api.post(`/chat/messages/${messageId}/recall`);
+};
+
+export const addReaction = (messageId, emoji) => {
+  return api.put(`/chat/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
+};
+
+export const removeReaction = (messageId, emoji) => {
+  return api.delete(`/chat/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`);
 };
 
 export const createPoll = (conversationId, payload) => {
@@ -138,11 +192,23 @@ export default {
   createDirectConversation,
   createGroupConversation,
   updateConversationSettings,
+  updateConversationUserSettings,
   addConversationMembers,
   removeConversationMember,
   updateConversationMemberNickname,
   getMessages,
+  getMessageCatchUp,
+  searchConversationMessages,
   sendMessage,
+  markConversationRead,
+  markMessageDelivered,
+  setTyping,
+  editMessage,
+  getMessageEditHistory,
+  deleteMessageForMe,
+  recallMessage,
+  addReaction,
+  removeReaction,
   createPoll,
   votePoll,
   closePoll,

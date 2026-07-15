@@ -1,5 +1,11 @@
 package request
 
+import (
+	"bytes"
+	"encoding/json"
+	"time"
+)
+
 type CreateDirectConversationRequest struct {
 	Userid string `json:"userid" binding:"required"`
 }
@@ -50,11 +56,72 @@ type SendCallEventRequest struct {
 }
 
 type SendChatMessageRequest struct {
+	ClientMessageID        string                `json:"clientMessageId"`
 	Type                   string                `json:"type" binding:"required"`
 	Content                string                `json:"content"`
 	ReplyToMessageID       uint64                `json:"replyToMessageId"`
 	ForwardedFromMessageID uint64                `json:"forwardedFromMessageId"`
 	Attachments            []ChatAttachmentInput `json:"attachments"`
+}
+
+type MarkConversationReadRequest struct {
+	LastReadMessageID uint64 `json:"lastReadMessageId" binding:"required"`
+}
+
+type MarkConversationDeliveredRequest struct {
+	MessageID uint64 `json:"messageId" binding:"required"`
+}
+
+type EditChatMessageRequest struct {
+	Content string `json:"content" binding:"required"`
+	Version *uint  `json:"version"`
+}
+
+type RecallChatMessageRequest struct {
+	Version *uint `json:"version"`
+}
+
+type ChatReactionRequest struct {
+	Emoji string `json:"emoji"`
+}
+
+type OptionalNullableTime struct {
+	Set   bool
+	Value *time.Time
+}
+
+func (value *OptionalNullableTime) UnmarshalJSON(data []byte) error {
+	value.Set = true
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		value.Value = nil
+		return nil
+	}
+	var parsed time.Time
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	value.Value = &parsed
+	return nil
+}
+
+type UpdateConversationUserSettingsRequest struct {
+	MuteUntil  OptionalNullableTime `json:"muteUntil"`
+	PinnedAt   OptionalNullableTime `json:"pinnedAt"`
+	ArchivedAt OptionalNullableTime `json:"archivedAt"`
+}
+
+type SetTypingRequest struct {
+	IsTyping bool `json:"isTyping"`
+}
+
+type SearchConversationMessagesRequest struct {
+	Keyword        string
+	SenderUserid   string
+	From           *time.Time
+	To             *time.Time
+	AttachmentType string
+	BeforeID       uint64
+	Limit          int
 }
 
 type CreatePollRequest struct {

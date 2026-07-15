@@ -353,11 +353,12 @@ func (s *PushService) deviceTokens(
 		JOIN chat_members cm ON cm.userid = dt.userid
 		WHERE cm.conversation_id = ?
 			` + whereSender + `
+			AND (cm.mute_until IS NULL OR cm.mute_until <= ?)
 			AND dt.token <> ''
 			AND (dt.device_id = '' OR dt.device_id <> ?)
 			AND dt.token <> ?
 	`
-	args = append(args, sourceDeviceID, sourceToken)
+	args = append(args, time.Now(), sourceDeviceID, sourceToken)
 	err := db.Raw(query, args...).Scan(&tokens).Error
 	return tokens, err
 }

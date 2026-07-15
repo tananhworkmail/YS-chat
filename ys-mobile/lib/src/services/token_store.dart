@@ -8,6 +8,7 @@ class TokenStore {
   static const _accountIdKey = 'account_id';
   static const _languageKey = 'language_code';
   static const _deviceIdKey = 'device_id';
+  static const _chatRuntimeKeyPrefix = 'chat_runtime_v1_';
 
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
 
@@ -28,7 +29,7 @@ class TokenStore {
       languageCode = await _storage.read(key: _languageKey) ?? 'vi';
       await ensureDeviceId();
     } catch (_) {
-      await clear();
+      await clearSession();
     }
   }
 
@@ -48,19 +49,27 @@ class TokenStore {
     await _storage.write(key: _accountIdKey, value: this.accountId);
   }
 
-  Future<void> clear() async {
+  Future<void> clearSession({bool clearChatRuntime = false}) async {
+    final previousUserid = userid?.trim() ?? '';
     token = null;
     userid = null;
     fullname = null;
     accountId = null;
-    try {
-      await _storage.delete(key: _tokenKey);
-      await _storage.delete(key: _useridKey);
-      await _storage.delete(key: _fullnameKey);
-      await _storage.delete(key: _accountIdKey);
-    } catch (_) {
-      // If Android restores an old encrypted preferences backup, the keystore
-      // can be unreadable. Keep the app bootable and let the next login replace it.
+    final keys = <String>[
+      _tokenKey,
+      _useridKey,
+      _fullnameKey,
+      _accountIdKey,
+      if (clearChatRuntime && previousUserid.isNotEmpty)
+        _chatRuntimeKey(previousUserid),
+    ];
+    for (final key in keys) {
+      try {
+        await _storage.delete(key: key);
+      } catch (_) {
+        // An unreadable restored Android keystore must not prevent attempts to
+        // clear the remaining session and per-user runtime values.
+      }
     }
   }
 
@@ -79,4 +88,25 @@ class TokenStore {
     languageCode = code;
     await _storage.write(key: _languageKey, value: code);
   }
+
+  Future<String?> readChatRuntime(String userid) async {
+    final normalized = userid.trim();
+    if (normalized.isEmpty) return null;
+    return _storage.read(key: _chatRuntimeKey(normalized));
+  }
+
+  Future<void> writeChatRuntime(String userid, String value) async {
+    final normalized = userid.trim();
+    if (normalized.isEmpty) return;
+    await _storage.write(key: _chatRuntimeKey(normalized), value: value);
+  }
+
+  Future<void> clearChatRuntime(String userid) async {
+    final normalized = userid.trim();
+    if (normalized.isEmpty) return;
+    await _storage.delete(key: _chatRuntimeKey(normalized));
+  }
+
+  String _chatRuntimeKey(String userid) =>
+      '$_chatRuntimeKeyPrefix${userid.trim().toLowerCase()}';
 }

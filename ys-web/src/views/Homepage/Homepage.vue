@@ -264,7 +264,12 @@
             </div>
             <div class="conversation-main">
               <div class="conversation-top">
-                <span class="conversation-name">{{ conversation.name }}</span>
+                <span class="conversation-name">
+                  <Pin v-if="isConversationPinned(conversation)" :size="13" />
+                  <BellOff v-if="isConversationMuted(conversation)" :size="13" />
+                  <Archive v-if="isConversationArchived(conversation)" :size="13" />
+                  {{ conversation.name }}
+                </span>
                 <div class="conversation-meta">
                   <time>{{ conversationTime(conversation) }}</time>
                   <span v-if="unreadCount(conversation.id)" class="unread-badge">
@@ -442,7 +447,12 @@
             </div>
             <div class="conversation-main">
               <div class="conversation-top">
-                <span class="conversation-name">{{ conversation.name }}</span>
+                <span class="conversation-name">
+                  <Pin v-if="isConversationPinned(conversation)" :size="13" />
+                  <BellOff v-if="isConversationMuted(conversation)" :size="13" />
+                  <Archive v-if="isConversationArchived(conversation)" :size="13" />
+                  {{ conversation.name }}
+                </span>
                 <div class="conversation-meta">
                   <time>{{ conversationTime(conversation) }}</time>
                   <span v-if="unreadCount(conversation.id)" class="unread-badge">
@@ -708,6 +718,7 @@
               'search-match': isConversationSearchMatch(message.id),
               'current-search-match': message.id === currentConversationSearchMessageId,
               'pinned-message': isPinnedMessage(message),
+              'send-failed': messageDeliveryState(message) === 'failed',
             }"
           >
             <button
@@ -738,7 +749,10 @@
               </button>
 
               <div class="message-content-row">
-                <div class="message-bubble" :class="message.type">
+                <div
+                  class="message-bubble"
+                  :class="[message.type, { 'has-reactions': messageReactionGroups(message).length }]"
+                >
                 <button
                   v-if="message.replyTo"
                   class="reply-reference"
@@ -754,7 +768,11 @@
                   <span>{{ homeT("chat.forwardedFrom", { name: message.forwardedFrom.senderName }) }}</span>
                 </div>
 
-                <div v-if="message.type === 'system'" class="system-notice">
+                <div v-if="isMessageRecalled(message)" class="message-tombstone">
+                  {{ homeT("chat.recalledMessage") }}
+                </div>
+
+                <div v-else-if="message.type === 'system'" class="system-notice">
                   {{ message.content }}
                 </div>
 
@@ -886,7 +904,7 @@
                 </p>
 
                 <div
-                  v-if="imageAttachments(message).length"
+                  v-if="!isMessageRecalled(message) && imageAttachments(message).length"
                   class="image-grid"
                   :class="{ compact: imageAttachments(message).length > 1 }"
                 >
@@ -918,7 +936,7 @@
                   </div>
                 </div>
 
-                <div v-if="videoAttachments(message).length" class="video-grid">
+                <div v-if="!isMessageRecalled(message) && videoAttachments(message).length" class="video-grid">
                   <div
                     v-for="attachment in videoAttachments(message)"
                     :key="attachment.id || attachment.fileUrl"
@@ -944,7 +962,7 @@
                   </div>
                 </div>
 
-                <div v-if="voiceAttachments(message).length" class="voice-list">
+                <div v-if="!isMessageRecalled(message) && voiceAttachments(message).length" class="voice-list">
                   <div
                     v-for="attachment in voiceAttachments(message)"
                     :key="attachment.id || attachment.fileUrl"
@@ -967,7 +985,7 @@
                   </div>
                 </div>
 
-                <div v-if="fileAttachments(message).length" class="attachment-list">
+                <div v-if="!isMessageRecalled(message) && fileAttachments(message).length" class="attachment-list">
                   <div
                     v-for="attachment in fileAttachments(message)"
                     :key="attachment.id || attachment.fileUrl"
@@ -1001,9 +1019,77 @@
                   </div>
                 </div>
 
-                <time>{{ formatTime(message.createdAt) }}</time>
+                <div v-if="messageReactionGroups(message).length" class="message-reactions">
+                  <el-popover
+                    v-for="reaction in messageReactionGroups(message)"
+                    :key="`${message.id}-${reaction.emoji}`"
+                    trigger="click"
+                    placement="bottom"
+                    :width="250"
+                    popper-class="reaction-detail-popper"
+                  >
+                    <template #reference>
+                      <button
+                        type="button"
+                        :class="{ mine: reaction.reactedByMe }"
+                        :disabled="Boolean(reactionPending[`${message.id}:${reaction.emoji}`])"
+                        :aria-label="homeT('chat.viewReactions')"
+                      >
+                        <span>{{ reaction.emoji }}</span>
+                        <small>{{ reaction.count }}</small>
+                      </button>
+                    </template>
+                    <div class="reaction-detail">
+                      <strong>{{ reaction.emoji }} {{ homeT("chat.reactionDetails") }}</strong>
+                      <ul>
+                        <li v-for="user in reactionUsers(reaction)" :key="user.userid">
+                          <el-avatar :size="25" :src="user.avatar || undefined">
+                            {{ initials(user.fullname) }}
+                          </el-avatar>
+                          <span>{{ user.fullname }}</span>
+                        </li>
+                      </ul>
+                      <button
+                        class="reaction-detail-toggle"
+                        type="button"
+                        @click="toggleReaction(message, reaction.emoji, reaction.reactedByMe)"
+                      >
+                        {{ reaction.reactedByMe ? homeT("chat.removeMyReaction") : homeT("chat.addMyReaction") }}
+                      </button>
+                    </div>
+                  </el-popover>
+                </div>
+
+                <time>
+                  {{ formatTime(message.createdAt) }}
+                  <button
+                    v-if="message.editedAt || message.edited_at"
+                    class="message-edited-link"
+                    type="button"
+                    @click.stop="openMessageEditHistory(message)"
+                  >
+                    · {{ homeT("chat.edited") }}
+                  </button>
+                </time>
               </div>
               <div v-if="!isCenteredMessage(message)" class="message-actions">
+                <el-dropdown
+                  v-if="!isMessageRecalled(message)"
+                  trigger="click"
+                  placement="top"
+                  @command="(emoji) => toggleReaction(message, emoji)"
+                >
+                  <button class="message-action-button" type="button" :title="homeT('chat.addReaction')">
+                    <SmilePlus :size="15" />
+                  </button>
+                  <template #dropdown>
+                    <el-dropdown-menu class="reaction-picker-menu">
+                      <el-dropdown-item v-for="emoji in quickReactionEmojis" :key="emoji" :command="emoji">
+                        <span class="reaction-picker-emoji">{{ emoji }}</span>
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
                 <el-tooltip :content="homeT('chat.reply')" placement="top">
                   <button class="message-action-button" type="button" @click="startReply(message)">
                     <Reply :size="15" />
@@ -1032,15 +1118,54 @@
                         <Copy :size="14" />
                         <span>{{ homeT("chat.copyMessage") }}</span>
                       </el-dropdown-item>
+                      <el-dropdown-item
+                        v-if="message.editedAt || message.edited_at"
+                        command="editHistory"
+                      >
+                        <History :size="14" />
+                        <span>{{ homeT("chat.editHistory") }}</span>
+                      </el-dropdown-item>
+                      <el-dropdown-item v-if="canEditMessage(message)" command="edit" divided>
+                        <Pencil :size="14" />
+                        <span>{{ homeT("chat.editMessage") }}</span>
+                      </el-dropdown-item>
+                      <el-dropdown-item v-if="canRecallMessage(message)" command="recall">
+                        <Undo2 :size="14" />
+                        <span>{{ homeT("chat.recallMessage") }}</span>
+                      </el-dropdown-item>
+                      <el-dropdown-item command="deleteForMe" divided>
+                        <Trash2 :size="14" />
+                        <span>{{ homeT("chat.deleteForMe") }}</span>
+                      </el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
                 </el-dropdown>
                 </div>
               </div>
+              <div v-if="isOwnMessage(message)" class="message-delivery-status" :class="messageDeliveryState(message)">
+                <button
+                  v-if="messageDeliveryState(message) === 'failed'"
+                  type="button"
+                  @click="retryPendingMessage(message)"
+                >
+                  <RefreshCw :size="13" />
+                  {{ homeT("chat.retrySend") }}
+                </button>
+                <template v-else>
+                  <CheckCheck v-if="messageDeliveryState(message) === 'read'" :size="14" />
+                  <Check v-else :size="14" />
+                  <span>{{ messageStatusLabel(message) }}</span>
+                </template>
+              </div>
             </div>
           </div>
           </template>
         </section>
+
+        <div v-if="typingIndicatorText" class="typing-indicator" aria-live="polite">
+          <span><i></i><i></i><i></i></span>
+          {{ typingIndicatorText }}
+        </div>
 
         <footer class="composer">
           <div v-if="replyingTo" class="reply-compose">
@@ -1137,7 +1262,7 @@
                 v-model="composerText"
                 rows="1"
                 :placeholder="homeT('chat.composerPlaceholder')"
-                @input="updateMentionState"
+                @input="handleComposerInput"
                 @click="updateMentionState"
                 @keyup="updateMentionState"
                 @keydown.down="handleMentionArrow($event, 1)"
@@ -1365,6 +1490,43 @@
         </span>
         <span v-else>{{ directConversationPeer(activeConversation)?.userid }}</span>
       </div>
+
+      <section class="info-section conversation-user-settings">
+        <div class="section-title">
+          <h4>{{ homeT("info.personalSettings") }}</h4>
+        </div>
+        <div class="conversation-setting-actions">
+          <button
+            type="button"
+            :class="{ active: isConversationMuted(activeConversation) }"
+            :disabled="settingsSaving"
+            @click="toggleConversationMute"
+          >
+            <Bell v-if="isConversationMuted(activeConversation)" :size="17" />
+            <BellOff v-else :size="17" />
+            <span>{{ isConversationMuted(activeConversation) ? homeT("info.unmute") : homeT("info.mute8Hours") }}</span>
+          </button>
+          <button
+            type="button"
+            :class="{ active: isConversationPinned(activeConversation) }"
+            :disabled="settingsSaving"
+            @click="toggleConversationPin"
+          >
+            <Pin :size="17" />
+            <span>{{ isConversationPinned(activeConversation) ? homeT("info.unpinConversation") : homeT("info.pinConversation") }}</span>
+          </button>
+          <button
+            type="button"
+            :class="{ active: isConversationArchived(activeConversation) }"
+            :disabled="settingsSaving"
+            @click="toggleConversationArchive"
+          >
+            <ArchiveRestore v-if="isConversationArchived(activeConversation)" :size="17" />
+            <Archive v-else :size="17" />
+            <span>{{ isConversationArchived(activeConversation) ? homeT("info.unarchive") : homeT("info.archive") }}</span>
+          </button>
+        </div>
+      </section>
 
       <section v-if="activeConversation.type === 'group'" class="info-section">
         <div class="section-title">
@@ -2012,6 +2174,38 @@
         </button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="editHistoryDialogVisible"
+      :title="homeT('chat.editHistory')"
+      width="540px"
+      class="chat-dialog edit-history-dialog"
+    >
+      <div v-if="editHistoryLoading" class="edit-history-state">
+        {{ homeT("chat.loadingEditHistory") }}
+      </div>
+      <div v-else-if="!messageEditHistory.length" class="edit-history-state">
+        {{ homeT("chat.noEditHistory") }}
+      </div>
+      <ol v-else class="edit-history-list">
+        <li v-for="entry in messageEditHistory" :key="entry.auditId">
+          <div class="edit-history-meta">
+            <el-avatar :size="28" :src="entry.editorAvatar || undefined">
+              {{ initials(entry.editorName) }}
+            </el-avatar>
+            <span>
+              <strong>{{ entry.editorName || entry.editorUserid }}</strong>
+              <small>{{ formatEditHistoryTime(entry.editedAt) }}</small>
+            </span>
+            <em>v{{ entry.previousVersion }} → v{{ entry.version }}</em>
+          </div>
+          <div class="edit-history-change">
+            <p><small>{{ homeT("chat.beforeEdit") }}</small>{{ entry.previousContent }}</p>
+            <p><small>{{ homeT("chat.afterEdit") }}</small>{{ entry.content }}</p>
+          </div>
+        </li>
+      </ol>
+    </el-dialog>
   </div>
 </template>
 
@@ -2023,7 +2217,13 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import dayjs from "dayjs";
 import BrandLogo from "@/components/BrandLogo.vue";
 import {
+  Archive,
+  ArchiveRestore,
+  Bell,
+  BellOff,
   Camera,
+  Check,
+  CheckCheck,
   ChevronLeft,
   ChevronDown,
   ChevronUp,
@@ -2040,6 +2240,7 @@ import {
   Folder,
   FolderUp,
   Forward,
+  History,
   Info,
   KeyRound,
   Link2,
@@ -2062,17 +2263,36 @@ import {
   Plus,
   Presentation,
   Reply,
+  RefreshCw,
   Search,
   SendHorizontal,
+  SmilePlus,
   Square,
   Trash2,
   UploadCloud,
+  Undo2,
   UserPlus,
   UserRound,
   Users,
   X,
 } from "lucide-vue-next";
 import chatApi from "@/store/chat";
+import {
+  applyMessageReceipt,
+  attachClientMessageId,
+  createClientMessageId,
+  isRetryableSendError,
+  mergeCatchUpCursor,
+  messageClientId,
+  messageDedupeKey,
+  messageDeliveryState,
+  messageSequence,
+  normalizeReactionGroups,
+  normalizeRealtimeEvent,
+  shouldMarkReadForVisibility,
+  seedMissingConversationCursors,
+  snapshotCatchUpCursors,
+} from "@/store/chatRuntime";
 
 const router = useRouter();
 const { t, locale } = useI18n();
@@ -2084,6 +2304,7 @@ const useridsMatch = (first, second) => {
   return normalizedFirst !== "" && normalizedFirst === normalizedSecond;
 };
 const hasUserid = (userid) => normalizeUserid(userid) !== "";
+const isPersistedMessage = (message = {}) => Number.isFinite(Number(message.id)) && Number(message.id) > 0;
 const useridsInclude = (userids = [], userid) => userids.some((item) => useridsMatch(item, userid));
 const currentUserid = normalizeUserid(localStorage.getItem("userid"));
 const currentUser = ref({
@@ -2102,6 +2323,14 @@ const lastMessageIds = ref({});
 const readState = ref({});
 const unreadCounts = ref({});
 const pinnedMessages = ref({});
+const messageCursors = ref({});
+const pendingMessages = ref({});
+const typingUsers = ref({});
+const reactionPending = ref({});
+const editHistoryDialogVisible = ref(false);
+const editHistoryLoading = ref(false);
+const messageEditHistory = ref([]);
+const settingsSaving = ref(false);
 const toastNotifications = ref([]);
 const loadingConversations = ref(false);
 const loadingContacts = ref(false);
@@ -2121,6 +2350,8 @@ const chatSearchUserResult = ref(null);
 const searchingChat = ref(false);
 const conversationSearchKeyword = ref("");
 const conversationSearchIndex = ref(0);
+const conversationSearchServerResults = ref([]);
+const conversationSearchLoading = ref(false);
 const composerText = ref("");
 const mentionActive = ref(false);
 const mentionQuery = ref("");
@@ -2192,8 +2423,15 @@ let contactLookupTimer = null;
 let realtimeSocket = null;
 let realtimeReconnectTimer = null;
 let realtimeReadyWaiters = [];
+let realtimeHasConnected = false;
+let readAckTimer = null;
+let typingStopTimer = null;
+let typingLastSentAt = 0;
+let typingConversationId = null;
+let conversationSearchTimer = null;
 let backgroundSyncPromise = null;
 let searchRequestId = 0;
+let conversationSearchRequestId = 0;
 let contactLookupRequestId = 0;
 let componentUnmounted = false;
 let mediaRecorder = null;
@@ -2214,6 +2452,13 @@ let discardRecording = false;
 const readStateStorageKey = `ys_chat_read_state_${currentUserid}`;
 const unreadStorageKey = `ys_chat_unread_counts_${currentUserid}`;
 const pinnedMessagesStorageKey = `ys_chat_pinned_messages_${currentUserid}`;
+const messageCursorStorageKey = `ys_chat_message_cursors_${currentUserid}`;
+const pendingMessagesStorageKey = `ys_chat_pending_messages_${currentUserid}`;
+const seenRealtimeEventIds = new Set();
+const typingExpiryTimers = new Map();
+const deliveredAckMessageIds = new Set();
+const deliveredHighWaterByConversation = new Map();
+const readAckByConversation = new Map();
 
 const languageOptions = [
   { value: "vi", label: "Tiếng Việt", short: "VI" },
@@ -2326,7 +2571,8 @@ const hasVisibleSearchResults = computed(() => {
 const conversationSearchMatches = computed(() => {
   const keyword = normalizeDirectoryText(conversationSearchKeyword.value);
   if (!keyword) return [];
-  return messages.value.filter((message) => messageMatchesKeyword(message, keyword));
+  const localMatches = messages.value.filter((message) => messageMatchesKeyword(message, keyword));
+  return mergeMessageLists(localMatches, conversationSearchServerResults.value);
 });
 
 const currentConversationSearchMessageId = computed(() =>
@@ -2338,6 +2584,20 @@ const conversationSearchPositionLabel = computed(() => {
   const total = conversationSearchMatches.value.length;
   if (!total) return `0/0`;
   return `${conversationSearchIndex.value + 1}/${total}`;
+});
+
+const activeTypingUsers = computed(() => {
+  const conversationId = String(activeConversationId.value || "");
+  const now = Date.now();
+  return Object.values(typingUsers.value[conversationId] || {})
+    .filter((entry) => entry.expiresAt > now && !useridsMatch(entry.userid, currentUserid));
+});
+
+const typingIndicatorText = computed(() => {
+  const names = activeTypingUsers.value.map((entry) => entry.name || entry.userid).filter(Boolean);
+  if (!names.length) return "";
+  if (names.length === 1) return homeT("chat.typingOne", { name: names[0] });
+  return homeT("chat.typingMany", { count: names.length });
 });
 
 const directoryGroups = computed(() =>
@@ -2536,9 +2796,13 @@ onMounted(async () => {
   readState.value = loadStoredObject(readStateStorageKey);
   unreadCounts.value = loadStoredObject(unreadStorageKey);
   pinnedMessages.value = loadStoredObject(pinnedMessagesStorageKey);
+  messageCursors.value = loadStoredObject(messageCursorStorageKey);
+  pendingMessages.value = loadStoredObject(pendingMessagesStorageKey);
   await loadProfile();
   await loadContacts();
   await loadConversations(false);
+  messageCursors.value = seedMissingConversationCursors(conversations.value, messageCursors.value);
+  persistMessageCursors();
   connectRealtime();
   document.addEventListener("visibilitychange", syncAfterVisibilityReturn);
   window.addEventListener("online", syncAfterNetworkReturn);
@@ -2549,6 +2813,11 @@ onBeforeUnmount(() => {
   stopFallbackRefresh();
   if (searchTimer) window.clearTimeout(searchTimer);
   if (contactLookupTimer) window.clearTimeout(contactLookupTimer);
+  if (conversationSearchTimer) window.clearTimeout(conversationSearchTimer);
+  if (readAckTimer) window.clearTimeout(readAckTimer);
+  stopLocalTyping(true);
+  typingExpiryTimers.forEach((timer) => window.clearTimeout(timer));
+  typingExpiryTimers.clear();
   document.removeEventListener("visibilitychange", syncAfterVisibilityReturn);
   window.removeEventListener("online", syncAfterNetworkReturn);
   cancelVoiceRecording();
@@ -2572,8 +2841,16 @@ watch([searchKeyword, searchScope], ([value, scope]) => {
   searchTimer = window.setTimeout(() => searchChatRealtime(keyword, scope), 250);
 });
 
-watch(conversationSearchKeyword, async () => {
+watch(conversationSearchKeyword, async (value) => {
+  if (conversationSearchTimer) window.clearTimeout(conversationSearchTimer);
   conversationSearchIndex.value = 0;
+  conversationSearchServerResults.value = [];
+  const keyword = value.trim();
+  if (keyword && activeConversationId.value) {
+    conversationSearchTimer = window.setTimeout(() => {
+      void searchActiveConversation(keyword, activeConversationId.value);
+    }, 300);
+  }
   await nextTick();
   if (currentConversationSearchMessageId.value) {
     await scrollToMessage(currentConversationSearchMessageId.value);
@@ -2586,8 +2863,12 @@ watch(conversationSearchMatches, (matches) => {
   }
 });
 
-watch(activeConversationId, () => {
+watch(activeConversationId, (nextConversationId, previousConversationId) => {
+  if (previousConversationId && previousConversationId !== nextConversationId) {
+    stopLocalTyping(true, previousConversationId);
+  }
   conversationSearchKeyword.value = "";
+  conversationSearchServerResults.value = [];
   conversationSearchIndex.value = 0;
   infoPanelView.value = "details";
 });
@@ -2625,7 +2906,21 @@ const persistPinnedMessages = () => {
   localStorage.setItem(pinnedMessagesStorageKey, JSON.stringify(pinnedMessages.value));
 };
 
-const unreadCount = (conversationId) => Number(unreadCounts.value[conversationId] || 0);
+const persistMessageCursors = () => {
+  localStorage.setItem(messageCursorStorageKey, JSON.stringify(messageCursors.value));
+};
+
+const persistPendingMessages = () => {
+  localStorage.setItem(pendingMessagesStorageKey, JSON.stringify(pendingMessages.value));
+};
+
+const unreadCount = (conversationId) => {
+  const conversation = conversations.value.find((item) => item.id === conversationId);
+  if (conversation && Object.prototype.hasOwnProperty.call(conversation, "unreadCount")) {
+    return Number(conversation.unreadCount || 0);
+  }
+  return Number(unreadCounts.value[conversationId] || 0);
+};
 
 const formatUnreadCount = (conversationId) => {
   const count = unreadCount(conversationId);
@@ -2633,11 +2928,66 @@ const formatUnreadCount = (conversationId) => {
   return String(count);
 };
 
+const isDocumentVisible = () => shouldMarkReadForVisibility(
+  typeof document === "undefined" ? undefined : document.visibilityState,
+);
+
 const markConversationRead = (conversationId) => {
+  if (!isDocumentVisible()) return;
   const conversation = conversations.value.find((item) => item.id === conversationId);
-  const lastMessageID = conversation?.lastMessage?.id || lastMessageIds.value[conversationId] || 0;
+  const latestVisibleMessage = messages.value
+    .filter((message) => message.conversationId === conversationId && isPersistedMessage(message))
+    .at(-1);
+  const lastMessageID = latestVisibleMessage?.id || conversation?.lastMessage?.id || lastMessageIds.value[conversationId] || 0;
   unreadCounts.value = { ...unreadCounts.value, [conversationId]: 0 };
   readState.value = { ...readState.value, [conversationId]: lastMessageID };
+  conversations.value = conversations.value.map((item) => (
+    item.id === conversationId ? { ...item, unreadCount: 0, lastReadMessageId: lastMessageID } : item
+  ));
+  persistUnreadCounts();
+  persistReadState();
+  if (Number(lastMessageID) > 0) scheduleReadAck(conversationId, lastMessageID);
+};
+
+const scheduleReadAck = (conversationId, messageId) => {
+  const previous = Number(readAckByConversation.get(conversationId) || 0);
+  if (Number(messageId) <= previous) return;
+  readAckByConversation.set(conversationId, Number(messageId));
+  if (readAckTimer) window.clearTimeout(readAckTimer);
+  readAckTimer = window.setTimeout(flushReadAcks, 120);
+};
+
+const flushReadAcks = async () => {
+  if (readAckTimer) window.clearTimeout(readAckTimer);
+  readAckTimer = null;
+  if (!isDocumentVisible()) return;
+  const pending = Array.from(readAckByConversation.entries());
+  readAckByConversation.clear();
+  await Promise.allSettled(pending.map(async ([conversationId, messageId]) => {
+    try {
+      const res = await chatApi.markConversationRead(conversationId, messageId);
+      applyConversationReadState(conversationId, res.data?.readState || res.data);
+    } catch {
+      const queued = Number(readAckByConversation.get(conversationId) || 0);
+      readAckByConversation.set(conversationId, Math.max(queued, Number(messageId)));
+    }
+  }));
+  if (readAckByConversation.size && !componentUnmounted && isDocumentVisible()) {
+    readAckTimer = window.setTimeout(flushReadAcks, 1500);
+  }
+};
+
+const applyConversationReadState = (conversationId, state = {}) => {
+  if (!conversationId) return;
+  const lastReadMessageId = Number(state.lastReadMessageId || state.last_read_message_id || 0);
+  const unread = Number(state.unreadCount ?? state.unread_count ?? 0);
+  conversations.value = conversations.value.map((conversation) => (
+    conversation.id === conversationId
+      ? { ...conversation, unreadCount: unread, lastReadMessageId: lastReadMessageId || conversation.lastReadMessageId }
+      : conversation
+  ));
+  unreadCounts.value = { ...unreadCounts.value, [conversationId]: unread };
+  if (lastReadMessageId) readState.value = { ...readState.value, [conversationId]: lastReadMessageId };
   persistUnreadCounts();
   persistReadState();
 };
@@ -2651,14 +3001,23 @@ const handleConversationNotifications = (nextConversations, isInitialLoad) => {
 
     const conversationId = conversation.id;
     const previousLastMessageId = lastMessageIds.value[conversationId];
-    const lastReadMessageId = Number(readState.value[conversationId] || 0);
+    const serverLastReadMessageId = Number(conversation.lastReadMessageId || conversation.readState?.lastReadMessageId || 0);
+    const lastReadMessageId = serverLastReadMessageId || Number(readState.value[conversationId] || 0);
     const isNewMessage = previousLastMessageId && lastMessage.id !== previousLastMessageId;
     const isUnreadFromStorage = isInitialLoad && lastReadMessageId > 0 && lastMessage.id > lastReadMessageId;
     const fromOtherUser = !useridsMatch(lastMessage.senderUserid, currentUserid);
     const isActiveConversation = conversationId === activeConversationId.value;
 
+    const hasServerUnread = Object.prototype.hasOwnProperty.call(conversation, "unreadCount");
+    if (hasServerUnread) {
+      unreadCounts.value = { ...unreadCounts.value, [conversationId]: Number(conversation.unreadCount || 0) };
+    }
+    if (serverLastReadMessageId) {
+      readState.value = { ...readState.value, [conversationId]: serverLastReadMessageId };
+    }
+
     if (fromOtherUser && (isNewMessage || isUnreadFromStorage)) {
-      if (!isActiveConversation) {
+      if (!isActiveConversation && !hasServerUnread) {
         unreadCounts.value = {
           ...unreadCounts.value,
           [conversationId]: Math.max(1, unreadCount(conversationId) + (isNewMessage ? 1 : 0)),
@@ -2675,6 +3034,7 @@ const handleConversationNotifications = (nextConversations, isInitialLoad) => {
 
   lastMessageIds.value = nextLastMessageIds;
   persistUnreadCounts();
+  persistReadState();
 };
 
 const pushMessageNotification = (conversation, message) => {
@@ -2741,11 +3101,13 @@ const connectRealtime = () => {
   }
 
   realtimeSocket.onopen = () => {
+    const isReconnect = realtimeHasConnected;
+    realtimeHasConnected = true;
     realtimeStatus.value = "connected";
     realtimeLastError.value = "";
     settleRealtimeReadyWaiters(true);
     stopFallbackRefresh();
-    void syncChatSnapshot();
+    void syncAfterRealtimeOpen(isReconnect);
   };
 
   realtimeSocket.onmessage = (event) => {
@@ -2836,11 +3198,15 @@ const stopFallbackRefresh = () => {
 const syncChatSnapshot = async () => {
   if (backgroundSyncPromise) return backgroundSyncPromise;
 
+  const cursorSnapshots = snapshotCatchUpCursors(conversations.value, messageCursors.value);
+  const snapshottedIds = new Set(cursorSnapshots.map((item) => String(item.conversationId)));
+
   backgroundSyncPromise = (async () => {
+    await catchUpAfterReconnect(cursorSnapshots);
     await loadConversations(false, { silent: true });
-    if (activeConversationId.value) {
-      await loadMessages(activeConversationId.value, false);
-    }
+    const newConversationSnapshots = snapshotCatchUpCursors(conversations.value, messageCursors.value)
+      .filter((item) => !snapshottedIds.has(String(item.conversationId)));
+    if (newConversationSnapshots.length) await catchUpAfterReconnect(newConversationSnapshots);
   })().finally(() => {
     backgroundSyncPromise = null;
   });
@@ -2848,29 +3214,68 @@ const syncChatSnapshot = async () => {
   return backgroundSyncPromise;
 };
 
+const syncAfterRealtimeOpen = async (isReconnect) => {
+  const catchUpSnapshots = isReconnect
+    ? snapshotCatchUpCursors(conversations.value, messageCursors.value)
+    : null;
+  const snapshottedIds = new Set((catchUpSnapshots || []).map((item) => String(item.conversationId)));
+  try {
+    if (!conversations.value.length) await loadConversations(false, { silent: true });
+    if (isReconnect) await catchUpAfterReconnect(catchUpSnapshots);
+    await retryPendingMessages();
+  } finally {
+    await loadConversations(false, { silent: true });
+    if (isReconnect) {
+      const newConversationSnapshots = snapshotCatchUpCursors(conversations.value, messageCursors.value)
+        .filter((item) => !snapshottedIds.has(String(item.conversationId)));
+      if (newConversationSnapshots.length) await catchUpAfterReconnect(newConversationSnapshots);
+    }
+    if (activeConversationId.value && !isReconnect) {
+      await loadMessages(activeConversationId.value, false);
+    }
+  }
+};
+
 const syncAfterVisibilityReturn = () => {
-  if (document.visibilityState !== "visible") return;
+  if (!isDocumentVisible()) return;
   connectRealtime();
-  void syncChatSnapshot();
+  void (async () => {
+    if (realtimeSocket?.readyState === WebSocket.OPEN) await catchUpAfterReconnect();
+    await loadConversations(false, { silent: true });
+    if (activeConversationId.value) markConversationRead(activeConversationId.value);
+    if (readAckByConversation.size) await flushReadAcks();
+  })();
 };
 
 const syncAfterNetworkReturn = () => {
   connectRealtime();
-  void syncChatSnapshot();
+  if (realtimeSocket?.readyState === WebSocket.OPEN) {
+    void syncAfterRealtimeOpen(true);
+  }
 };
 
-const handleRealtimeEvent = async (event) => {
+const handleRealtimeEvent = async (rawEvent) => {
+  const event = normalizeRealtimeEvent(rawEvent);
+  if (event.eventId) {
+    if (seenRealtimeEventIds.has(event.eventId)) return;
+    seenRealtimeEventIds.add(event.eventId);
+    if (seenRealtimeEventIds.size > 1000) {
+      const oldest = seenRealtimeEventIds.values().next().value;
+      seenRealtimeEventIds.delete(oldest);
+    }
+  }
+
   if (isCallRealtimeEvent(event)) {
-    await handleCallRealtimeEvent(event);
+    await handleCallRealtimeEvent({ ...event, ...event.payload, type: event.type });
     return;
   }
 
-  if (event?.type === "chat.presence.changed" && event.userid) {
+  if (event.type === "chat.presence.changed" && event.userid) {
     applyPresence(event.userid, Boolean(event.isOnline));
     return;
   }
 
-  if (event?.type === "chat.poll.updated" && event.message?.id) {
+  if (event.type === "chat.poll.updated" && event.message?.id) {
     if (event.message.conversationId === activeConversationId.value) {
       upsertMessage(event.message);
       await scrollToBottom();
@@ -2878,18 +3283,54 @@ const handleRealtimeEvent = async (event) => {
     return;
   }
 
-  if (event?.type !== "chat.message.created" || !event.message?.id) return;
-
-  const message = event.message;
-  if (message.conversationId === activeConversationId.value) {
-    const exists = messages.value.some((item) => item.id === message.id);
-    if (!exists) {
-      messages.value = sortMessagesForDisplay([...messages.value, message]);
-      await scrollToBottom();
+  if (["chat.message.created", "message.created"].includes(event.type) && event.message?.id) {
+    const message = event.message;
+    processReceivedMessages([message]);
+    if (message.conversationId === activeConversationId.value) {
+      const shouldStickToBottom = isMessageListNearBottom();
+      upsertMessage(message);
+      if (document.visibilityState === "visible") markConversationRead(message.conversationId);
+      if (shouldStickToBottom) await scrollToBottom();
     }
+    await loadConversations(false, { silent: true });
+    return;
   }
 
-  await loadConversations(false, { silent: true });
+  if (["message.updated", "message.recalled"].includes(event.type) && event.message?.id) {
+    if (event.message.conversationId === activeConversationId.value) upsertMessage(event.message);
+    updateMessageCursor(event.message);
+    await loadConversations(false, { silent: true });
+    return;
+  }
+
+  if (event.type === "message.deleted" && event.messageId) {
+    messages.value = messages.value.filter((message) => message.id !== event.messageId);
+    return;
+  }
+
+  if (event.type === "reaction.updated") {
+    applyReactionEvent(event);
+    return;
+  }
+
+  if (event.type === "read.receipt") {
+    applyReadReceipt(event);
+    return;
+  }
+
+  if (event.type === "delivery.receipt") {
+    applyDeliveryReceipt(event);
+    return;
+  }
+
+  if (event.type === "typing.start" || event.type === "typing.stop") {
+    applyTypingEvent(event);
+    return;
+  }
+
+  if (event.type === "conversation.settings.updated") {
+    applyConversationSettingsEvent(event);
+  }
 };
 
 const callText = (key) => ({
@@ -3427,6 +3868,26 @@ const clearPanelSearch = () => {
 const clearConversationSearch = () => {
   conversationSearchKeyword.value = "";
   conversationSearchIndex.value = 0;
+  conversationSearchServerResults.value = [];
+};
+
+const searchActiveConversation = async (keyword, conversationId) => {
+  const requestId = ++conversationSearchRequestId;
+  try {
+    conversationSearchLoading.value = true;
+    const res = await chatApi.searchConversationMessages(conversationId, { keyword, limit: 100 });
+    if (
+      requestId !== conversationSearchRequestId
+      || conversationId !== activeConversationId.value
+      || keyword !== conversationSearchKeyword.value.trim()
+    ) return;
+    conversationSearchServerResults.value = res.data?.messages || res.data?.results?.messages || [];
+  } catch (error) {
+    // Old servers did not expose scoped search; the already loaded messages remain searchable.
+    if (error?.response?.status !== 404 && requestId === conversationSearchRequestId) showApiError(error);
+  } finally {
+    if (requestId === conversationSearchRequestId) conversationSearchLoading.value = false;
+  }
 };
 
 const conversationNameById = (conversationId) =>
@@ -3805,7 +4266,7 @@ const loadConversations = async (selectFirst = false, options = {}) => {
   try {
     if (!silent) loadingConversations.value = true;
     const res = await chatApi.getConversations();
-    const nextConversations = res.data?.conversations || [];
+    const nextConversations = sortConversationsForDisplay(res.data?.conversations || []);
     const isInitialLoad = Object.keys(lastMessageIds.value).length === 0;
     handleConversationNotifications(nextConversations, isInitialLoad);
     conversations.value = nextConversations;
@@ -3865,14 +4326,91 @@ const sortMessagesForDisplay = (messageList = []) =>
     if (timeDiff !== 0) return timeDiff;
     const rankDiff = messageSortRank(first) - messageSortRank(second);
     if (rankDiff !== 0) return rankDiff;
-    return first.id - second.id;
+    const sequenceDiff = messageSequence(first) - messageSequence(second);
+    if (sequenceDiff !== 0) return sequenceDiff;
+    const firstId = Number(first.id);
+    const secondId = Number(second.id);
+    if (Number.isFinite(firstId) && Number.isFinite(secondId)) return firstId - secondId;
+    return String(first.id || "").localeCompare(String(second.id || ""));
   });
 
 const mergeMessageLists = (currentMessages = [], nextMessages = []) => {
-  const mergedById = new Map();
-  currentMessages.forEach((message) => mergedById.set(message.id, message));
-  nextMessages.forEach((message) => mergedById.set(message.id, message));
-  return sortMessagesForDisplay(Array.from(mergedById.values()));
+  const merged = [];
+  [...currentMessages, ...nextMessages].forEach((message) => {
+    const clientKey = messageDedupeKey(message);
+    const index = merged.findIndex((item) => (
+      (message.id && item.id === message.id)
+      || (clientKey && messageDedupeKey(item) === clientKey)
+    ));
+    if (index < 0) {
+      merged.push(message);
+      return;
+    }
+    const next = { ...merged[index], ...message };
+    if (isPersistedMessage(message)) delete next._sendState;
+    merged.splice(index, 1, next);
+  });
+  return sortMessagesForDisplay(merged);
+};
+
+const pendingMessagesForConversation = (conversationId) =>
+  Object.values(pendingMessages.value)
+    .filter((entry) => entry.conversationId === conversationId)
+    .map((entry) => entry.optimisticMessage)
+    .filter(Boolean);
+
+const updateMessageCursor = (message = {}) => {
+  const conversationId = message.conversationId;
+  if (!conversationId || !isPersistedMessage(message)) return;
+  const key = String(conversationId);
+  const previous = messageCursors.value[key] || {};
+  const sequence = messageSequence(message);
+  const next = {
+    afterMessageId: Math.max(Number(previous.afterMessageId || 0), Number(message.id || 0)),
+    afterSequence: Math.max(Number(previous.afterSequence || 0), sequence),
+  };
+  messageCursors.value = { ...messageCursors.value, [key]: next };
+  persistMessageCursors();
+};
+
+const acknowledgeDelivered = async (message = {}) => {
+  if (!message.id || !message.conversationId || isOwnMessage(message)) return;
+  const previousHighWater = Number(deliveredHighWaterByConversation.get(message.conversationId) || 0);
+  if (Number(message.id) <= previousHighWater) return;
+  const key = `${message.conversationId}:${message.id}`;
+  if (deliveredAckMessageIds.has(key)) return;
+  deliveredAckMessageIds.add(key);
+  deliveredHighWaterByConversation.set(message.conversationId, Number(message.id));
+  try {
+    await chatApi.markMessageDelivered(message.conversationId, message.id);
+  } catch {
+    deliveredAckMessageIds.delete(key);
+    if (Number(deliveredHighWaterByConversation.get(message.conversationId) || 0) === Number(message.id)) {
+      deliveredHighWaterByConversation.set(message.conversationId, previousHighWater);
+    }
+  }
+};
+
+const processReceivedMessages = (messageList = []) => {
+  let latestInboundMessage = null;
+  messageList.forEach((message) => {
+    const clientMessageId = messageClientId(message);
+    if (
+      clientMessageId
+      && useridsMatch(message.senderUserid, currentUserid)
+      && pendingMessages.value[clientMessageId]
+    ) {
+      const nextPending = { ...pendingMessages.value };
+      delete nextPending[clientMessageId];
+      pendingMessages.value = nextPending;
+      persistPendingMessages();
+    }
+    updateMessageCursor(message);
+    if (!isOwnMessage(message) && (
+      !latestInboundMessage || Number(message.id) > Number(latestInboundMessage.id)
+    )) latestInboundMessage = message;
+  });
+  if (latestInboundMessage) void acknowledgeDelivered(latestInboundMessage);
 };
 
 const loadMessages = async (conversationId, shouldScroll = true, options = {}) => {
@@ -3884,12 +4422,14 @@ const loadMessages = async (conversationId, shouldScroll = true, options = {}) =
     if (requestId !== messageRequestId || conversationId !== activeConversationId.value) return;
 
     const nextMessages = res.data?.messages || [];
+    processReceivedMessages(nextMessages);
+    const withPending = mergeMessageLists(nextMessages, pendingMessagesForConversation(conversationId));
     const responseHasMore = Boolean(res.data?.hasMore);
     if (replaceMessages || messages.value.length === 0) {
-      messages.value = sortMessagesForDisplay(nextMessages);
+      messages.value = sortMessagesForDisplay(withPending);
       messagesHasMore.value = responseHasMore;
     } else {
-      messages.value = mergeMessageLists(messages.value, nextMessages);
+      messages.value = mergeMessageLists(messages.value, withPending);
       if (messages.value.length <= nextMessages.length) {
         messagesHasMore.value = responseHasMore;
       }
@@ -3903,6 +4443,76 @@ const loadMessages = async (conversationId, shouldScroll = true, options = {}) =
     showApiError(error);
   } finally {
     if (requestId === messageRequestId && shouldScroll) loadingMessages.value = false;
+  }
+};
+
+const catchUpAfterReconnect = async (cursorSnapshots = null) => {
+  const snapshots = cursorSnapshots
+    || snapshotCatchUpCursors(conversations.value, messageCursors.value);
+  for (const { conversationId, cursor } of snapshots) {
+    await catchUpConversation(conversationId, cursor);
+  }
+};
+
+const catchUpConversation = async (conversationId, cursorSnapshot = {}) => {
+  const stored = { ...cursorSnapshot };
+  let afterSequence = Number(stored.afterSequence || 0);
+  let afterMessageId = Number(stored.afterMessageId || 0);
+  let appendedToActive = false;
+  const shouldStickToBottom = conversationId === activeConversationId.value && isMessageListNearBottom();
+  try {
+    while (true) {
+      const params = { limit: 200 };
+      if (afterSequence) params.afterSequence = afterSequence;
+      else params.afterMessageId = afterMessageId;
+      const res = await chatApi.getMessageCatchUp(conversationId, params);
+      const eventMessages = (res.data?.events || [])
+        .map((event) => normalizeRealtimeEvent(event).message)
+        .filter(Boolean);
+      const caughtUpMessages = res.data?.messages || eventMessages;
+      if (caughtUpMessages.length) {
+        processReceivedMessages(caughtUpMessages);
+        if (conversationId === activeConversationId.value) {
+          messages.value = mergeMessageLists(messages.value, caughtUpMessages);
+          appendedToActive = true;
+        }
+      }
+
+      const nextSequence = Number(
+        res.data?.nextSequence
+        || res.data?.nextCursor?.afterSequence
+        || res.data?.nextCursor?.serverSequence
+        || 0,
+      )
+        || Math.max(afterSequence, ...caughtUpMessages.map(messageSequence));
+      const nextMessageId = Number(
+        res.data?.nextMessageId
+        || res.data?.nextCursor?.afterMessageId
+        || res.data?.nextCursor?.messageId
+        || 0,
+      )
+        || Math.max(afterMessageId, ...caughtUpMessages.map((message) => Number(message.id || 0)));
+      const progressed = nextSequence > afterSequence || nextMessageId > afterMessageId;
+      afterSequence = Math.max(afterSequence, nextSequence);
+      afterMessageId = Math.max(afterMessageId, nextMessageId);
+      if (!res.data?.hasMore || !progressed) break;
+    }
+    const mergedCursor = mergeCatchUpCursor(
+      messageCursors.value[String(conversationId)] || {},
+      { afterSequence, afterMessageId },
+    );
+    messageCursors.value = {
+      ...messageCursors.value,
+      [String(conversationId)]: mergedCursor,
+    };
+    persistMessageCursors();
+    if (appendedToActive) {
+      markConversationRead(conversationId);
+      if (shouldStickToBottom) await scrollToBottom();
+    }
+  } catch {
+    // Keep the last processed cursor. A broad snapshot here could jump over the
+    // failed catch-up gap, so the next reconnect resumes from the safe boundary.
   }
 };
 
@@ -3924,6 +4534,7 @@ const loadOlderMessages = async () => {
     if (conversationId !== activeConversationId.value) return;
 
     const olderMessages = res.data?.messages || [];
+    processReceivedMessages(olderMessages);
     if (olderMessages.length) {
       messages.value = mergeMessageLists(olderMessages, messages.value);
       await nextTick();
@@ -4173,6 +4784,92 @@ const submitNickname = async () => {
   }
 };
 
+const sendTypingSignal = (conversationId, isTyping) => {
+  if (!conversationId) return;
+  const type = isTyping ? "typing.start" : "typing.stop";
+  const sentOverSocket = sendRealtimeEvent({
+    type,
+    conversationId,
+    version: 1,
+    payload: { conversationId, isTyping },
+  });
+  if (!sentOverSocket) {
+    void chatApi.setTyping(conversationId, isTyping).catch(() => {});
+  }
+};
+
+const startLocalTyping = () => {
+  const conversationId = activeConversationId.value;
+  if (!conversationId || !composerText.value.trim()) {
+    stopLocalTyping();
+    return;
+  }
+  const now = Date.now();
+  if (typingConversationId !== conversationId || now - typingLastSentAt >= 1800) {
+    if (typingConversationId && typingConversationId !== conversationId) {
+      sendTypingSignal(typingConversationId, false);
+    }
+    sendTypingSignal(conversationId, true);
+    typingLastSentAt = now;
+    typingConversationId = conversationId;
+  }
+  if (typingStopTimer) window.clearTimeout(typingStopTimer);
+  typingStopTimer = window.setTimeout(() => stopLocalTyping(), 2500);
+};
+
+const stopLocalTyping = (force = false, conversationId = typingConversationId) => {
+  if (typingStopTimer) {
+    window.clearTimeout(typingStopTimer);
+    typingStopTimer = null;
+  }
+  if (conversationId && (force || typingConversationId === conversationId)) {
+    sendTypingSignal(conversationId, false);
+  }
+  if (!conversationId || typingConversationId === conversationId) {
+    typingConversationId = null;
+    typingLastSentAt = 0;
+  }
+};
+
+const handleComposerInput = () => {
+  updateMentionState();
+  startLocalTyping();
+};
+
+const applyTypingEvent = (event = {}) => {
+  const conversationId = event.conversationId;
+  const userid = event.userid || event.payload?.senderUserid || event.payload?.sender_userid;
+  if (!conversationId || !userid || useridsMatch(userid, currentUserid)) return;
+  const conversationKey = String(conversationId);
+  const userKey = String(userid);
+  const timerKey = `${conversationKey}:${userKey}`;
+  const currentConversationTyping = { ...(typingUsers.value[conversationKey] || {}) };
+  if (event.type === "typing.stop") {
+    delete currentConversationTyping[userKey];
+    const timer = typingExpiryTimers.get(timerKey);
+    if (timer) window.clearTimeout(timer);
+    typingExpiryTimers.delete(timerKey);
+  } else {
+    const member = conversations.value
+      .find((conversation) => conversation.id === conversationId)
+      ?.members?.find((item) => useridsMatch(item.userid, userid));
+    currentConversationTyping[userKey] = {
+      userid,
+      name: event.payload?.fullname || event.payload?.senderName || event.payload?.sender_name || displayName(member) || userid,
+      expiresAt: Date.now() + 6000,
+    };
+    const previousTimer = typingExpiryTimers.get(timerKey);
+    if (previousTimer) window.clearTimeout(previousTimer);
+    typingExpiryTimers.set(timerKey, window.setTimeout(() => {
+      const nextConversationTyping = { ...(typingUsers.value[conversationKey] || {}) };
+      delete nextConversationTyping[userKey];
+      typingUsers.value = { ...typingUsers.value, [conversationKey]: nextConversationTyping };
+      typingExpiryTimers.delete(timerKey);
+    }, 6100));
+  }
+  typingUsers.value = { ...typingUsers.value, [conversationKey]: currentConversationTyping };
+};
+
 const updateMentionState = () => {
   if (!activeConversation.value) {
     closeMentionMenu();
@@ -4397,14 +5094,11 @@ const sendVoiceMessage = async (file) => {
     }
 
     sending.value = true;
-    const messageRes = await chatApi.sendMessage(activeConversationId.value, {
+    await queueMessageSend(activeConversationId.value, {
       type: "voice",
       content: "",
       attachments,
     });
-    if (messageRes.data?.message) {
-      upsertMessage(messageRes.data.message);
-    }
     await loadConversations(false);
     await scrollToBottom();
   } catch (error) {
@@ -4598,7 +5292,455 @@ const handleMessageOption = (command, message) => {
   }
   if (command === "copy") {
     void copyMessage(message);
+    return;
   }
+  if (command === "editHistory") {
+    void openMessageEditHistory(message);
+    return;
+  }
+  if (command === "edit") {
+    void editExistingMessage(message);
+    return;
+  }
+  if (command === "recall") {
+    void recallExistingMessage(message);
+    return;
+  }
+  if (command === "deleteForMe") {
+    void deleteExistingMessageForMe(message);
+  }
+};
+
+const isMessageRecalled = (message = {}) => Boolean(
+  message.isRecalled
+  || message.recalledAt
+  || message.recalled_at
+  || message.deletedAt
+  || message.deleted_at,
+);
+
+const canEditMessage = (message = {}) => (
+  isPersistedMessage(message)
+  && isOwnMessage(message)
+  && !isMessageRecalled(message)
+  && ["text", "link"].includes(message.type)
+);
+
+const recallWindowSeconds = Number(import.meta.env.VITE_MESSAGE_RECALL_WINDOW_SECONDS || 120);
+
+const canRecallMessage = (message = {}) => {
+  if (!isPersistedMessage(message) || !isOwnMessage(message) || isMessageRecalled(message)) return false;
+  if (typeof message.canRecall === "boolean") return message.canRecall;
+  const createdAt = dayjs(message.createdAt);
+  if (!createdAt.isValid()) return false;
+  return dayjs().diff(createdAt, "second") <= recallWindowSeconds;
+};
+
+const editExistingMessage = async (message) => {
+  if (!canEditMessage(message)) return;
+  try {
+    const result = await ElMessageBox.prompt(homeT("messages.editMessagePrompt"), homeT("chat.editMessage"), {
+      inputValue: message.content || "",
+      inputType: "textarea",
+      confirmButtonText: homeT("actions.save"),
+      cancelButtonText: homeT("actions.cancel"),
+      inputValidator: (value) => Boolean(String(value || "").trim()) || homeT("messages.emptyMessage"),
+    });
+    const content = String(result.value || "").trim();
+    if (!content || content === message.content) return;
+    const res = await chatApi.editMessage(message.id, content, Number(message.version || 0));
+    upsertMessage(res.data?.message || {
+      ...message,
+      content,
+      editedAt: new Date().toISOString(),
+      version: Number(message.version || 1) + 1,
+    });
+  } catch (error) {
+    if (error === "cancel" || error === "close") return;
+    showApiError(error);
+  }
+};
+
+const recallExistingMessage = async (message) => {
+  if (!canRecallMessage(message)) return;
+  try {
+    await ElMessageBox.confirm(
+      homeT("messages.recallConfirm"),
+      homeT("chat.recallMessage"),
+      {
+        type: "warning",
+        confirmButtonText: homeT("chat.recallMessage"),
+        cancelButtonText: homeT("actions.cancel"),
+      },
+    );
+    const res = await chatApi.recallMessage(message.id);
+    upsertMessage(res.data?.message || {
+      ...message,
+      content: "",
+      attachments: [],
+      deletedAt: new Date().toISOString(),
+      deletedBy: currentUserid,
+      isRecalled: true,
+    });
+  } catch (error) {
+    if (error === "cancel" || error === "close") return;
+    showApiError(error);
+  }
+};
+
+const deleteExistingMessageForMe = async (message) => {
+  if (!isPersistedMessage(message)) {
+    const clientMessageId = messageClientId(message);
+    if (!clientMessageId) return;
+    const nextPending = { ...pendingMessages.value };
+    delete nextPending[clientMessageId];
+    pendingMessages.value = nextPending;
+    persistPendingMessages();
+    const dedupeKey = messageDedupeKey(message);
+    messages.value = messages.value.filter((item) => messageDedupeKey(item) !== dedupeKey);
+    return;
+  }
+  try {
+    await ElMessageBox.confirm(
+      homeT("messages.deleteForMeConfirm"),
+      homeT("chat.deleteForMe"),
+      {
+        type: "warning",
+        confirmButtonText: homeT("actions.remove"),
+        cancelButtonText: homeT("actions.cancel"),
+      },
+    );
+    await chatApi.deleteMessageForMe(message.id);
+    messages.value = messages.value.filter((item) => item.id !== message.id);
+  } catch (error) {
+    if (error === "cancel" || error === "close") return;
+    showApiError(error);
+  }
+};
+
+const quickReactionEmojis = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
+const messageReactionGroups = (message = {}) => normalizeReactionGroups(message, currentUserid);
+
+const reactionUsers = (reaction = {}) => {
+  const namedUsers = Array.isArray(reaction.users) ? reaction.users : [];
+  const usersById = new Map(
+    namedUsers
+      .filter((user) => hasUserid(user?.userid))
+      .map((user) => [normalizeUserid(user.userid), user]),
+  );
+  const userids = [...new Set([
+    ...namedUsers.map((user) => normalizeUserid(user?.userid)),
+    ...(reaction.userids || []).map(normalizeUserid),
+  ].filter(Boolean))];
+
+  return userids.map((userid) => {
+    const namedUser = usersById.get(userid);
+    const member = (activeConversation.value?.members || []).find((item) => useridsMatch(item.userid, userid));
+    const isCurrentUser = useridsMatch(userid, currentUserid);
+    return {
+      userid,
+      fullname: namedUser?.fullname
+        || member?.nickname
+        || member?.fullname
+        || (isCurrentUser ? currentUser.value.fullname : "")
+        || userid,
+      avatar: namedUser?.avatar || member?.avatar || (isCurrentUser ? currentUser.value.avatar : "") || "",
+    };
+  });
+};
+
+const formatEditHistoryTime = (value) => {
+  const parsed = dayjs(value);
+  return parsed.isValid() ? parsed.format("DD/MM/YYYY HH:mm") : "";
+};
+
+const openMessageEditHistory = async (message) => {
+  if (!isPersistedMessage(message)) return;
+  editHistoryDialogVisible.value = true;
+  editHistoryLoading.value = true;
+  messageEditHistory.value = [];
+  try {
+    const response = await chatApi.getMessageEditHistory(message.id);
+    messageEditHistory.value = response.data?.history || [];
+  } catch (error) {
+    editHistoryDialogVisible.value = false;
+    showApiError(error);
+  } finally {
+    editHistoryLoading.value = false;
+  }
+};
+
+const toggleReaction = async (message, emoji, reactedByMe) => {
+  if (!isPersistedMessage(message) || !emoji || isMessageRecalled(message)) return;
+  const currentReaction = messageReactionGroups(message).find((reaction) => reaction.emoji === emoji);
+  const shouldRemove = reactedByMe ?? Boolean(currentReaction?.reactedByMe);
+  const key = `${message.id}:${emoji}`;
+  if (reactionPending.value[key]) return;
+  reactionPending.value = { ...reactionPending.value, [key]: true };
+  try {
+    const res = shouldRemove
+      ? await chatApi.removeReaction(message.id, emoji)
+      : await chatApi.addReaction(message.id, emoji);
+    if (res.data?.message) {
+      upsertMessage(res.data.message);
+    } else if (res.data?.reactions || res.data?.reactionSummary) {
+      upsertMessage({
+        ...message,
+        reactions: res.data.reactions || res.data.reactionSummary,
+      });
+    } else {
+      applyLocalReaction(message, emoji, shouldRemove);
+    }
+  } catch (error) {
+    showApiError(error);
+  } finally {
+    const nextPending = { ...reactionPending.value };
+    delete nextPending[key];
+    reactionPending.value = nextPending;
+  }
+};
+
+const applyLocalReaction = (message, emoji, remove) => {
+  const groups = messageReactionGroups(message).map((reaction) => ({
+    ...reaction,
+    userids: [...reaction.userids],
+    users: [...(reaction.users || [])],
+  }));
+  const index = groups.findIndex((reaction) => reaction.emoji === emoji);
+  if (remove && index >= 0) {
+    groups[index].userids = groups[index].userids.filter((userid) => !useridsMatch(userid, currentUserid));
+    groups[index].users = groups[index].users.filter((user) => !useridsMatch(user.userid, currentUserid));
+    groups[index].count = Math.max(0, groups[index].count - 1);
+    groups[index].reactedByMe = false;
+    if (!groups[index].count) groups.splice(index, 1);
+  } else if (!remove) {
+    if (index >= 0) {
+      if (!groups[index].userids.includes(currentUserid)) groups[index].userids.push(currentUserid);
+      if (!groups[index].users.some((user) => useridsMatch(user.userid, currentUserid))) {
+        groups[index].users.push({ ...currentUser.value });
+      }
+      groups[index].count = Math.max(groups[index].count + 1, groups[index].userids.length);
+      groups[index].reactedByMe = true;
+    } else {
+      groups.push({
+        emoji,
+        count: 1,
+        userids: [currentUserid],
+        users: [{ ...currentUser.value }],
+        reactedByMe: true,
+      });
+    }
+  }
+  upsertMessage({ ...message, reactions: groups });
+};
+
+const applyReactionEvent = (event = {}) => {
+  if (event.message?.id) {
+    if (event.message.conversationId === activeConversationId.value) upsertMessage(event.message);
+    return;
+  }
+  const message = messages.value.find((item) => item.id === event.messageId);
+  if (!message) return;
+  const reactions = event.payload?.reactions || event.payload?.reactionSummary || event.payload?.reaction_summary;
+  if (reactions) upsertMessage({ ...message, reactions });
+};
+
+const receiptUserids = (message = {}, field) => {
+  const values = message[field] || [];
+  return values.map((value) => String(value?.userid || value || "")).filter(Boolean);
+};
+
+const messageRecipientCount = (message = {}) => {
+  const summaryTotal = Number(
+    message.receiptSummary?.totalRecipients
+    || message.receipt_summary?.total_recipients
+    || 0,
+  );
+  if (summaryTotal > 0) return summaryTotal;
+  const conversation = conversations.value.find((item) => item.id === message.conversationId);
+  const memberRecipients = (conversation?.members || [])
+    .filter((member) => !useridsMatch(member.userid, message.senderUserid))
+    .length;
+  return memberRecipients || Math.max(1, Number(conversation?.memberCount || 0) - 1);
+};
+
+const applyReadReceipt = (event = {}) => {
+  if (event.message?.id) upsertMessage(event.message);
+  const conversationId = event.conversationId;
+  const readerUserid = event.readerUserid || event.userid || event.payload?.userid;
+  const lastReadMessageId = Number(
+    event.lastReadMessageId
+    || event.payload?.readState?.lastReadMessageId
+    || event.payload?.read_state?.last_read_message_id
+    || event.messageId
+    || 0,
+  );
+  if (!conversationId || !lastReadMessageId) return;
+  if (useridsMatch(readerUserid, currentUserid)) {
+    const serverReadState = event.payload?.readState || event.payload?.read_state || {};
+    applyConversationReadState(conversationId, {
+      ...serverReadState,
+      lastReadMessageId: serverReadState.lastReadMessageId
+        || serverReadState.last_read_message_id
+        || lastReadMessageId,
+    });
+    return;
+  }
+  messages.value = messages.value.map((message) => {
+    if (!isPersistedMessage(message) || message.conversationId !== conversationId || !isOwnMessage(message) || Number(message.id) > lastReadMessageId) {
+      return message;
+    }
+    return applyMessageReceipt(message, {
+      kind: "read",
+      userid: readerUserid,
+      occurredAt: event.payload?.readAt || event.payload?.read_at || event.serverTimestamp,
+      totalRecipients: messageRecipientCount(message),
+    });
+  });
+};
+
+const applyDeliveryReceipt = (event = {}) => {
+  if (event.message?.id) upsertMessage(event.message);
+  const conversationId = event.conversationId;
+  const userid = event.userid || event.payload?.userid;
+  const deliveredMessageId = Number(event.deliveredMessageId || event.messageId || 0);
+  if (!conversationId || !deliveredMessageId || useridsMatch(userid, currentUserid)) return;
+  messages.value = messages.value.map((message) => {
+    if (!isPersistedMessage(message) || message.conversationId !== conversationId || !isOwnMessage(message) || Number(message.id) > deliveredMessageId) {
+      return message;
+    }
+    return applyMessageReceipt(message, {
+      kind: "delivered",
+      userid,
+      occurredAt: event.payload?.deliveredAt || event.payload?.delivered_at || event.serverTimestamp,
+      totalRecipients: messageRecipientCount(message),
+    });
+  });
+};
+
+const messageStatusLabel = (message = {}) => {
+  const state = messageDeliveryState(message);
+  if (state === "sending") return homeT("chat.statusSending");
+  if (state === "failed") return homeT("chat.statusFailed");
+  const group = activeConversation.value?.type === "group";
+  if (group) {
+    const readCount = Number(
+      message.readCount
+      || message.receiptSummary?.readRecipients
+      || message.receipt_summary?.read_recipients
+      || (message.receipts || []).filter((receipt) => receipt.readAt || receipt.read_at).length
+      || receiptUserids(message, "readBy").length
+      || 0,
+    );
+    if (readCount) return homeT("chat.statusReadBy", { count: readCount });
+    const deliveredCount = Number(
+      message.deliveredCount
+      || message.receiptSummary?.deliveredRecipients
+      || message.receipt_summary?.delivered_recipients
+      || (message.receipts || []).filter((receipt) => receipt.deliveredAt || receipt.delivered_at).length
+      || receiptUserids(message, "deliveredTo").length
+      || 0,
+    );
+    if (deliveredCount) return homeT("chat.statusDeliveredTo", { count: deliveredCount });
+  }
+  return homeT(`chat.status${state.charAt(0).toUpperCase()}${state.slice(1)}`);
+};
+
+const conversationUserSettings = (conversation = {}) => {
+  const settings = conversation.mySettings || conversation.userSettings || {};
+  return {
+    muteUntil: settings.muteUntil ?? settings.mute_until ?? conversation.muteUntil ?? conversation.mute_until ?? null,
+    pinnedAt: settings.pinnedAt ?? settings.pinned_at ?? conversation.pinnedAt ?? conversation.pinned_at ?? null,
+    archivedAt: settings.archivedAt ?? settings.archived_at ?? conversation.archivedAt ?? conversation.archived_at ?? null,
+  };
+};
+
+const isConversationMuted = (conversation = {}) => {
+  const muteUntil = conversationUserSettings(conversation).muteUntil;
+  return Boolean(muteUntil && dayjs(muteUntil).isAfter(dayjs()));
+};
+
+const isConversationPinned = (conversation = {}) => Boolean(conversationUserSettings(conversation).pinnedAt);
+
+const isConversationArchived = (conversation = {}) => Boolean(conversationUserSettings(conversation).archivedAt);
+
+const sortConversationsForDisplay = (items = []) => items
+  .map((conversation, index) => ({ conversation, index }))
+  .sort((first, second) => {
+    const archivedDiff = Number(isConversationArchived(first.conversation)) - Number(isConversationArchived(second.conversation));
+    if (archivedDiff !== 0) return archivedDiff;
+    const pinnedDiff = Number(isConversationPinned(second.conversation)) - Number(isConversationPinned(first.conversation));
+    if (pinnedDiff !== 0) return pinnedDiff;
+    return first.index - second.index;
+  })
+  .map(({ conversation }) => conversation);
+
+const applyConversationUserSettings = (conversationId, settings = {}) => {
+  if (!conversationId) return;
+  conversations.value = conversations.value.map((conversation) => (
+    conversation.id === conversationId
+      ? {
+          ...conversation,
+          ...(() => {
+            const current = conversationUserSettings(conversation);
+            const settingValue = (camelKey, snakeKey) => {
+              if (Object.prototype.hasOwnProperty.call(settings, camelKey)) return settings[camelKey];
+              if (Object.prototype.hasOwnProperty.call(settings, snakeKey)) return settings[snakeKey];
+              return current[camelKey];
+            };
+            const nextSettings = {
+              muteUntil: settingValue("muteUntil", "mute_until"),
+              pinnedAt: settingValue("pinnedAt", "pinned_at"),
+              archivedAt: settingValue("archivedAt", "archived_at"),
+            };
+            return { ...nextSettings, mySettings: nextSettings };
+          })(),
+        }
+      : conversation
+  ));
+  conversations.value = sortConversationsForDisplay(conversations.value);
+};
+
+const saveConversationUserSettings = async (payload) => {
+  if (!activeConversationId.value || settingsSaving.value) return;
+  const conversationId = activeConversationId.value;
+  try {
+    settingsSaving.value = true;
+    const res = await chatApi.updateConversationUserSettings(conversationId, payload);
+    const settings = {
+      ...payload,
+      ...(res.data?.settings || res.data?.userSettings || res.data?.conversation?.mySettings || {}),
+    };
+    applyConversationUserSettings(conversationId, settings);
+  } catch (error) {
+    showApiError(error);
+  } finally {
+    settingsSaving.value = false;
+  }
+};
+
+const toggleConversationMute = () => {
+  const muted = isConversationMuted(activeConversation.value);
+  void saveConversationUserSettings({ muteUntil: muted ? null : dayjs().add(8, "hour").toISOString() });
+};
+
+const toggleConversationPin = () => {
+  const pinned = isConversationPinned(activeConversation.value);
+  void saveConversationUserSettings({ pinnedAt: pinned ? null : new Date().toISOString() });
+};
+
+const toggleConversationArchive = () => {
+  const archived = isConversationArchived(activeConversation.value);
+  void saveConversationUserSettings({ archivedAt: archived ? null : new Date().toISOString() });
+};
+
+const applyConversationSettingsEvent = (event = {}) => {
+  const userid = event.userid || event.payload?.userid;
+  if (userid && !useridsMatch(userid, currentUserid)) return;
+  const settings = event.payload?.settings || event.payload?.userSettings || event.payload;
+  applyConversationUserSettings(event.conversationId, settings);
+  void loadConversations(false, { silent: true });
 };
 
 const copyMessage = async (message = {}) => {
@@ -4718,14 +5860,129 @@ const setPollVoting = (messageId, isVoting) => {
 };
 
 const upsertMessage = (message) => {
-  if (!message?.id) return;
-  const index = messages.value.findIndex((item) => item.id === message.id);
+  if (!message?.id && !messageClientId(message)) return;
+  const clientKey = messageDedupeKey(message);
+  const index = messages.value.findIndex((item) => (
+    (message.id && item.id === message.id)
+    || (clientKey && messageDedupeKey(item) === clientKey)
+  ));
   if (index >= 0) {
-    messages.value.splice(index, 1, message);
+    const next = { ...messages.value[index], ...message };
+    if (isPersistedMessage(message)) delete next._sendState;
+    messages.value.splice(index, 1, next);
     messages.value = sortMessagesForDisplay(messages.value);
     return;
   }
   messages.value = sortMessagesForDisplay([...messages.value, message]);
+};
+
+const optimisticMessageFor = (conversationId, payload, overrides = {}) => ({
+  id: `pending-${payload.clientMessageId}`,
+  clientMessageId: payload.clientMessageId,
+  conversationId,
+  senderUserid: currentUserid,
+  senderName: currentUser.value.fullname || currentUserid,
+  senderAvatar: currentUser.value.avatar || "",
+  type: payload.type || "text",
+  content: payload.content || "",
+  attachments: payload.attachments || [],
+  replyTo: overrides.replyTo || null,
+  forwardedFrom: overrides.forwardedFrom || null,
+  createdAt: new Date().toISOString(),
+  state: "sent",
+  _sendState: "sending",
+  ...overrides,
+});
+
+const setPendingMessageState = (clientMessageId, state, metadata = {}) => {
+  const entry = pendingMessages.value[clientMessageId];
+  if (!entry) return;
+  const optimisticMessage = { ...entry.optimisticMessage, _sendState: state };
+  pendingMessages.value = {
+    ...pendingMessages.value,
+    [clientMessageId]: { ...entry, ...metadata, optimisticMessage },
+  };
+  if (entry.conversationId === activeConversationId.value) upsertMessage(optimisticMessage);
+  persistPendingMessages();
+};
+
+const queueMessageSend = async (conversationId, rawPayload, optimisticOverrides = {}) => {
+  const clientMessageId = rawPayload.clientMessageId || createClientMessageId();
+  const payload = { ...rawPayload, clientMessageId };
+  const optimisticMessage = optimisticMessageFor(conversationId, payload, optimisticOverrides);
+  pendingMessages.value = {
+    ...pendingMessages.value,
+    [clientMessageId]: {
+      conversationId,
+      clientMessageId,
+      payload,
+      optimisticMessage,
+      createdAt: optimisticMessage.createdAt,
+      retryable: true,
+    },
+  };
+  persistPendingMessages();
+  if (conversationId === activeConversationId.value) upsertMessage(optimisticMessage);
+  return deliverPendingMessage(clientMessageId);
+};
+
+const pendingDeliveryIds = new Set();
+
+const deliverPendingMessage = async (clientMessageId) => {
+  const entry = pendingMessages.value[clientMessageId];
+  if (!entry || pendingDeliveryIds.has(clientMessageId)) return null;
+  pendingDeliveryIds.add(clientMessageId);
+  setPendingMessageState(clientMessageId, "sending");
+  try {
+    const res = await chatApi.sendMessage(entry.conversationId, entry.payload);
+    const responseMessage = res.data?.message;
+    if (!responseMessage?.id) throw new Error("MESSAGE_RESPONSE_MISSING");
+    const serverMessage = attachClientMessageId(responseMessage, clientMessageId);
+    const nextPending = { ...pendingMessages.value };
+    delete nextPending[clientMessageId];
+    pendingMessages.value = nextPending;
+    persistPendingMessages();
+    updateMessageCursor(serverMessage);
+    if (entry.conversationId === activeConversationId.value) upsertMessage(serverMessage);
+    return serverMessage;
+  } catch (error) {
+    if (!pendingMessages.value[clientMessageId]) {
+      const pendingKey = messageDedupeKey(entry.optimisticMessage);
+      return messages.value.find((message) => messageDedupeKey(message) === pendingKey) || null;
+    }
+    setPendingMessageState(clientMessageId, "failed", {
+      retryable: isRetryableSendError(error),
+      lastFailureStatus: Number(error?.response?.status || 0),
+      lastFailureCode: String(error?.code || error?.response?.data?.error || error?.message || ""),
+    });
+    throw error;
+  } finally {
+    pendingDeliveryIds.delete(clientMessageId);
+  }
+};
+
+const retryPendingMessage = async (message) => {
+  const clientMessageId = messageClientId(message);
+  if (!clientMessageId || !pendingMessages.value[clientMessageId]) return;
+  try {
+    await deliverPendingMessage(clientMessageId);
+    await loadConversations(false, { silent: true });
+  } catch {
+    ElMessage.error(homeT("messages.sendFailed"));
+  }
+};
+
+const retryPendingMessages = async () => {
+  if (!navigator.onLine) return;
+  const clientMessageIds = Object.keys(pendingMessages.value);
+  for (const clientMessageId of clientMessageIds) {
+    if (pendingMessages.value[clientMessageId]?.retryable === false) continue;
+    try {
+      await deliverPendingMessage(clientMessageId);
+    } catch {
+      // Keep the exact clientMessageId in the durable outbox for a later retry.
+    }
+  }
 };
 
 const submitPollVote = async (message, optionIds, customOption = "") => {
@@ -4828,16 +6085,18 @@ const submitForward = async () => {
   const message = forwardingMessage.value;
   try {
     sending.value = true;
-    const res = await chatApi.sendMessage(forwardTargetConversationId.value, {
+    const serverMessage = await queueMessageSend(forwardTargetConversationId.value, {
       type: message.type,
       content: message.content || "",
       forwardedFromMessageId: message.id,
       attachments: cloneAttachments(message.attachments || []),
+    }, {
+      forwardedFrom: toMessageReference(message),
     });
     forwardDialogVisible.value = false;
     forwardingMessage.value = null;
-    if (forwardTargetConversationId.value === activeConversationId.value && res.data?.message) {
-      upsertMessage(res.data.message);
+    if (forwardTargetConversationId.value === activeConversationId.value && serverMessage) {
+      upsertMessage(serverMessage);
       await scrollToBottom();
     }
     await loadConversations(false);
@@ -4861,24 +6120,28 @@ const sendCurrentMessage = async () => {
     return;
   }
 
+  const conversationId = activeConversationId.value;
+  const replySnapshot = replyingTo.value ? { ...replyingTo.value } : null;
+  const attachmentSnapshot = pendingAttachments.value.map((attachment) => ({ ...attachment }));
+  composerText.value = "";
+  stopLocalTyping(true, conversationId);
+  cancelReply();
+  pendingAttachments.value = [];
+
   try {
     sending.value = true;
-    const res = await chatApi.sendMessage(activeConversationId.value, {
+    await queueMessageSend(conversationId, {
       type,
       content,
-      replyToMessageId: replyingTo.value?.id || 0,
-      attachments: pendingAttachments.value,
+      replyToMessageId: replySnapshot?.id || 0,
+      attachments: attachmentSnapshot,
+    }, {
+      replyTo: replySnapshot,
     });
-    if (res.data?.message) {
-      upsertMessage(res.data.message);
-    }
-    composerText.value = "";
-    cancelReply();
-    pendingAttachments.value = [];
     await loadConversations(false);
     await scrollToBottom();
   } catch (error) {
-    showApiError(error);
+    ElMessage.error(homeT("messages.sendFailed"));
   } finally {
     sending.value = false;
   }
@@ -4896,6 +6159,12 @@ const scrollToBottom = async () => {
   scroll();
   window.requestAnimationFrame(scroll);
   window.setTimeout(scroll, 120);
+};
+
+const isMessageListNearBottom = () => {
+  const el = messageListRef.value;
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 140;
 };
 
 const scrollToMessage = async (messageId) => {
@@ -6050,6 +7319,9 @@ a {
 
 .conversation-name {
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6121,6 +7393,11 @@ a {
 
 .result-action.ghost {
   background: var(--brand-soft);
+  color: var(--brand-dark);
+}
+
+.conversation-name svg {
+  flex: 0 0 auto;
   color: var(--brand-dark);
 }
 
@@ -6591,6 +7868,42 @@ a {
   color: #243044;
 }
 
+.typing-indicator {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 20px;
+  border-top: 1px solid #e7edf4;
+  background: rgba(255, 255, 255, 0.86);
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.typing-indicator > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.typing-indicator i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--brand);
+  animation: typingPulse 1s ease-in-out infinite;
+}
+
+.typing-indicator i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-indicator i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
 .message-list {
   flex: 1 1 auto;
   min-height: 0;
@@ -6683,6 +7996,10 @@ a {
   box-shadow: 0 0 0 2px var(--brand-focus), 0 10px 24px rgba(8, 145, 178, 0.14);
 }
 
+.message-row.send-failed .message-bubble {
+  border-color: #fda4af;
+}
+
 .message-row.own {
   justify-content: flex-end;
 }
@@ -6749,6 +8066,7 @@ a {
 }
 
 .message-bubble {
+  position: relative;
   min-width: 84px;
   max-width: 100%;
   padding: 9px 10px 7px;
@@ -6758,6 +8076,10 @@ a {
   box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
   overflow-wrap: anywhere;
   transition: box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.message-bubble.has-reactions {
+  margin-bottom: 10px;
 }
 
 .message-stack:hover .message-bubble {
@@ -6869,6 +8191,12 @@ a {
   overflow-wrap: anywhere;
 }
 
+.message-tombstone {
+  color: #7b8798;
+  font-size: 13px;
+  font-style: italic;
+}
+
 .reply-reference {
   width: 100%;
   display: grid;
@@ -6947,6 +8275,236 @@ a {
 .message-actions .message-action-button:hover {
   color: var(--brand-dark);
   background: var(--brand-softest);
+}
+
+.message-delivery-status {
+  min-height: 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-top: 3px;
+  color: #7b8798;
+  font-size: 11px;
+}
+
+.message-delivery-status.read {
+  color: var(--brand-dark);
+}
+
+.message-delivery-status.failed {
+  color: #e11d48;
+}
+
+.message-delivery-status button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 7px;
+  padding: 3px 6px;
+  background: #fff1f2;
+  color: #be123c;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.message-reactions {
+  position: absolute;
+  right: 7px;
+  bottom: -11px;
+  z-index: 2;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 2px;
+  max-width: calc(100% - 14px);
+}
+
+.message-reactions button {
+  min-height: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid #dce5f1;
+  border-radius: 999px;
+  padding: 0 5px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #475569;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+  font-size: 12px;
+}
+
+.message-reactions button.mine {
+  border-color: var(--brand-focus);
+  background: var(--brand-softest);
+  color: var(--brand-dark);
+}
+
+.message-reactions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.message-reactions small {
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.message-edited-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+:global(.reaction-detail-popper) {
+  padding: 10px !important;
+}
+
+:global(.reaction-detail) {
+  display: grid;
+  gap: 8px;
+}
+
+:global(.reaction-detail > strong) {
+  color: #1e293b;
+  font-size: 13px;
+}
+
+:global(.reaction-detail ul) {
+  display: grid;
+  gap: 6px;
+  max-height: 210px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+:global(.reaction-detail li) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+:global(.reaction-detail li > span) {
+  overflow: hidden;
+  color: #334155;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:global(.reaction-detail-toggle) {
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--brand-softest);
+  color: var(--brand-dark);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.edit-history-state {
+  padding: 28px 12px;
+  color: #64748b;
+  text-align: center;
+}
+
+.edit-history-list {
+  display: grid;
+  gap: 12px;
+  max-height: 62vh;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.edit-history-list > li {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+
+.edit-history-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.edit-history-meta > span {
+  min-width: 0;
+  display: grid;
+  flex: 1;
+}
+
+.edit-history-meta strong,
+.edit-history-meta small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edit-history-meta small,
+.edit-history-meta em {
+  color: #64748b;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.edit-history-change {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.edit-history-change p {
+  min-width: 0;
+  margin: 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #334155;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.edit-history-change p:last-child {
+  background: #f0fdf4;
+}
+
+.edit-history-change small {
+  display: block;
+  margin-bottom: 4px;
+  color: #64748b;
+  font-weight: 800;
+}
+
+:global(.reaction-picker-menu) {
+  display: flex;
+  min-width: 0;
+  padding: 4px;
+}
+
+:global(.reaction-picker-menu .el-dropdown-menu__item) {
+  width: 38px;
+  height: 38px;
+  justify-content: center;
+  padding: 0;
+  border-radius: 8px;
+}
+
+:global(.reaction-picker-emoji) {
+  font-size: 20px;
 }
 
 .message-text {
@@ -7949,6 +9507,46 @@ textarea:focus,
   text-transform: uppercase;
   color: #596779;
   letter-spacing: 0;
+}
+
+.conversation-setting-actions {
+  display: grid;
+  gap: 7px;
+}
+
+.conversation-setting-actions button {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: #f5f7fb;
+  color: #334155;
+  cursor: pointer;
+  text-align: left;
+  font-weight: 750;
+}
+
+.conversation-setting-actions button.active {
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+}
+
+.conversation-setting-actions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+@keyframes typingPulse {
+  0%, 60%, 100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
 }
 
 .section-text-button {

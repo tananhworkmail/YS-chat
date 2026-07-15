@@ -301,11 +301,106 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
     if (target == null || !mounted) return;
-    await state.forwardMessage(target, message);
+    final sent = await state.forwardMessage(target, message);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(context.l10n.t('forwardedMessage'))),
+      SnackBar(
+        content: Text(
+          context.l10n.t(sent ? 'forwardedMessage' : 'sendFailed'),
+        ),
+      ),
     );
+  }
+
+  Future<void> _editMessage(ChatMessage message) async {
+    final controller = TextEditingController(text: message.content);
+    final content = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(context.l10n.t('editMessage')),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          minLines: 1,
+          maxLines: 5,
+          maxLength: 4000,
+          textInputAction: TextInputAction.done,
+          onSubmitted: (value) => Navigator.of(dialogContext).pop(value.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: Text(context.l10n.t('cancel')),
+          ),
+          FilledButton(
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(controller.text.trim()),
+            child: Text(context.l10n.t('save')),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (content == null || content.isEmpty || !mounted) return;
+    try {
+      await context.read<AppState>().editMessage(message, content);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('messageActionFailed'))),
+      );
+    }
+  }
+
+  Future<void> _showMessageEditHistory(ChatMessage message) async {
+    final future =
+        context.read<AppState>().apiClient.getMessageEditHistory(message.id);
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) => _EditHistorySheet(history: future),
+    );
+  }
+
+  Future<void> _recallMessage(ChatMessage message) async {
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: Text(context.l10n.t('recallMessage')),
+            content: Text(context.l10n.t('recallConfirm')),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: Text(context.l10n.t('cancel')),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(true),
+                child: Text(context.l10n.t('recallMessage')),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed || !mounted) return;
+    try {
+      await context.read<AppState>().recallMessage(message);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('messageActionFailed'))),
+      );
+    }
+  }
+
+  Future<void> _deleteMessageForMe(ChatMessage message) async {
+    try {
+      await context.read<AppState>().deleteMessageForMe(message);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(context.l10n.t('messageActionFailed'))),
+      );
+    }
   }
 
   Future<void> _showInfoPanel() async {
@@ -360,6 +455,10 @@ class _ChatScreenState extends State<ChatScreen> {
                 onCancelReply: () => setState(() => _replyingTo = null),
                 onReply: (message) => setState(() => _replyingTo = message),
                 onForward: _openForwardSheet,
+                onEdit: _editMessage,
+                onShowEditHistory: _showMessageEditHistory,
+                onRecall: _recallMessage,
+                onDeleteForMe: _deleteMessageForMe,
                 onDownload: _downloadAttachment,
                 onInfo: _showInfoPanel,
                 onAddContact: _addActiveConversationContact,
@@ -1730,6 +1829,7 @@ class _ConversationItem extends StatelessWidget {
         child: InkWell(
           borderRadius: BorderRadius.circular(8),
           onTap: onTap,
+          onLongPress: () => _showConversationSettings(context, state),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             child: Row(
@@ -1759,6 +1859,24 @@ class _ConversationItem extends StatelessWidget {
                                   fontWeight: FontWeight.w900),
                             ),
                           ),
+                          if (conversation.settings.isPinned)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 4),
+                              child: Icon(Icons.push_pin,
+                                  size: 13, color: AppColors.brand),
+                            ),
+                          if (conversation.settings.isMuted)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 4),
+                              child: Icon(Icons.notifications_off_outlined,
+                                  size: 13, color: AppColors.muted),
+                            ),
+                          if (conversation.settings.isArchived)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 4),
+                              child: Icon(Icons.archive_outlined,
+                                  size: 13, color: AppColors.muted),
+                            ),
                           Text(
                             _conversationTime(conversation),
                             style: const TextStyle(
@@ -1799,6 +1917,59 @@ class _ConversationItem extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showConversationSettings(
+      BuildContext context, AppState state) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: Icon(conversation.settings.isMuted
+                  ? Icons.notifications_outlined
+                  : Icons.notifications_off_outlined),
+              title: Text(context.l10n.t(conversation.settings.isMuted
+                  ? 'unmuteConversation'
+                  : 'muteConversation')),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                state.setConversationMuted(
+                    conversation, !conversation.settings.isMuted);
+              },
+            ),
+            ListTile(
+              leading: Icon(conversation.settings.isPinned
+                  ? Icons.push_pin_outlined
+                  : Icons.push_pin),
+              title: Text(context.l10n.t(conversation.settings.isPinned
+                  ? 'unpinConversation'
+                  : 'pinConversation')),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                state.setConversationPinned(
+                    conversation, !conversation.settings.isPinned);
+              },
+            ),
+            ListTile(
+              leading: Icon(conversation.settings.isArchived
+                  ? Icons.unarchive_outlined
+                  : Icons.archive_outlined),
+              title: Text(context.l10n.t(conversation.settings.isArchived
+                  ? 'unarchiveConversation'
+                  : 'archiveConversation')),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                state.setConversationArchived(
+                    conversation, !conversation.settings.isArchived);
+              },
+            ),
+          ],
         ),
       ),
     );
@@ -2051,6 +2222,10 @@ class _Thread extends StatefulWidget {
     required this.onCancelReply,
     required this.onReply,
     required this.onForward,
+    required this.onEdit,
+    required this.onShowEditHistory,
+    required this.onRecall,
+    required this.onDeleteForMe,
     required this.onDownload,
     required this.onInfo,
     required this.onAddContact,
@@ -2071,6 +2246,10 @@ class _Thread extends StatefulWidget {
   final VoidCallback onCancelReply;
   final ValueChanged<ChatMessage> onReply;
   final ValueChanged<ChatMessage> onForward;
+  final ValueChanged<ChatMessage> onEdit;
+  final ValueChanged<ChatMessage> onShowEditHistory;
+  final ValueChanged<ChatMessage> onRecall;
+  final ValueChanged<ChatMessage> onDeleteForMe;
   final ValueChanged<ChatAttachment> onDownload;
   final VoidCallback onInfo;
   final Future<void> Function() onAddContact;
@@ -2171,6 +2350,15 @@ class _ThreadState extends State<_Thread> {
             text: context.l10n.t('selectChatPrompt')),
       );
     }
+    final typingUsers = state
+        .typingUsersFor(conversation.id)
+        .map((userid) =>
+            conversation.members
+                .where((member) => member.userid == userid)
+                .firstOrNull
+                ?.displayName ??
+            userid)
+        .toList(growable: false);
 
     if (state.messageFocusConversationId == conversation.id &&
         state.messageFocusSequence > _lastMessageFocusSequence &&
@@ -2242,6 +2430,15 @@ class _ThreadState extends State<_Thread> {
                           resolveUrl: state.apiClient.absoluteUrl,
                           onReply: widget.onReply,
                           onForward: widget.onForward,
+                          onEdit: widget.onEdit,
+                          onShowEditHistory: widget.onShowEditHistory,
+                          onRecall: widget.onRecall,
+                          onDeleteForMe: widget.onDeleteForMe,
+                          onToggleReaction: (message, emoji) => context
+                              .read<AppState>()
+                              .toggleReaction(message, emoji),
+                          onRetry: (message) =>
+                              context.read<AppState>().retryMessage(message),
                           onDownload: widget.onDownload,
                           mentionUsers: conversation.type == 'group'
                               ? conversation.members
@@ -2291,6 +2488,7 @@ class _ThreadState extends State<_Thread> {
                 ],
               ),
             ),
+            if (typingUsers.isNotEmpty) _TypingIndicator(users: typingUsers),
             _Composer(
               controller: widget.messageController,
               recording: widget.recording,
@@ -2477,6 +2675,196 @@ class _ChatHeader extends StatelessWidget {
   }
 }
 
+class _TypingIndicator extends StatelessWidget {
+  const _TypingIndicator({required this.users});
+
+  final List<String> users;
+
+  @override
+  Widget build(BuildContext context) {
+    final names = users.take(2).join(', ');
+    final suffix = users.length > 2 ? ' +${users.length - 2}' : '';
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(14, 6, 14, 5),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(top: BorderSide(color: AppColors.line)),
+      ),
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 18,
+            child: Text('•••',
+                style: TextStyle(
+                    color: AppColors.brand,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900)),
+          ),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Text(
+              '$names$suffix ${context.l10n.t('typing')}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  color: AppColors.muted,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EditHistorySheet extends StatelessWidget {
+  const _EditHistorySheet({required this.history});
+
+  final Future<List<ChatMessageEditHistoryEntry>> history;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: SizedBox(
+        height: MediaQuery.sizeOf(context).height * 0.72,
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 8, 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.history, color: AppColors.brand),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      context.l10n.t('editHistory'),
+                      style: const TextStyle(
+                          color: AppColors.ink,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w900),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: FutureBuilder<List<ChatMessageEditHistoryEntry>>(
+                future: history,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState != ConnectionState.done) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (snapshot.hasError) {
+                    return Center(
+                        child: Text(context.l10n.t('messageActionFailed')));
+                  }
+                  final entries = snapshot.data ?? const [];
+                  if (entries.isEmpty) {
+                    return Center(child: Text(context.l10n.t('noEditHistory')));
+                  }
+                  return ListView.separated(
+                    padding: const EdgeInsets.all(12),
+                    itemCount: entries.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 10),
+                    itemBuilder: (context, index) {
+                      final entry = entries[index];
+                      final editor = entry.editorName.trim().isNotEmpty
+                          ? entry.editorName
+                          : entry.editorUserid;
+                      return Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: AppColors.line),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(editor,
+                                      style: const TextStyle(
+                                          color: AppColors.ink,
+                                          fontWeight: FontWeight.w900)),
+                                ),
+                                if (entry.editedAt != null)
+                                  Text(
+                                    DateFormat('dd/MM/yyyy HH:mm')
+                                        .format(entry.editedAt!.toLocal()),
+                                    style: const TextStyle(
+                                        color: AppColors.muted, fontSize: 11),
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            _HistoryContent(
+                              label: context.l10n.t('beforeEdit'),
+                              content: entry.previousContent,
+                              color: AppColors.canvas,
+                            ),
+                            const SizedBox(height: 6),
+                            _HistoryContent(
+                              label: context.l10n.t('afterEdit'),
+                              content: entry.content,
+                              color: const Color(0xfff0fdf4),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _HistoryContent extends StatelessWidget {
+  const _HistoryContent({
+    required this.label,
+    required this.content,
+    required this.color,
+  });
+
+  final String label;
+  final String content;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(8),
+      decoration:
+          BoxDecoration(color: color, borderRadius: BorderRadius.circular(8)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label,
+              style: const TextStyle(
+                  color: AppColors.muted,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w900)),
+          const SizedBox(height: 3),
+          Text(content, style: const TextStyle(color: AppColors.ink)),
+        ],
+      ),
+    );
+  }
+}
+
 class _Composer extends StatefulWidget {
   const _Composer({
     required this.controller,
@@ -2533,6 +2921,9 @@ class _ComposerState extends State<_Composer> {
   }
 
   void _updateMentionSuggestions() {
+    if (mounted) {
+      context.read<AppState>().updateTyping(widget.controller.text);
+    }
     final selection = widget.controller.selection;
     if (!selection.isValid || !selection.isCollapsed) {
       _setMentionSuggestions(const [], -1);
@@ -3895,6 +4286,47 @@ class _InfoPanelState extends State<_InfoPanel> {
               ],
               const SizedBox(height: 18),
               if (_mode == _InfoPanelMode.overview) ...[
+                _InfoSummaryTile(
+                  icon: conversation.settings.isMuted
+                      ? Icons.notifications_off_outlined
+                      : Icons.notifications_outlined,
+                  title: context.l10n.t(conversation.settings.isMuted
+                      ? 'unmuteConversation'
+                      : 'muteConversation'),
+                  subtitle: conversation.settings.isMuted
+                      ? context.l10n.t('muted')
+                      : context.l10n.t('notificationsEnabled'),
+                  onTap: () => state.setConversationMuted(
+                    conversation,
+                    !conversation.settings.isMuted,
+                  ),
+                ),
+                _InfoSummaryTile(
+                  icon: conversation.settings.isPinned
+                      ? Icons.push_pin_outlined
+                      : Icons.push_pin,
+                  title: context.l10n.t(conversation.settings.isPinned
+                      ? 'unpinConversation'
+                      : 'pinConversation'),
+                  subtitle: context.l10n.t('personalSetting'),
+                  onTap: () => state.setConversationPinned(
+                    conversation,
+                    !conversation.settings.isPinned,
+                  ),
+                ),
+                _InfoSummaryTile(
+                  icon: conversation.settings.isArchived
+                      ? Icons.unarchive_outlined
+                      : Icons.archive_outlined,
+                  title: context.l10n.t(conversation.settings.isArchived
+                      ? 'unarchiveConversation'
+                      : 'archiveConversation'),
+                  subtitle: context.l10n.t('personalSetting'),
+                  onTap: () => state.setConversationArchived(
+                    conversation,
+                    !conversation.settings.isArchived,
+                  ),
+                ),
                 if (isGroup)
                   _InfoSummaryTile(
                     icon: Icons.groups_outlined,

@@ -8,6 +8,9 @@ cors:
   global: "true"
   ips: "http://localhost:1800"
 
+chat:
+  recallWindowSeconds: 900
+
 database:
   # mysql | postgres | sqlite | sqlserver
   driver: "mysql"

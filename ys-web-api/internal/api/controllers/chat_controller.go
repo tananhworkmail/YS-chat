@@ -40,6 +40,30 @@ func (h *ChatController) SearchUsers(c *gin.Context) {
 }
 
 func (h *ChatController) Search(c *gin.Context) {
+	if conversationID := firstUintQuery(c, "conversationId"); conversationID > 0 {
+		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+		from, parseErr := parseOptionalTimeQuery(firstNonEmptyQuery(c, "from", "dateFrom"), false)
+		if parseErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+			return
+		}
+		to, parseErr := parseOptionalTimeQuery(firstNonEmptyQuery(c, "to", "dateTo"), true)
+		if parseErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+			return
+		}
+		messages, next, hasMore, searchErr := services.ChatServiceInstance.SearchConversationMessages(currentUserid(c), conversationID, request.SearchConversationMessagesRequest{
+			Keyword: c.Query("keyword"), SenderUserid: c.Query("senderUserid"), From: from, To: to,
+			AttachmentType: c.Query("attachmentType"), BeforeID: firstUintQuery(c, "beforeId"), Limit: limit,
+		})
+		if searchErr != nil {
+			writeChatError(c, searchErr)
+			return
+		}
+		results := &types.ChatSearchResults{Contacts: []types.ChatUser{}, Messages: messages, Files: []types.ChatMessage{}}
+		c.JSON(http.StatusOK, gin.H{"results": results, "messages": messages, "nextBeforeId": next, "hasMore": hasMore})
+		return
+	}
 	results, err := services.ChatServiceInstance.Search(currentUserid(c), c.Query("keyword"), c.Query("scope"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -314,12 +338,217 @@ func (h *ChatController) SendMessage(c *gin.Context) {
 		return
 	}
 
-	message, err := services.ChatServiceInstance.SendMessage(currentUserid(c), conversationID, req)
+	if req.ClientMessageID == "" {
+		req.ClientMessageID = strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	}
+	message, replay, err := services.ChatServiceInstance.SendMessageIdempotent(currentUserid(c), conversationID, req)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": message, "idempotentReplay": replay})
+}
+
+func (h *ChatController) MarkRead(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+	var req request.MarkConversationReadRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+	state, err := services.ChatServiceInstance.MarkRead(currentUserid(c), conversationID, req.LastReadMessageID)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"readState": state})
+}
+
+func (h *ChatController) MarkDelivered(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+	var req request.MarkConversationDeliveredRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+	if err := services.ChatServiceInstance.MarkDelivered(currentUserid(c), conversationID, req.MessageID); err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "DELIVERY_RECORDED"})
+}
+
+func (h *ChatController) CatchUpMessages(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	afterMessageID := firstUintQuery(c, "afterMessageId", "afterId")
+	afterSequence := firstUintQuery(c, "afterSequence")
+	messages, cursor, hasMore, err := services.ChatServiceInstance.CatchUpMessages(currentUserid(c), conversationID, afterMessageID, afterSequence, limit)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"messages": messages, "nextCursor": cursor, "hasMore": hasMore})
+}
+
+func (h *ChatController) SearchConversationMessages(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	beforeID := firstUintQuery(c, "beforeId")
+	from, err := parseOptionalTimeQuery(c.Query("from"), false)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+	to, err := parseOptionalTimeQuery(c.Query("to"), true)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+	messages, nextBeforeID, hasMore, err := services.ChatServiceInstance.SearchConversationMessages(currentUserid(c), conversationID, request.SearchConversationMessagesRequest{
+		Keyword: c.Query("keyword"), SenderUserid: c.Query("senderUserid"), From: from, To: to,
+		AttachmentType: c.Query("attachmentType"), BeforeID: beforeID, Limit: limit,
+	})
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"messages": messages, "nextBeforeId": nextBeforeID, "hasMore": hasMore})
+}
+
+func (h *ChatController) EditMessage(c *gin.Context) {
+	messageID, ok := parseMessageID(c)
+	if !ok {
+		return
+	}
+	var req request.EditChatMessageRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+	message, err := services.ChatServiceInstance.EditMessage(currentUserid(c), messageID, req)
 	if err != nil {
 		writeChatError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": message})
+}
+
+func (h *ChatController) GetMessageEditHistory(c *gin.Context) {
+	messageID, ok := parseMessageID(c)
+	if !ok {
+		return
+	}
+	history, err := services.ChatServiceInstance.GetMessageEditHistory(currentUserid(c), messageID)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"history": history})
+}
+
+func (h *ChatController) RecallMessage(c *gin.Context) {
+	messageID, ok := parseMessageID(c)
+	if !ok {
+		return
+	}
+	var req request.RecallChatMessageRequest
+	if c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+			return
+		}
+	}
+	message, err := services.ChatServiceInstance.RecallMessageVersion(currentUserid(c), messageID, req.Version)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": message})
+}
+
+func (h *ChatController) DeleteMessageForMe(c *gin.Context) {
+	messageID, ok := parseMessageID(c)
+	if !ok {
+		return
+	}
+	if err := services.ChatServiceInstance.DeleteMessageForMe(currentUserid(c), messageID); err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "MESSAGE_DELETED_FOR_ME"})
+}
+
+func (h *ChatController) AddReaction(c *gin.Context)    { h.setReaction(c, true) }
+func (h *ChatController) RemoveReaction(c *gin.Context) { h.setReaction(c, false) }
+
+func (h *ChatController) setReaction(c *gin.Context, add bool) {
+	messageID, ok := parseMessageID(c)
+	if !ok {
+		return
+	}
+	emoji := strings.TrimSpace(c.Param("emoji"))
+	if emoji == "" {
+		var req request.ChatReactionRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+			return
+		}
+		emoji = req.Emoji
+	}
+	reactions, err := services.ChatServiceInstance.SetReaction(currentUserid(c), messageID, emoji, add)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"reactions": reactions})
+}
+
+func (h *ChatController) UpdateConversationUserSettings(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+	var req request.UpdateConversationUserSettingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+	settings, err := services.ChatServiceInstance.UpdateConversationUserSettings(currentUserid(c), conversationID, req)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"settings": settings})
+}
+
+func (h *ChatController) SetTyping(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+	var req request.SetTypingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+	if err := services.ChatServiceInstance.SetTyping(currentUserid(c), conversationID, req.IsTyping); err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"isTyping": req.IsTyping})
 }
 
 func (h *ChatController) CreatePoll(c *gin.Context) {
@@ -398,13 +627,21 @@ func (h *ChatController) UploadFiles(c *gin.Context) {
 	}
 
 	attachments := make([]types.ChatAttachment, 0, len(files))
+	savedPaths := make([]string, 0, len(files))
+	cleanupSavedPaths := func() {
+		for _, savedPath := range savedPaths {
+			_ = os.Remove(savedPath)
+		}
+	}
 	for index, file := range files {
 		cleanName := sanitizeFilename(file.Filename)
 		destination, err := saveUploadedFileRandom(file, uploadDir, cleanName, "")
 		if err != nil {
+			cleanupSavedPaths()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": services.ErrSystem})
 			return
 		}
+		savedPaths = append(savedPaths, destination)
 
 		relativePath := cleanName
 		if index < len(relativePaths) && strings.TrimSpace(relativePaths[index]) != "" {
@@ -419,6 +656,11 @@ func (h *ChatController) UploadFiles(c *gin.Context) {
 			RelativePath: relativePath,
 			CreatedAt:    time.Now(),
 		})
+	}
+	if err := services.ChatServiceInstance.RegisterPendingUploads(currentUserid(c), attachments); err != nil {
+		cleanupSavedPaths()
+		writeChatError(c, err)
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"attachments": attachments})
@@ -442,13 +684,55 @@ func parseConversationID(c *gin.Context) (uint64, bool) {
 	return id, true
 }
 
+func parseMessageID(c *gin.Context) (uint64, bool) { return parseConversationID(c) }
+
+func firstUintQuery(c *gin.Context, names ...string) uint64 {
+	for _, name := range names {
+		if value, err := strconv.ParseUint(strings.TrimSpace(c.Query(name)), 10, 64); err == nil && value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func firstNonEmptyQuery(c *gin.Context, names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(c.Query(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func parseOptionalTimeQuery(value string, endOfDay bool) (*time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return &parsed, nil
+	}
+	parsed, err := time.ParseInLocation("2006-01-02", value, time.Local)
+	if err != nil {
+		return nil, err
+	}
+	if endOfDay {
+		parsed = parsed.Add(24*time.Hour - time.Nanosecond)
+	}
+	return &parsed, nil
+}
+
 func writeChatError(c *gin.Context, err error) {
 	status := http.StatusBadRequest
 	switch err.Error() {
 	case services.ErrChatNoPermission, services.ErrChatOnlyOwnerCanManageMembers:
 		status = http.StatusForbidden
-	case services.ErrChatConversationNotFound, services.ErrChatUserNotFound, services.ErrChatMemberNotFound, services.ErrChatPollNotFound:
+	case services.ErrChatConversationNotFound, services.ErrChatUserNotFound, services.ErrChatMemberNotFound, services.ErrChatPollNotFound, services.ErrChatMessageNotFound:
 		status = http.StatusNotFound
+	case services.ErrChatMessageVersionConflict, services.ErrChatClientMessageIDConflict:
+		status = http.StatusConflict
+	case services.ErrChatRecallWindowExpired:
+		status = http.StatusGone
 	case services.ErrSystem:
 		status = http.StatusInternalServerError
 	}

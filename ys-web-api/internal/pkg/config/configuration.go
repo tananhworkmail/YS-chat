@@ -10,6 +10,12 @@ type Configuration struct {
 	Server   ServerConfiguration
 	Cors     CorsConfiguration
 	Database DatabaseConfiguration
+	Chat     ChatConfiguration
+}
+
+type ChatConfiguration struct {
+	// RecallWindowSeconds defaults to 15 minutes when omitted or invalid.
+	RecallWindowSeconds int
 }
 
 type ServerConfiguration struct {

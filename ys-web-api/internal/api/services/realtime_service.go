@@ -3,28 +3,35 @@ package services
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"web-api/internal/pkg/models/types"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
 type RealtimeEvent struct {
-	Type           string                  `json:"type"`
-	ConversationID uint64                  `json:"conversationId,omitempty"`
-	Userid         string                  `json:"userid,omitempty"`
-	FromUserid     string                  `json:"fromUserid,omitempty"`
-	CallID         string                  `json:"callId,omitempty"`
-	SourceDeviceID string                  `json:"sourceDeviceId,omitempty"`
-	SourceToken    string                  `json:"-"`
-	Signal         json.RawMessage         `json:"signal,omitempty"`
-	IsOnline       bool                    `json:"isOnline,omitempty"`
-	Message        *types.ChatMessage      `json:"message,omitempty"`
-	Conversation   *types.ChatConversation `json:"conversation,omitempty"`
-	SentAt         time.Time               `json:"sentAt"`
+	EventID         string                  `json:"eventId"`
+	Type            string                  `json:"type"`
+	Version         int                     `json:"version"`
+	ServerTimestamp time.Time               `json:"serverTimestamp"`
+	ConversationID  uint64                  `json:"conversationId,omitempty"`
+	MessageID       uint64                  `json:"messageId,omitempty"`
+	Payload         interface{}             `json:"payload,omitempty"`
+	Userid          string                  `json:"userid,omitempty"`
+	FromUserid      string                  `json:"fromUserid,omitempty"`
+	CallID          string                  `json:"callId,omitempty"`
+	SourceDeviceID  string                  `json:"sourceDeviceId,omitempty"`
+	SourceToken     string                  `json:"-"`
+	Signal          json.RawMessage         `json:"signal,omitempty"`
+	IsOnline        bool                    `json:"isOnline,omitempty"`
+	Message         *types.ChatMessage      `json:"message,omitempty"`
+	Conversation    *types.ChatConversation `json:"conversation,omitempty"`
+	SentAt          time.Time               `json:"sentAt"`
 }
 
 type realtimeClient struct {
@@ -34,8 +41,10 @@ type realtimeClient struct {
 }
 
 type RealtimeHub struct {
-	mu      sync.RWMutex
-	clients map[string]map[*realtimeClient]struct{}
+	mu       sync.RWMutex
+	clients  map[string]map[*realtimeClient]struct{}
+	typingMu sync.Mutex
+	typing   map[string]*time.Timer
 }
 
 var RealtimeHubInstance = NewRealtimeHub()
@@ -43,6 +52,7 @@ var RealtimeHubInstance = NewRealtimeHub()
 func NewRealtimeHub() *RealtimeHub {
 	return &RealtimeHub{
 		clients: make(map[string]map[*realtimeClient]struct{}),
+		typing:  make(map[string]*time.Timer),
 	}
 }
 
@@ -93,9 +103,7 @@ func (h *RealtimeHub) OnlineSet(userids []string) map[string]bool {
 }
 
 func (h *RealtimeHub) BroadcastToUsers(userids []string, event RealtimeEvent) {
-	if event.SentAt.IsZero() {
-		event.SentAt = time.Now()
-	}
+	event = normalizeRealtimeEvent(event)
 
 	seen := make(map[string]bool, len(userids))
 	h.mu.RLock()
@@ -116,6 +124,30 @@ func (h *RealtimeHub) BroadcastToUsers(userids []string, event RealtimeEvent) {
 			}
 		}
 	}
+}
+
+func normalizeRealtimeEvent(event RealtimeEvent) RealtimeEvent {
+	now := time.Now().UTC()
+	// These fields are server-owned. Always replace inbound values so a client
+	// cannot spoof ordering, deduplication identity, or schema version.
+	event.EventID = uuid.NewString()
+	event.Version = 1
+	event.ServerTimestamp = now
+	event.SentAt = now
+	if event.MessageID == 0 && event.Message != nil {
+		event.MessageID = event.Message.ID
+	}
+	if event.Payload == nil {
+		switch {
+		case event.Message != nil:
+			event.Payload = map[string]interface{}{"message": event.Message}
+		case event.Conversation != nil:
+			event.Payload = map[string]interface{}{"conversation": event.Conversation}
+		default:
+			event.Payload = map[string]interface{}{}
+		}
+	}
+	return event
 }
 
 func (h *RealtimeHub) register(client *realtimeClient) {
@@ -171,7 +203,7 @@ func (h *RealtimeHub) broadcastPresence(userid string, isOnline bool) {
 		Type:     "chat.presence.changed",
 		Userid:   userid,
 		IsOnline: isOnline,
-		SentAt:   time.Now(),
+		Payload:  map[string]interface{}{"userid": userid, "isOnline": isOnline},
 	})
 }
 
@@ -200,7 +232,83 @@ func (client *realtimeClient) readPump(h *RealtimeHub) {
 
 func (h *RealtimeHub) handleClientEvent(client *realtimeClient, event RealtimeEvent) {
 	event.SourceDeviceID = strings.TrimSpace(event.SourceDeviceID)
-	_ = h.relayCallEvent(client.userid, event)
+	switch strings.TrimSpace(event.Type) {
+	case "typing.start":
+		_ = ChatServiceInstance.SetTyping(client.userid, event.ConversationID, true)
+	case "typing.stop":
+		_ = ChatServiceInstance.SetTyping(client.userid, event.ConversationID, false)
+	case "delivery.receipt", "message.delivered":
+		messageID := event.MessageID
+		if messageID == 0 {
+			messageID = uint64PayloadValue(event.Payload, "messageId")
+		}
+		_ = ChatServiceInstance.MarkDelivered(client.userid, event.ConversationID, messageID)
+	default:
+		_ = h.relayCallEvent(client.userid, event)
+	}
+}
+
+func uint64PayloadValue(payload interface{}, key string) uint64 {
+	values, ok := payload.(map[string]interface{})
+	if !ok {
+		return 0
+	}
+	value, ok := values[key]
+	if !ok {
+		return 0
+	}
+	switch typed := value.(type) {
+	case float64:
+		if typed > 0 {
+			return uint64(typed)
+		}
+	case json.Number:
+		parsed, _ := typed.Int64()
+		if parsed > 0 {
+			return uint64(parsed)
+		}
+	}
+	return 0
+}
+
+func (h *RealtimeHub) PublishTyping(userid string, conversationID uint64, isTyping bool, recipients []string) {
+	key := strings.TrimSpace(userid) + ":" + fmtUint(conversationID)
+	h.typingMu.Lock()
+	if timer := h.typing[key]; timer != nil {
+		timer.Stop()
+		delete(h.typing, key)
+	}
+	h.typingMu.Unlock()
+
+	typeName := "typing.stop"
+	expiresAt := time.Time{}
+	if isTyping {
+		typeName = "typing.start"
+		expiresAt = time.Now().UTC().Add(8 * time.Second)
+		var timer *time.Timer
+		timer = time.AfterFunc(8*time.Second, func() {
+			h.typingMu.Lock()
+			if h.typing[key] != timer {
+				h.typingMu.Unlock()
+				return
+			}
+			delete(h.typing, key)
+			h.typingMu.Unlock()
+			h.BroadcastToUsers(recipients, RealtimeEvent{Type: "typing.stop", ConversationID: conversationID, Userid: userid, Payload: map[string]interface{}{"userid": userid, "isTyping": false, "expired": true}})
+		})
+		h.typingMu.Lock()
+		h.typing[key] = timer
+		h.typingMu.Unlock()
+	}
+	payload := map[string]interface{}{"userid": userid, "isTyping": isTyping}
+	if !expiresAt.IsZero() {
+		payload["expiresAt"] = expiresAt
+	}
+	h.BroadcastToUsers(recipients, RealtimeEvent{Type: typeName, ConversationID: conversationID, Userid: userid, Payload: payload})
+}
+
+func fmtUint(value uint64) string {
+	return strconv.FormatUint(value, 10)
 }
 
 func (h *RealtimeHub) RelayCallControlEvent(userid string, eventType string, conversationID uint64, callID string, sourceDeviceID string, sourceToken string) error {
@@ -242,7 +350,15 @@ func (h *RealtimeHub) relayCallEvent(userid string, event RealtimeEvent) error {
 	event.Message = nil
 	event.Conversation = nil
 	event.IsOnline = false
-	event.SentAt = time.Now()
+	event.Payload = map[string]interface{}{
+		"fromUserid":     userid,
+		"userid":         userid,
+		"callId":         event.CallID,
+		"sourceDeviceId": event.SourceDeviceID,
+	}
+	if len(event.Signal) > 0 {
+		event.Payload.(map[string]interface{})["signal"] = event.Signal
+	}
 
 	h.BroadcastToUsers(recipients, event)
 	if db, err := ChatServiceInstance.chatDB(); err == nil {
