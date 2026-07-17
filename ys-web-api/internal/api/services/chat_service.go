@@ -435,7 +435,7 @@ func (s *ChatService) RegisterDeviceToken(currentUserid string, req request.Regi
 
 	token := strings.TrimSpace(req.Token)
 	deviceID := strings.TrimSpace(req.DeviceID)
-	if token == "" || deviceID == "" {
+	if token == "" || len(token) > 512 || deviceID == "" || len(deviceID) > 128 {
 		return errors.New(ErrInvalidInput)
 	}
 
@@ -443,20 +443,20 @@ func (s *ChatService) RegisterDeviceToken(currentUserid string, req request.Regi
 	switch platform {
 	case "android", "ios", "web":
 	default:
-		platform = "unknown"
+		return errors.New(ErrInvalidInput)
 	}
 
 	// A Firebase token belongs to an app installation, not to a login session.
 	// Clear every previous account association for this installation before
 	// assigning the token to the account that just logged in.
-	if err := db.Exec(
-		"DELETE FROM chat_device_tokens WHERE device_id = ?",
-		deviceID,
-	).Error; err != nil {
-		return errors.New(ErrSystem)
-	}
-
-	if err := db.Exec(`
+	err = db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(
+			"DELETE FROM chat_device_tokens WHERE device_id = ? AND token <> ?",
+			deviceID, token,
+		).Error; err != nil {
+			return err
+		}
+		return tx.Exec(`
 		INSERT INTO chat_device_tokens (userid, token, device_id, platform, updated_at, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
@@ -464,7 +464,9 @@ func (s *ChatService) RegisterDeviceToken(currentUserid string, req request.Regi
 			device_id = VALUES(device_id),
 			platform = VALUES(platform),
 			updated_at = VALUES(updated_at)
-	`, currentUserid, token, deviceID, platform, time.Now(), time.Now()).Error; err != nil {
+	`, currentUserid, token, deviceID, platform, time.Now(), time.Now()).Error
+	})
+	if err != nil {
 		return errors.New(ErrSystem)
 	}
 	return nil
@@ -477,7 +479,7 @@ func (s *ChatService) UnregisterDeviceToken(currentUserid string, req request.Un
 	}
 
 	deviceID := strings.TrimSpace(req.DeviceID)
-	if deviceID == "" {
+	if deviceID == "" || len(deviceID) > 128 {
 		return errors.New(ErrInvalidInput)
 	}
 
@@ -1447,6 +1449,9 @@ func (s *ChatService) createSystemMessage(db *gorm.DB, conversationID uint64, se
 }
 
 func (s *ChatService) chatDB() (*gorm.DB, error) {
+	if chatDBOverride != nil {
+		return chatDBOverride, nil
+	}
 	db, err := database.WEBDB_DBConnection()
 	if err != nil {
 		return nil, err
@@ -1522,6 +1527,25 @@ func ensureChatSchema(db *gorm.DB) error {
 			PRIMARY KEY (id),
 			UNIQUE KEY uk_chat_device_tokens_token (token),
 			INDEX idx_chat_device_tokens_userid (userid)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS chat_calls (
+			call_id VARCHAR(128) NOT NULL,
+			conversation_id BIGINT UNSIGNED NOT NULL,
+			caller_userid VARCHAR(64) NOT NULL,
+			callee_userid VARCHAR(64) NOT NULL,
+			accepted_by_device_id VARCHAR(128) NULL,
+			started_at DATETIME NOT NULL,
+			answered_at DATETIME NULL,
+			ended_at DATETIME NULL,
+			status VARCHAR(32) NOT NULL,
+			duration_seconds BIGINT NOT NULL DEFAULT 0,
+			end_reason VARCHAR(64) NULL,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			PRIMARY KEY (call_id),
+			INDEX idx_chat_calls_conversation_started (conversation_id, started_at),
+			INDEX idx_chat_calls_caller_started (caller_userid, started_at),
+			INDEX idx_chat_calls_callee_started (callee_userid, started_at),
+			INDEX idx_chat_calls_status_started (status, started_at)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS chat_messages (
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

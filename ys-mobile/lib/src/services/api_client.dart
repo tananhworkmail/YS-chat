@@ -228,6 +228,27 @@ class ApiClient {
     );
   }
 
+  Future<String> realtimeTicket() async {
+    final response = await _dio.post('/chat/realtime/ticket');
+    final body = _body(response.data);
+    return '${body['ticket'] ?? ''}'.trim();
+  }
+
+  Future<List<Map<String, dynamic>>> iceServers() async {
+    final response = await _dio.get('/chat/calls/ice-config');
+    final body = _body(response.data);
+    return _maps(body['iceServers']);
+  }
+
+  Future<Map<String, dynamic>> callState(String callId) async {
+    final response = await _dio.get(
+      '/chat/calls/${Uri.encodeComponent(callId)}',
+    );
+    final body = _body(response.data);
+    final call = body['call'];
+    return call is Map ? Map<String, dynamic>.from(call) : <String, dynamic>{};
+  }
+
   Future<ConversationReadState> markConversationRead(
     int conversationId,
     int messageId,

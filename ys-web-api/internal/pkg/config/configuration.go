@@ -11,11 +11,35 @@ type Configuration struct {
 	Cors     CorsConfiguration
 	Database DatabaseConfiguration
 	Chat     ChatConfiguration
+	Realtime RealtimeConfiguration
+	WebRTC   WebRTCConfiguration
 }
 
 type ChatConfiguration struct {
 	// RecallWindowSeconds defaults to 15 minutes when omitted or invalid.
 	RecallWindowSeconds int
+}
+
+type RealtimeConfiguration struct {
+	EventBus            string
+	RedisURL            string
+	RedisChannel        string
+	PingIntervalSeconds int
+	PongWaitSeconds     int
+	WriteWaitSeconds    int
+	MaxMessageBytes     int64
+	SendQueueSize       int
+}
+
+type WebRTCConfiguration struct {
+	STUNURLs                   []string
+	TURNURLs                   []string
+	TURNUsername               string
+	TURNCredential             string
+	TURNCredentialTTLSeconds   int
+	CallRingTimeoutSeconds     int
+	CallConnectTimeoutSeconds  int
+	CallMaximumDurationSeconds int
 }
 
 type ServerConfiguration struct {

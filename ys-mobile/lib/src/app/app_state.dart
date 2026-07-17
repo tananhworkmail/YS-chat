@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -9,6 +11,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/models.dart';
 import '../services/api_client.dart';
+import '../services/call_state_machine.dart';
 import '../services/push_service.dart';
 import '../services/realtime_service.dart';
 import '../services/token_store.dart';
@@ -28,6 +31,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _remoteCallSubscription = pushService.remoteCallEvents.listen(
       (event) => unawaited(_handleRemoteCallEvent(event)),
     );
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen(
+          _handleConnectivityChanged,
+        );
+    unawaited(_initializeConnectivity());
   }
 
   final ApiClient apiClient;
@@ -63,6 +70,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   int callNoticeSequence = 0;
   String languageCode = 'vi';
   Timer? _reconnectTimer;
+  Timer? _realtimeStableTimer;
   Timer? _outgoingTypingExpiryTimer;
   final Map<String, Timer> _incomingTypingExpiryTimers = {};
   final Map<int, int> _lastSeenMessageIds = {};
@@ -76,6 +84,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   final Set<int> _deliveredInFlight = {};
   final Map<int, int> _activeDeliveredTargets = {};
   bool _catchingUp = false;
+  bool _networkAvailable = true;
+  int _reconnectAttempt = 0;
+  final Random _reconnectRandom = Random();
   int _nextLocalMessageId = -1;
   int _outgoingTypingConversationId = 0;
   DateTime? _lastTypingStartSentAt;
@@ -92,6 +103,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   NativeCallAction? _pendingNativeCallAction;
   late final StreamSubscription<NativeCallAction> _nativeCallSubscription;
   late final StreamSubscription<RemoteCallEvent> _remoteCallSubscription;
+  late final StreamSubscription<List<ConnectivityResult>>
+      _connectivitySubscription;
   RTCPeerConnection? _peerConnection;
   MediaStream? _localCallStream;
   final List<Map<String, dynamic>> _pendingIceCandidates = [];
@@ -103,9 +116,43 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _appLifecycleState = state;
     if (state == AppLifecycleState.resumed) {
+      if (isAuthenticated && _networkAvailable) {
+        if (realtimeService.isConnected) {
+          unawaited(_handleRealtimeConnected());
+        } else {
+          _connectRealtime();
+        }
+      }
+      unawaited(_reconcileCurrentCall());
       unawaited(_markSelectedConversationReadOnResume());
     } else {
       stopTyping();
+      if (callState == 'idle') {
+        _reconnectTimer?.cancel();
+        unawaited(realtimeService.disconnect());
+      }
+    }
+  }
+
+  Future<void> _initializeConnectivity() async {
+    try {
+      _handleConnectivityChanged(await Connectivity().checkConnectivity());
+    } catch (_) {}
+  }
+
+  void _handleConnectivityChanged(List<ConnectivityResult> results) {
+    final available =
+        results.any((result) => result != ConnectivityResult.none);
+    if (_networkAvailable == available) return;
+    _networkAvailable = available;
+    if (!available) {
+      _reconnectTimer?.cancel();
+      unawaited(realtimeService.disconnect());
+      return;
+    }
+    _reconnectAttempt = 0;
+    if (isAuthenticated && (isAppResumed || callState != 'idle')) {
+      _connectRealtime();
     }
   }
 
@@ -122,6 +169,33 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (latestMessageId > 0) {
       await markConversationRead(conversation.id, latestMessageId);
     }
+  }
+
+  Future<void> _reconcileCurrentCall() async {
+    final expectedCallId = callId;
+    if (!isAuthenticated || expectedCallId.isEmpty) return;
+    try {
+      final record = await apiClient.callState(expectedCallId);
+      if (callId != expectedCallId) return;
+      final status = '${record['status'] ?? ''}';
+      const terminalStatuses = {
+        'rejected',
+        'busy',
+        'canceled',
+        'completed',
+        'missed',
+        'failed'
+      };
+      if (terminalStatuses.contains(status)) {
+        _cleanupCall('Cuoc goi da ket thuc');
+        return;
+      }
+      if (callState == 'incoming' &&
+          status != 'ringing' &&
+          '${record['acceptedByDeviceId'] ?? ''}' != tokenStore.deviceId) {
+        _cleanupCall('Cuoc goi da duoc nghe tren thiet bi khac');
+      }
+    } catch (_) {}
   }
 
   Future<void> restoreSession() async {
@@ -197,6 +271,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _cleanupCall();
     await realtimeService.disconnect();
     _reconnectTimer?.cancel();
+    _realtimeStableTimer?.cancel();
+    _reconnectAttempt = 0;
     try {
       await pushService.unregisterCurrentDevice();
     } catch (_) {
@@ -1050,16 +1126,26 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _connectRealtime() {
-    realtimeService.connect(
+    if (!isAuthenticated || !_networkAvailable) return;
+    if (!isAppResumed && callState == 'idle') return;
+    unawaited(realtimeService.connect(
       onEvent: _handleRealtimeEvent,
       onError: (_) => _scheduleRealtimeReconnect(),
       onConnected: () => unawaited(_handleRealtimeConnected()),
       onDone: _scheduleRealtimeReconnect,
-    );
+    ));
   }
 
   Future<void> _handleRealtimeConnected() async {
     _reconnectTimer?.cancel();
+    realtimeService.restoreSubscriptions(
+      conversations.map((conversation) => conversation.id),
+    );
+    _realtimeStableTimer?.cancel();
+    _realtimeStableTimer = Timer(const Duration(seconds: 30), () {
+      _reconnectAttempt = 0;
+      _realtimeStableTimer = null;
+    });
     final knownConversationIds =
         conversations.map((conversation) => conversation.id).toSet();
     await _catchUpAfterReconnect();
@@ -1161,9 +1247,19 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _scheduleRealtimeReconnect() {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated || !_networkAvailable) return;
+    if (!isAppResumed && callState == 'idle') return;
     _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(const Duration(seconds: 3), _connectRealtime);
+    _realtimeStableTimer?.cancel();
+    _realtimeStableTimer = null;
+    const baseDelayMs = 1000;
+    const maxDelayMs = 30000;
+    final exponent = _reconnectAttempt > 10 ? 10 : _reconnectAttempt;
+    final cappedDelay = min(maxDelayMs, baseDelayMs * (1 << exponent));
+    final delayMs = (cappedDelay ~/ 2) +
+        _reconnectRandom.nextInt(max(1, cappedDelay - (cappedDelay ~/ 2)));
+    _reconnectAttempt += 1;
+    _reconnectTimer = Timer(Duration(milliseconds: delayMs), _connectRealtime);
   }
 
   void _handleRealtimeEvent(RealtimeEvent event) {
@@ -1918,6 +2014,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     return right.compareTo(left);
   }
 
+  bool _transitionCallState(String nextState) {
+    if (!CallStateMachine.canTransition(callState, nextState)) return false;
+    callState = nextState;
+    return true;
+  }
+
   Future<void> startAudioCall() async {
     final conversation = selectedConversation;
     if (conversation == null ||
@@ -1928,7 +2030,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     callId = const Uuid().v4();
     callConversationId = conversation.id;
     callPeerName = conversation.titleFor(tokenStore.userid ?? '');
-    callState = 'outgoing';
+    if (!_transitionCallState('outgoing')) return;
     callStatus = 'Dang goi...';
     callMuted = false;
     callSpeakerOn = false;
@@ -1937,7 +2039,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
     try {
       await _prepareLocalCallMedia();
-      _sendCallEvent('call.invite');
+      if (!await _sendCallControlEvent(
+        type: 'call.invite',
+        conversationId: callConversationId,
+        callId: callId,
+      )) {
+        _cleanupCall('Khong the bat dau cuoc goi');
+        return;
+      }
       _startCallTimeout();
     } catch (_) {
       _cleanupCall('Khong truy cap duoc micro');
@@ -1946,16 +2055,23 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> acceptIncomingCall() async {
     if (callState != 'incoming' || callId.isEmpty) return;
-    callState = 'connecting';
-    callStatus = 'Dang ket noi...';
-    notifyListeners();
     try {
+      if (!await _sendCallControlEvent(
+        type: 'call.accept',
+        conversationId: callConversationId,
+        callId: callId,
+      )) {
+        _cleanupCall('Cuoc goi da duoc nghe tren thiet bi khac');
+        return;
+      }
+      if (!_transitionCallState('connecting')) return;
+      callStatus = 'Dang ket noi...';
+      notifyListeners();
       await _prepareLocalCallMedia();
       await _ensurePeerConnection();
-      _sendCallEvent('call.accept');
       _startCallTimeout();
     } catch (_) {
-      _sendCallEvent('call.reject');
+      _sendCallEvent('call.end');
       _cleanupCall('Khong truy cap duoc micro');
     }
   }
@@ -2021,7 +2137,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         callPeerName = action.callerName.trim().isNotEmpty
             ? action.callerName.trim()
             : conversation.titleFor(tokenStore.userid ?? '');
-        callState = 'incoming';
+        if (!_transitionCallState('incoming')) return;
         callStatus = 'Cuoc goi den';
         callMuted = false;
         callSpeakerOn = false;
@@ -2041,14 +2157,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
           type: 'call.reject',
           conversationId: action.conversationId,
           callId: action.callId,
-        ));
+        ).then((_) {}));
         unawaited(pushService.endIncomingCall(action.callId));
       } else if (action.type == NativeCallActionType.ended) {
         unawaited(_sendCallControlEvent(
           type: 'call.end',
           conversationId: action.conversationId,
           callId: action.callId,
-        ));
+        ).then((_) {}));
         unawaited(pushService.endIncomingCall(action.callId));
       }
       return;
@@ -2097,7 +2213,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> _handleCallRealtimeEvent(RealtimeEvent event) async {
     final sender =
         event.fromUserid.isNotEmpty ? event.fromUserid : event.userid;
-    if (sender == tokenStore.userid) return;
+    if (event.sourceDeviceId.isNotEmpty &&
+        event.sourceDeviceId == tokenStore.deviceId) {
+      return;
+    }
 
     if (event.type == 'call.invite') {
       if (event.callId == callId &&
@@ -2105,11 +2224,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         return;
       }
       if (callState != 'idle') {
-        _sendCallControlEvent(
+        unawaited(_sendCallControlEvent(
           type: 'call.busy',
           conversationId: event.conversationId,
           callId: event.callId,
-        );
+        ).then((_) {}));
         unawaited(pushService.endIncomingCall(event.callId));
         return;
       }
@@ -2120,7 +2239,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       callId = event.callId;
       callConversationId = event.conversationId;
       callPeerName = conversation.titleFor(tokenStore.userid ?? '');
-      callState = 'incoming';
+      if (!_transitionCallState('incoming')) {
+        callId = '';
+        callConversationId = 0;
+        return;
+      }
       callStatus = 'Cuoc goi den';
       callMuted = false;
       callSpeakerOn = false;
@@ -2148,6 +2271,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
     switch (event.type) {
       case 'call.accept':
+        if (sender == tokenStore.userid && callState == 'incoming') {
+          unawaited(pushService.endIncomingCall(callId));
+          _cleanupCall('Cuoc goi da duoc nghe tren thiet bi khac');
+          break;
+        }
         if (callState == 'incoming') {
           unawaited(pushService.endIncomingCall(callId));
           _cleanupCall('Cuoc goi da duoc nghe tren thiet bi khac');
@@ -2174,7 +2302,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       case 'call.offer':
         if (event.signal == null) return;
         try {
-          callState = 'connecting';
+          if (callState == 'incoming' && !_transitionCallState('connecting')) {
+            return;
+          }
           callStatus = 'Dang ket noi...';
           notifyListeners();
           await _prepareLocalCallMedia();
@@ -2232,9 +2362,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Future<RTCPeerConnection> _ensurePeerConnection() async {
     if (_peerConnection != null) return _peerConnection!;
     final pc = await createPeerConnection({
-      'iceServers': [
-        {'urls': 'stun:stun.l.google.com:19302'},
-      ],
+      'iceServers': await apiClient.iceServers(),
     });
     _peerConnection = pc;
     for (final track in _localCallStream?.getTracks() ?? <MediaStreamTrack>[]) {
@@ -2261,7 +2389,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> _startOutgoingCallConnection() async {
     if (callState != 'outgoing' || _callOfferStarted) return;
     _callOfferStarted = true;
-    callState = 'connecting';
+    if (!_transitionCallState('connecting')) return;
     callStatus = 'Dang ket noi...';
     notifyListeners();
     try {
@@ -2278,12 +2406,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _sendCallControlEvent({
+  Future<bool> _sendCallControlEvent({
     required String type,
     required int conversationId,
     required String callId,
   }) async {
-    if (conversationId <= 0 || callId.trim().isEmpty) return;
+    if (conversationId <= 0 || callId.trim().isEmpty) return false;
     try {
       final deviceId = await tokenStore.ensureDeviceId();
       final token = await pushService.currentDeviceToken();
@@ -2294,7 +2422,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         deviceId: deviceId,
         token: token,
       );
-    } catch (_) {}
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   void _sendCallEvent(String type, [Map<String, dynamic>? signal]) {
@@ -2312,13 +2443,15 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         type: type,
         conversationId: callConversationId,
         callId: callId,
-      ));
+      ).then((_) {}));
       return;
     }
     realtimeService.sendCallEvent({
       'type': type,
+      'eventId': const Uuid().v4(),
       'conversationId': callConversationId,
       'callId': callId,
+      'sourceDeviceId': tokenStore.deviceId ?? '',
       if (signal != null) 'signal': signal,
     });
   }
@@ -2353,7 +2486,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   void _activateCall() {
     if (callState == 'active') return;
     _callTimeoutTimer?.cancel();
-    callState = 'active';
+    if (!_transitionCallState('active')) return;
     callStatus = 'Dang goi';
     _callStartedAt = DateTime.now();
     callDuration = 0;
@@ -2396,7 +2529,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _localCallStream?.dispose();
     _localCallStream = null;
     _pendingIceCandidates.clear();
-    callState = 'idle';
+    _transitionCallState('idle');
     callStatus = message;
     callId = '';
     callConversationId = 0;
@@ -2471,12 +2604,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _reconnectTimer?.cancel();
+    _realtimeStableTimer?.cancel();
     unawaited(realtimeService.disconnect());
     _resetMessagingSessionState();
     _callTimeoutTimer?.cancel();
     _callDurationTimer?.cancel();
     unawaited(_nativeCallSubscription.cancel());
     unawaited(_remoteCallSubscription.cancel());
+    unawaited(_connectivitySubscription.cancel());
     unawaited(pushService.dispose());
     super.dispose();
   }

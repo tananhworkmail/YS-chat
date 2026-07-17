@@ -245,20 +245,20 @@ func (s *PushService) logMulticastResult(
 		if index < len(tokens) {
 			token = tokenHint(tokens[index])
 		}
-		log.Printf("firebase push %s token %s rejected: %v", kind, token, item.Error)
+		shouldLog := logged < 5
+		if shouldLog {
+			log.Printf("firebase push %s token %s rejected: %v", kind, token, item.Error)
+			logged++
+		}
 		if isInvalidRegistrationToken(item.Error) && index < len(tokens) {
 			if deleteErr := db.Exec(
 				"DELETE FROM chat_device_tokens WHERE token = ?",
 				tokens[index],
 			).Error; deleteErr != nil {
-				log.Printf("failed to remove invalid Firebase token %s: %v", token, deleteErr)
-			} else {
-				log.Printf("removed invalid Firebase token %s", token)
+				if shouldLog {
+					log.Printf("failed to remove invalid Firebase token %s: %v", token, deleteErr)
+				}
 			}
-		}
-		logged++
-		if logged >= 5 {
-			break
 		}
 	}
 	log.Printf("firebase push %s partial failure: success=%d failure=%d", kind, response.SuccessCount, response.FailureCount)

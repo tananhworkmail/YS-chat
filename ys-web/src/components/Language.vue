@@ -17,7 +17,7 @@
       />
     </el-select>
 
-   <template #footer class="dialog-footer">
+    <template #footer>
       <el-button @click="cancel">{{ $t("home.actions.cancel") }}</el-button>
       <el-button type="primary" @click="apply">{{
         $t("home.actions.apply")

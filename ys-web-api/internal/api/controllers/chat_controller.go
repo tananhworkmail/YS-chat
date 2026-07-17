@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"web-api/internal/api/middlewares"
 	"web-api/internal/api/services"
 	"web-api/internal/pkg/models/request"
 	"web-api/internal/pkg/models/types"
@@ -122,13 +123,26 @@ func (h *ChatController) Realtime(c *gin.Context) {
 	if err != nil {
 		return
 	}
-	services.RealtimeHubInstance.Serve(currentUserid(c), conn)
+	services.RealtimeHubInstance.Serve(currentUserid(c), conn, c.Query("reconnect") == "1")
+}
+
+func (h *ChatController) RealtimeTicket(c *gin.Context) {
+	fullname, _ := c.Get("fullname")
+	fullnameString, _ := fullname.(string)
+	ticket, expiresIn, err := middlewares.IssueRealtimeTicket(currentUserid(c), strings.TrimSpace(fullnameString))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": services.ErrSystem})
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{"ticket": ticket, "expiresIn": expiresIn})
 }
 
 func (h *ChatController) RealtimeHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"ok":     true,
-		"userid": currentUserid(c),
+		"ok":      true,
+		"userid":  currentUserid(c),
+		"metrics": services.RealtimeHubInstance.Metrics(),
 	})
 }
 
@@ -180,6 +194,30 @@ func (h *ChatController) SendCallEvent(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "CALL_EVENT_SENT"})
+}
+
+func (h *ChatController) ICEConfiguration(c *gin.Context) {
+	c.Header("Cache-Control", "private, no-store")
+	c.JSON(http.StatusOK, services.BuildICEConfiguration(currentUserid(c)))
+}
+
+func (h *ChatController) CallHistory(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	calls, err := services.CallServiceInstance.History(currentUserid(c), limit)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"calls": calls})
+}
+
+func (h *ChatController) GetCall(c *gin.Context) {
+	call, err := services.CallServiceInstance.Get(currentUserid(c), c.Param("id"))
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"call": call})
 }
 
 func (h *ChatController) ListConversations(c *gin.Context) {
@@ -729,8 +767,11 @@ func writeChatError(c *gin.Context, err error) {
 		status = http.StatusForbidden
 	case services.ErrChatConversationNotFound, services.ErrChatUserNotFound, services.ErrChatMemberNotFound, services.ErrChatPollNotFound, services.ErrChatMessageNotFound:
 		status = http.StatusNotFound
-	case services.ErrChatMessageVersionConflict, services.ErrChatClientMessageIDConflict:
+	case services.ErrChatMessageVersionConflict, services.ErrChatClientMessageIDConflict,
+		services.ErrCallConflict, services.ErrCallInvalidTransition:
 		status = http.StatusConflict
+	case services.ErrCallNotFound:
+		status = http.StatusNotFound
 	case services.ErrChatRecallWindowExpired:
 		status = http.StatusGone
 	case services.ErrSystem:

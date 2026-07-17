@@ -10,20 +10,95 @@ workflows:
       xcode: latest
       cocoapods: default
 
+    cache:
+      cache_paths:
+        - $FLUTTER_ROOT/.pub-cache
+        - $HOME/Library/Caches/CocoaPods
+
     scripts:
+      - name: Validate build environment
+        script: |
+          set -euo pipefail
+          if [ -z "${YS_API_URL:-}" ]; then
+            echo "YS_API_URL must be configured in the Codemagic environment." >&2
+            exit 1
+          fi
+          if [ "${YS_FIREBASE_ENABLED:-false}" = "true" ] && [ ! -f ios/Runner/GoogleService-Info.plist ]; then
+            echo "Firebase is enabled but ios/Runner/GoogleService-Info.plist is unavailable." >&2
+            exit 1
+          fi
+
       - name: Get Flutter packages
         script: flutter pub get
 
+      - name: Analyze Flutter project
+        script: flutter analyze
+
+      - name: Run Flutter tests
+        script: flutter test
+
       - name: Build iOS without code signing
-        script: flutter build ios --release --no-codesign
+        script: flutter build ios --release --no-codesign --dart-define=YS_API_URL="$YS_API_URL"
 
       - name: Package unsigned IPA
         script: |
+          set -euo pipefail
           mkdir -p build/ios/ipa/Payload
           cp -R build/ios/iphoneos/Runner.app build/ios/ipa/Payload/Runner.app
           cd build/ios/ipa
-          zip -r Runner-unsigned.ipa Payload
+          zip -rq Runner-unsigned.ipa Payload
 
     artifacts:
       - build/ios/ipa/Runner-unsigned.ipa
       - ys-mobile/build/ios/ipa/Runner-unsigned.ipa
+
+  ios_signed:
+    name: iOS signed IPA
+    working_directory: ys-mobile
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.tythac.ysMobile
+
+    cache:
+      cache_paths:
+        - $FLUTTER_ROOT/.pub-cache
+        - $HOME/Library/Caches/CocoaPods
+
+    scripts:
+      - name: Validate build environment
+        script: |
+          set -euo pipefail
+          if [ -z "${YS_API_URL:-}" ]; then
+            echo "YS_API_URL must be configured in the Codemagic environment." >&2
+            exit 1
+          fi
+          if [ "${YS_FIREBASE_ENABLED:-false}" = "true" ] && [ ! -f ios/Runner/GoogleService-Info.plist ]; then
+            echo "Firebase is enabled but ios/Runner/GoogleService-Info.plist is unavailable." >&2
+            exit 1
+          fi
+
+      - name: Get Flutter packages
+        script: flutter pub get
+
+      - name: Analyze Flutter project
+        script: flutter analyze
+
+      - name: Run Flutter tests
+        script: flutter test
+
+      - name: Configure Xcode signing
+        script: xcode-project use-profiles
+
+      - name: Build signed IPA
+        script: flutter build ipa --release --dart-define=YS_API_URL="$YS_API_URL"
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - ys-mobile/build/ios/ipa/*.ipa

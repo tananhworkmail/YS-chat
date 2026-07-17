@@ -30,7 +30,11 @@ Future<void> main() async {
     try {
       final tokenStore = TokenStore();
       final apiClient = ApiClient(AppConfig.apiBaseUrl, tokenStore);
-      final realtimeService = RealtimeService(AppConfig.apiBaseUrl, tokenStore);
+      final realtimeService = RealtimeService(
+        AppConfig.apiBaseUrl,
+        tokenStore,
+        ticketProvider: apiClient.realtimeTicket,
+      );
       final pushService = PushService(apiClient, tokenStore);
       await pushService.initialize();
       final appState = AppState(

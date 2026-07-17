@@ -4,7 +4,19 @@ const API_URL = import.meta.env.VITE_API_URL || "/api/v1";
 
 const api = axios.create({
   baseURL: API_URL,
+  timeout: 15000,
 });
+
+const DEVICE_ID_KEY = "ys_device_id";
+
+export const getOrCreateDeviceId = () => {
+  const stored = localStorage.getItem(DEVICE_ID_KEY)?.trim();
+  if (stored) return stored;
+  const generated = globalThis.crypto?.randomUUID?.()
+    || `web-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  localStorage.setItem(DEVICE_ID_KEY, generated);
+  return generated;
+};
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("user_token");
@@ -34,8 +46,12 @@ export const updateContactNickname = (userid, nickname) => {
   return api.put(`/chat/contacts/${encodeURIComponent(userid)}/nickname`, { nickname });
 };
 
-export const registerDeviceToken = (token, platform) => {
-  return api.post("/chat/devices", { token, platform });
+export const registerDeviceToken = (token, platform = "web", deviceId = getOrCreateDeviceId()) => {
+  return api.post("/chat/devices", { token, platform, deviceId });
+};
+
+export const unregisterDeviceToken = (deviceId = getOrCreateDeviceId(), token = "") => {
+  return api.delete("/chat/devices", { data: { deviceId, token } });
 };
 
 export const getConversations = () => {
@@ -169,17 +185,30 @@ export const uploadAvatar = (file) => {
   return api.post("/profile/avatar", formData);
 };
 
-export const getRealtimeUrl = () => {
-  const token = localStorage.getItem("user_token") || "";
+export const issueRealtimeTicket = (reconnect = false) => {
+  return api.post("/chat/realtime/ticket", { reconnect });
+};
+
+export const getRealtimeUrl = (ticket, reconnect = false) => {
   const origin = window.location?.origin || "http://localhost";
   const apiBase = /^https?:\/\//i.test(API_URL)
     ? API_URL
     : new URL(API_URL, origin).toString();
   const url = new URL(`${apiBase.replace(/\/$/, "")}/chat/realtime`);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("token", token);
+  url.searchParams.set("ticket", ticket);
+  if (reconnect) url.searchParams.set("reconnect", "1");
   return url.toString();
 };
+
+export const getICEConfiguration = () => api.get("/chat/calls/ice-config");
+
+export const sendCallControlEvent = ({ type, conversationId, callId, deviceId = getOrCreateDeviceId(), token = "" }) =>
+  api.post("/chat/calls/events", { type, conversationId, callId, deviceId, ...(token ? { token } : {}) });
+
+export const getCallHistory = (limit = 50) => api.get("/chat/calls/history", { params: { limit } });
+
+export const getCall = (callId) => api.get(`/chat/calls/${encodeURIComponent(callId)}`);
 
 export default {
   searchUsers,
@@ -188,6 +217,8 @@ export default {
   addContact,
   updateContactNickname,
   registerDeviceToken,
+  unregisterDeviceToken,
+  getOrCreateDeviceId,
   getConversations,
   createDirectConversation,
   createGroupConversation,
@@ -218,4 +249,9 @@ export default {
   changePassword,
   uploadAvatar,
   getRealtimeUrl,
+  issueRealtimeTicket,
+  getICEConfiguration,
+  sendCallControlEvent,
+  getCallHistory,
+  getCall,
 };

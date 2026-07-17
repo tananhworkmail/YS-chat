@@ -2280,6 +2280,7 @@ import chatApi from "@/store/chat";
 import {
   applyMessageReceipt,
   attachClientMessageId,
+  canTransitionCallState,
   createClientMessageId,
   isRetryableSendError,
   mergeCatchUpCursor,
@@ -2422,8 +2423,12 @@ let searchTimer = null;
 let contactLookupTimer = null;
 let realtimeSocket = null;
 let realtimeReconnectTimer = null;
+let realtimeStableTimer = null;
 let realtimeReadyWaiters = [];
 let realtimeHasConnected = false;
+let realtimeReconnectAttempt = 0;
+let realtimeConnecting = false;
+let realtimeConnectionEpoch = 0;
 let readAckTimer = null;
 let typingStopTimer = null;
 let typingLastSentAt = 0;
@@ -2444,6 +2449,12 @@ let localCallStream = null;
 let remoteCallStream = null;
 let pendingCallIceCandidates = [];
 let callTimeoutTimer = null;
+let cachedIceServers = [];
+let iceServersExpireAt = 0;
+const realtimeBaseDelayMs = 1000;
+const realtimeMaxDelayMs = 30000;
+const realtimeStableAfterMs = 30000;
+const currentDeviceId = chatApi.getOrCreateDeviceId();
 let callDurationTimer = null;
 let callStartedAt = 0;
 let ringtoneContext = null;
@@ -2806,6 +2817,7 @@ onMounted(async () => {
   connectRealtime();
   document.addEventListener("visibilitychange", syncAfterVisibilityReturn);
   window.addEventListener("online", syncAfterNetworkReturn);
+  window.addEventListener("offline", syncAfterNetworkLost);
 });
 
 onBeforeUnmount(() => {
@@ -2820,6 +2832,7 @@ onBeforeUnmount(() => {
   typingExpiryTimers.clear();
   document.removeEventListener("visibilitychange", syncAfterVisibilityReturn);
   window.removeEventListener("online", syncAfterNetworkReturn);
+  window.removeEventListener("offline", syncAfterNetworkLost);
   cancelVoiceRecording();
   cleanupCall();
   disconnectRealtime();
@@ -3077,8 +3090,12 @@ const notificationPreview = (message) => {
   return `${sender}${message.content || homeT("previews.newMessage")}`;
 };
 
-const connectRealtime = () => {
-  if (componentUnmounted || !localStorage.getItem("user_token")) return;
+const connectRealtime = async () => {
+  if (componentUnmounted || !localStorage.getItem("user_token") || realtimeConnecting) return;
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    realtimeStatus.value = "offline";
+    return;
+  }
   if (realtimeSocket?.readyState === WebSocket.OPEN || realtimeSocket?.readyState === WebSocket.CONNECTING) return;
   if (realtimeSocket) {
     realtimeSocket.onclose = null;
@@ -3086,27 +3103,49 @@ const connectRealtime = () => {
     realtimeSocket = null;
   }
 
+  const epoch = ++realtimeConnectionEpoch;
+  realtimeConnecting = true;
+  const isReconnect = realtimeHasConnected;
   try {
-    realtimeLastUrl.value = chatApi.getRealtimeUrl();
+    const response = await chatApi.issueRealtimeTicket(isReconnect);
+    if (componentUnmounted || epoch !== realtimeConnectionEpoch) return;
+    const ticket = String(response.data?.ticket || "");
+    if (!ticket) throw new Error("Realtime ticket is empty");
+    const socketUrl = chatApi.getRealtimeUrl(ticket, isReconnect);
+    const displayUrl = new URL(socketUrl);
+    displayUrl.search = "";
+    realtimeLastUrl.value = displayUrl.toString();
     realtimeLastError.value = "";
     realtimeStatus.value = "connecting";
-    realtimeSocket = new WebSocket(realtimeLastUrl.value);
+    realtimeSocket = new WebSocket(socketUrl);
   } catch (error) {
+    if (epoch !== realtimeConnectionEpoch) return;
     realtimeStatus.value = "error";
     realtimeLastError.value = error?.message || "Cannot create WebSocket";
     settleRealtimeReadyWaiters(false);
     startFallbackRefresh();
     scheduleRealtimeReconnect();
     return;
+  } finally {
+    if (epoch === realtimeConnectionEpoch) realtimeConnecting = false;
   }
 
   realtimeSocket.onopen = () => {
-    const isReconnect = realtimeHasConnected;
     realtimeHasConnected = true;
     realtimeStatus.value = "connected";
     realtimeLastError.value = "";
     settleRealtimeReadyWaiters(true);
     stopFallbackRefresh();
+    sendRealtimeEvent({
+      type: "subscription.restore",
+      eventId: createClientMessageId(),
+      payload: { conversationIds: conversations.value.map((conversation) => conversation.id) },
+    });
+    if (realtimeStableTimer) window.clearTimeout(realtimeStableTimer);
+    realtimeStableTimer = window.setTimeout(() => {
+      realtimeReconnectAttempt = 0;
+      realtimeStableTimer = null;
+    }, realtimeStableAfterMs);
     void syncAfterRealtimeOpen(isReconnect);
   };
 
@@ -3119,6 +3158,10 @@ const connectRealtime = () => {
   };
 
   realtimeSocket.onclose = () => {
+    if (realtimeStableTimer) {
+      window.clearTimeout(realtimeStableTimer);
+      realtimeStableTimer = null;
+    }
     realtimeSocket = null;
     realtimeStatus.value = "disconnected";
     settleRealtimeReadyWaiters(false);
@@ -3134,17 +3177,26 @@ const connectRealtime = () => {
 };
 
 const scheduleRealtimeReconnect = () => {
-  if (componentUnmounted || realtimeReconnectTimer) return;
+  if (componentUnmounted || realtimeReconnectTimer || navigator.onLine === false) return;
+  const cappedDelay = Math.min(realtimeMaxDelayMs, realtimeBaseDelayMs * (2 ** realtimeReconnectAttempt));
+  const delay = Math.round((cappedDelay / 2) + (Math.random() * cappedDelay / 2));
+  realtimeReconnectAttempt += 1;
   realtimeReconnectTimer = window.setTimeout(() => {
     realtimeReconnectTimer = null;
-    connectRealtime();
-  }, 2500);
+    void connectRealtime();
+  }, delay);
 };
 
 const disconnectRealtime = () => {
+	++realtimeConnectionEpoch;
+	realtimeConnecting = false;
   if (realtimeReconnectTimer) {
     window.clearTimeout(realtimeReconnectTimer);
     realtimeReconnectTimer = null;
+  }
+  if (realtimeStableTimer) {
+    window.clearTimeout(realtimeStableTimer);
+    realtimeStableTimer = null;
   }
   settleRealtimeReadyWaiters(false);
   if (realtimeSocket) {
@@ -3164,7 +3216,7 @@ const settleRealtimeReadyWaiters = (isReady) => {
 const ensureRealtimeReady = async () => {
   if (realtimeSocket?.readyState === WebSocket.OPEN) return true;
 
-  connectRealtime();
+  void connectRealtime();
   if (realtimeSocket?.readyState === WebSocket.OPEN) return true;
 
   return new Promise((resolve) => {
@@ -3238,20 +3290,31 @@ const syncAfterRealtimeOpen = async (isReconnect) => {
 
 const syncAfterVisibilityReturn = () => {
   if (!isDocumentVisible()) return;
-  connectRealtime();
+  void connectRealtime();
   void (async () => {
     if (realtimeSocket?.readyState === WebSocket.OPEN) await catchUpAfterReconnect();
     await loadConversations(false, { silent: true });
     if (activeConversationId.value) markConversationRead(activeConversationId.value);
     if (readAckByConversation.size) await flushReadAcks();
+    await reconcileCurrentCall();
   })();
 };
 
 const syncAfterNetworkReturn = () => {
-  connectRealtime();
+  realtimeReconnectAttempt = 0;
+  void connectRealtime();
   if (realtimeSocket?.readyState === WebSocket.OPEN) {
     void syncAfterRealtimeOpen(true);
   }
+};
+
+const syncAfterNetworkLost = () => {
+  realtimeStatus.value = "offline";
+  if (realtimeReconnectTimer) {
+    window.clearTimeout(realtimeReconnectTimer);
+    realtimeReconnectTimer = null;
+  }
+  if (realtimeSocket) realtimeSocket.close();
 };
 
 const handleRealtimeEvent = async (rawEvent) => {
@@ -3367,6 +3430,12 @@ const directConversationPeer = (conversation = activeConversation.value) =>
 const createCallId = (conversationId) =>
   `${conversationId}-${currentUserid || "user"}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+const transitionCallState = (nextState) => {
+  if (!canTransitionCallState(callState.value, nextState)) return false;
+  callState.value = nextState;
+  return true;
+};
+
 const sendRealtimeEvent = (event) => {
   if (realtimeSocket?.readyState !== WebSocket.OPEN) {
     connectRealtime();
@@ -3380,34 +3449,43 @@ const sendCallEvent = (type, signal = null, call = currentCall.value) => {
   if (!call?.id || !call.conversationId) return false;
   return sendRealtimeEvent({
     type,
+    eventId: createClientMessageId(),
     conversationId: call.conversationId,
     callId: call.id,
+    sourceDeviceId: currentDeviceId,
     signal,
   });
 };
 
-const webrtcIceServers = () => {
-  const servers = [];
-  const stunUrls = String(import.meta.env.VITE_WEBRTC_STUN_URLS || "stun:stun.l.google.com:19302")
-    .split(",")
-    .map((url) => url.trim())
-    .filter(Boolean);
-  if (stunUrls.length) {
-    servers.push({ urls: stunUrls });
-  }
+const loadWebrtcIceServers = async () => {
+  if (cachedIceServers.length && Date.now() < iceServersExpireAt - 30000) return cachedIceServers;
+  const response = await chatApi.getICEConfiguration();
+  const servers = Array.isArray(response.data?.iceServers) ? response.data.iceServers : [];
+  cachedIceServers = servers
+    .filter((server) => server && (Array.isArray(server.urls) || typeof server.urls === "string"))
+    .map((server) => ({
+      urls: server.urls,
+      ...(server.username ? { username: server.username } : {}),
+      ...(server.credential ? { credential: server.credential } : {}),
+    }));
+  const expiresAt = Date.parse(response.data?.expiresAt || "");
+  iceServersExpireAt = Number.isFinite(expiresAt) ? expiresAt : Date.now() + 5 * 60 * 1000;
+  return cachedIceServers;
+};
 
-  const turnUrls = String(import.meta.env.VITE_WEBRTC_TURN_URLS || "")
-    .split(",")
-    .map((url) => url.trim())
-    .filter(Boolean);
-  if (turnUrls.length) {
-    servers.push({
-      urls: turnUrls,
-      username: import.meta.env.VITE_WEBRTC_TURN_USERNAME || "",
-      credential: import.meta.env.VITE_WEBRTC_TURN_CREDENTIAL || "",
+const sendCallControlEvent = async (type, call = currentCall.value) => {
+  if (!call?.id || !call.conversationId) return false;
+  try {
+    await chatApi.sendCallControlEvent({
+      type,
+      conversationId: call.conversationId,
+      callId: call.id,
+      deviceId: currentDeviceId,
     });
+    return true;
+  } catch {
+    return false;
   }
-  return servers;
 };
 
 const prepareLocalCallMedia = async () => {
@@ -3474,11 +3552,11 @@ const addLocalCallTracks = () => {
   });
 };
 
-const ensurePeerConnection = () => {
+const ensurePeerConnection = async () => {
   if (peerConnection) return peerConnection;
 
   remoteCallStream = new MediaStream();
-  peerConnection = new RTCPeerConnection({ iceServers: webrtcIceServers() });
+  peerConnection = new RTCPeerConnection({ iceServers: await loadWebrtcIceServers() });
   addLocalCallTracks();
 
   peerConnection.onicecandidate = ({ candidate }) => {
@@ -3530,7 +3608,7 @@ const activateCall = () => {
     window.clearTimeout(callTimeoutTimer);
     callTimeoutTimer = null;
   }
-  callState.value = "active";
+  if (!transitionCallState("active")) return;
   callStartedAt = Date.now();
   callDuration.value = 0;
   if (callDurationTimer) window.clearInterval(callDurationTimer);
@@ -3547,7 +3625,7 @@ const startCallTimeout = () => {
       return;
     }
     if (callState.value === "outgoing" || callState.value === "connecting") {
-      sendCallEvent("call.cancel");
+      void sendCallControlEvent("call.cancel");
       cleanupCall(callText("canceled"));
     }
   }, 45 * 1000);
@@ -3633,10 +3711,13 @@ const startAudioCall = async () => {
     }
     await prepareLocalCallMedia();
     currentCall.value = call;
-    callState.value = "outgoing";
+    if (!transitionCallState("outgoing")) {
+      cleanupCall();
+      return;
+    }
     startRingtone();
     requestNotificationPermission();
-    if (!sendCallEvent("call.invite", null, call)) {
+    if (!(await sendCallControlEvent("call.invite", call))) {
       cleanupCall(callText("websocketUnavailable"));
       return;
     }
@@ -3650,18 +3731,21 @@ const startAudioCall = async () => {
 const acceptIncomingCall = async () => {
   if (callState.value !== "incoming" || !currentCall.value) return;
   stopRingtone();
-  callState.value = "connecting";
   try {
     if (!(await ensureRealtimeReady())) {
       cleanupCall(realtimeUnavailableMessage());
       return;
     }
+    if (!(await sendCallControlEvent("call.accept"))) {
+      cleanupCall(callText("ended"));
+      return;
+    }
+    if (!transitionCallState("connecting")) return;
     await prepareLocalCallMedia();
-    ensurePeerConnection();
-    sendCallEvent("call.accept");
+    await ensurePeerConnection();
     startCallTimeout();
   } catch (error) {
-    sendCallEvent("call.reject");
+    void sendCallControlEvent("call.end");
     cleanupCall();
     ElMessage.error(callMediaErrorMessage(error));
   }
@@ -3669,16 +3753,16 @@ const acceptIncomingCall = async () => {
 
 const rejectIncomingCall = () => {
   if (callState.value !== "incoming") return;
-  sendCallEvent("call.reject");
+  void sendCallControlEvent("call.reject");
   cleanupCall();
 };
 
 const endOrCancelCall = () => {
   if (!currentCall.value) return;
   if (callState.value === "outgoing" || callState.value === "connecting") {
-    sendCallEvent("call.cancel");
+    void sendCallControlEvent("call.cancel");
   } else {
-    sendCallEvent("call.end");
+    void sendCallControlEvent("call.end");
   }
   cleanupCall();
 };
@@ -3716,7 +3800,7 @@ const cleanupCall = (message = "") => {
     remoteAudioRef.value.srcObject = null;
   }
   currentCall.value = null;
-  callState.value = "idle";
+  transitionCallState("idle");
   callMuted.value = false;
   callDuration.value = 0;
   callStartedAt = 0;
@@ -3730,15 +3814,36 @@ const callMatchesEvent = (event = {}) =>
   && event.callId === currentCall.value.id
   && Number(event.conversationId) === Number(currentCall.value.conversationId);
 
+const reconcileCurrentCall = async () => {
+  const call = currentCall.value;
+  if (!call?.id) return;
+  try {
+    const response = await chatApi.getCall(call.id);
+    if (currentCall.value?.id !== call.id) return;
+    const record = response.data?.call || {};
+    const terminalStatuses = new Set(["rejected", "busy", "canceled", "completed", "missed", "failed"]);
+    if (terminalStatuses.has(record.status)) {
+      cleanupCall(callText("ended"));
+      return;
+    }
+    if (callState.value === "incoming"
+      && record.status !== "ringing"
+      && record.acceptedByDeviceId !== currentDeviceId) {
+      cleanupCall(callText("ended"));
+    }
+  } catch {
+    // The local timeout and the next foreground sync remain fallbacks.
+  }
+};
+
 const handleCallRealtimeEvent = async (event) => {
-  if (useridsMatch(event.fromUserid || event.userid, currentUserid)) return;
+  if (event.sourceDeviceId && event.sourceDeviceId === currentDeviceId) return;
 
   if (event.type === "call.invite") {
     if (callState.value !== "idle") {
-      sendRealtimeEvent({
-        type: "call.busy",
+      void sendCallControlEvent("call.busy", {
+        id: event.callId,
         conversationId: event.conversationId,
-        callId: event.callId,
       });
       return;
     }
@@ -3753,7 +3858,10 @@ const handleCallRealtimeEvent = async (event) => {
       peerName: conversation.name,
       direction: "incoming",
     };
-    callState.value = "incoming";
+    if (!transitionCallState("incoming")) {
+      currentCall.value = null;
+      return;
+    }
     startRingtone();
     startCallTimeout();
     notifyIncomingCall(conversation.name);
@@ -3763,18 +3871,22 @@ const handleCallRealtimeEvent = async (event) => {
   if (!callMatchesEvent(event)) return;
 
   if (event.type === "call.accept") {
+    if (useridsMatch(event.fromUserid || event.userid, currentUserid) && callState.value === "incoming") {
+      cleanupCall(callText("ended"));
+      return;
+    }
     if (callState.value !== "outgoing") return;
     stopRingtone();
-    callState.value = "connecting";
+    if (!transitionCallState("connecting")) return;
     try {
       await prepareLocalCallMedia();
-      const pc = ensurePeerConnection();
+      const pc = await ensurePeerConnection();
       const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: false });
       await pc.setLocalDescription(offer);
       sendCallEvent("call.offer", pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription);
       startCallTimeout();
     } catch (error) {
-      sendCallEvent("call.end");
+      void sendCallControlEvent("call.end");
       cleanupCall(callMediaErrorMessage(error));
     }
     return;
@@ -3802,16 +3914,16 @@ const handleCallRealtimeEvent = async (event) => {
 
   if (event.type === "call.offer" && event.signal) {
     try {
-      callState.value = "connecting";
+      if (callState.value === "incoming" && !transitionCallState("connecting")) return;
       await prepareLocalCallMedia();
-      const pc = ensurePeerConnection();
+      const pc = await ensurePeerConnection();
       await pc.setRemoteDescription(new RTCSessionDescription(event.signal));
       await flushPendingCallIceCandidates();
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       sendCallEvent("call.answer", pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription);
     } catch {
-      sendCallEvent("call.end");
+      void sendCallControlEvent("call.end");
       cleanupCall();
     }
     return;
@@ -6176,8 +6288,13 @@ const scrollToMessage = async (messageId) => {
   window.setTimeout(() => target.classList.remove("highlight"), 1400);
 };
 
-const handleLogout = () => {
+const handleLogout = async () => {
   disconnectRealtime();
+  try {
+    await chatApi.unregisterDeviceToken(currentDeviceId);
+  } catch {
+    // Logout remains available when the device is offline.
+  }
   localStorage.removeItem("user_token");
   localStorage.removeItem("userid");
   localStorage.removeItem("fullname");

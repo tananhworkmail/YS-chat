@@ -902,6 +902,7 @@ class RealtimeEvent {
     this.userid = '',
     this.fromUserid = '',
     this.callId = '',
+    this.sourceDeviceId = '',
     this.signal,
     this.isOnline = false,
     this.message,
@@ -917,6 +918,7 @@ class RealtimeEvent {
   final String userid;
   final String fromUserid;
   final String callId;
+  final String sourceDeviceId;
   final Map<String, dynamic>? signal;
   final bool isOnline;
   final ChatMessage? message;
@@ -950,6 +952,9 @@ class RealtimeEvent {
       fromUserid: _asString(_value(json, 'fromUserid', 'fromUserId') ??
           _value(payload, 'fromUserid', 'fromUserId')),
       callId: _asString(json['callId'] ?? payload['callId']),
+      sourceDeviceId: _asString(
+          _value(json, 'sourceDeviceId', 'source_device_id') ??
+              _value(payload, 'sourceDeviceId', 'source_device_id')),
       signal: signalJson is Map ? Map<String, dynamic>.from(signalJson) : null,
       isOnline: _asBool(json['isOnline'] ?? payload['isOnline']),
       message: message,

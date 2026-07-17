@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  canTransitionCallState,
   applyMessageReceipt,
   attachClientMessageId,
   createClientMessageId,
@@ -14,6 +15,16 @@ import {
   seedMissingConversationCursors,
   snapshotCatchUpCursors,
 } from "./chatRuntime.js";
+
+test("call state machine rejects late and out-of-order transitions", () => {
+  assert.equal(canTransitionCallState("idle", "incoming"), true);
+  assert.equal(canTransitionCallState("incoming", "connecting"), true);
+  assert.equal(canTransitionCallState("connecting", "active"), true);
+  assert.equal(canTransitionCallState("active", "idle"), true);
+  assert.equal(canTransitionCallState("idle", "active"), false);
+  assert.equal(canTransitionCallState("idle", "connecting"), false);
+  assert.equal(canTransitionCallState("outgoing", "incoming"), false);
+});
 
 test("client message IDs are UUID v4 values", () => {
   const first = createClientMessageId();

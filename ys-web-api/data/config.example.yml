@@ -11,6 +11,29 @@ cors:
 chat:
   recallWindowSeconds: 900
 
+realtime:
+  # memory is suitable for one backend. Use redis when running multiple instances.
+  eventBus: "memory"
+  redisURL: "redis://127.0.0.1:6379/0"
+  redisChannel: "ys-chat:realtime:v1"
+  pingIntervalSeconds: 25
+  pongWaitSeconds: 60
+  writeWaitSeconds: 10
+  maxMessageBytes: 65536
+  sendQueueSize: 64
+
+webrtc:
+  # ICE servers are returned by GET /api/v1/chat/calls/ice-config.
+  stunURLs:
+    - "stun:stun.l.google.com:19302"
+  turnURLs: []
+  # Prefer TURN_SHARED_SECRET for short-lived TURN REST credentials. Static
+  # TURN_USERNAME/TURN_CREDENTIAL environment variables are a fallback.
+  turnCredentialTTLSeconds: 3600
+  callRingTimeoutSeconds: 45
+  callConnectTimeoutSeconds: 60
+  callMaximumDurationSeconds: 14400
+
 database:
   # mysql | postgres | sqlite | sqlserver
   driver: "mysql"

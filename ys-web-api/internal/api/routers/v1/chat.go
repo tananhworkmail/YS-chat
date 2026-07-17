@@ -9,6 +9,8 @@ import (
 
 func ChatRouter(router *gin.RouterGroup) {
 	chat := router.Group("/chat")
+	chat.POST("/realtime/ticket", middlewares.AuthRequired(), controllers.Chat.RealtimeTicket)
+	chat.GET("/realtime", middlewares.RealtimeAuthRequired(), controllers.Chat.Realtime)
 	chat.Use(middlewares.AuthRequired())
 
 	chat.GET("/users", controllers.Chat.SearchUsers)
@@ -17,10 +19,12 @@ func ChatRouter(router *gin.RouterGroup) {
 	chat.POST("/contacts", controllers.Chat.AddContact)
 	chat.PUT("/contacts/:userid/nickname", controllers.Chat.UpdateContactNickname)
 	chat.GET("/realtime/health", controllers.Chat.RealtimeHealth)
-	chat.GET("/realtime", controllers.Chat.Realtime)
 	chat.POST("/devices", controllers.Chat.RegisterDeviceToken)
 	chat.DELETE("/devices", controllers.Chat.UnregisterDeviceToken)
 	chat.POST("/calls/events", controllers.Chat.SendCallEvent)
+	chat.GET("/calls/ice-config", controllers.Chat.ICEConfiguration)
+	chat.GET("/calls/history", controllers.Chat.CallHistory)
+	chat.GET("/calls/:id", controllers.Chat.GetCall)
 	chat.GET("/conversations", controllers.Chat.ListConversations)
 	chat.POST("/conversations/direct", controllers.Chat.CreateDirectConversation)
 	chat.POST("/conversations/group", controllers.Chat.CreateGroupConversation)

@@ -45,8 +45,23 @@ export const normalizeRealtimeEvent = (rawEvent = {}) => {
     deliveredMessageId: value("deliveredMessageId", "delivered_message_id") || value("messageId", "message_id"),
     emoji: value("emoji", "emoji"),
     isOnline: value("isOnline", "is_online"),
+    fromUserid: value("fromUserid", "from_userid") || "",
+    callId: value("callId", "call_id") || "",
+    sourceDeviceId: value("sourceDeviceId", "source_device_id") || "",
+    signal: value("signal", "signal") || null,
   };
 };
+
+const callTransitions = Object.freeze({
+  idle: new Set(["incoming", "outgoing"]),
+  incoming: new Set(["connecting", "idle"]),
+  outgoing: new Set(["connecting", "idle"]),
+  connecting: new Set(["active", "idle"]),
+  active: new Set(["idle"]),
+});
+
+export const canTransitionCallState = (current, next) =>
+  current === next || Boolean(callTransitions[current]?.has(next));
 
 export const messageClientId = (message = {}) =>
   message.clientMessageId || message.client_message_id || "";

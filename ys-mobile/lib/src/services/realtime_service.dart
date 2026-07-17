@@ -8,24 +8,35 @@ import '../models/models.dart';
 import 'token_store.dart';
 
 class RealtimeService {
-  RealtimeService(String apiBaseUrl, this._tokenStore)
-      : _apiBaseUrl = apiBaseUrl.replaceAll(RegExp(r'/+$'), '');
+  RealtimeService(
+    String apiBaseUrl,
+    this._tokenStore, {
+    required Future<String> Function() ticketProvider,
+  })  : _ticketProvider = ticketProvider,
+        _apiBaseUrl = apiBaseUrl.replaceAll(RegExp(r'/+$'), '');
 
   final String _apiBaseUrl;
   final TokenStore _tokenStore;
+  final Future<String> Function() _ticketProvider;
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
   final List<Map<String, dynamic>> _pendingEvents = [];
   bool _ready = false;
+  bool _connecting = false;
+  int _connectionGeneration = 0;
+  bool _hasConnected = false;
 
   bool get isConnected => _ready && _channel != null;
 
-  void connect({
+  Future<void> connect({
     required void Function(RealtimeEvent event) onEvent,
     required void Function(Object error) onError,
     void Function()? onConnected,
     void Function()? onDone,
-  }) {
+  }) async {
+    if (_ready || _connecting) return;
+    _connecting = true;
+    final generation = ++_connectionGeneration;
     final oldSubscription = _subscription;
     final oldChannel = _channel;
     _subscription = null;
@@ -35,37 +46,91 @@ class RealtimeService {
     unawaited(oldChannel?.sink.close() ?? Future<void>.value());
 
     final token = _tokenStore.token;
-    if (token == null || token.isEmpty) return;
+    if (token == null || token.isEmpty) {
+      _connecting = false;
+      return;
+    }
+
+    String ticket;
+    try {
+      ticket = await _ticketProvider();
+    } catch (error) {
+      if (generation == _connectionGeneration) {
+        _connecting = false;
+        onError(error);
+      }
+      return;
+    }
+    if (generation != _connectionGeneration || ticket.isEmpty) {
+      if (generation == _connectionGeneration) _connecting = false;
+      return;
+    }
 
     final apiUri = Uri.parse(_apiBaseUrl);
     final wsUri = apiUri.replace(
       scheme: apiUri.scheme == 'https' ? 'wss' : 'ws',
       path: '${apiUri.path}/chat/realtime',
-      queryParameters: {'token': token},
+      queryParameters: {
+        'ticket': ticket,
+        if (_hasConnected) 'reconnect': '1',
+      },
     );
     final channel = WebSocketChannel.connect(wsUri);
     _channel = channel;
     unawaited(channel.ready.then((_) {
       if (!identical(_channel, channel)) return;
+      _connecting = false;
       _ready = true;
+      _hasConnected = true;
       onConnected?.call();
       final pending = List<Map<String, dynamic>>.from(_pendingEvents);
       _pendingEvents.clear();
       for (final event in pending) {
         channel.sink.add(jsonEncode(event));
       }
-    }).catchError((_) {}));
+    }).catchError((Object error) {
+      if (identical(_channel, channel)) {
+        _connecting = false;
+        onError(error);
+      }
+    }));
     _subscription = channel.stream.listen(
       (raw) {
-        final decoded = jsonDecode('$raw');
-        if (decoded is Map<String, dynamic>) {
-          onEvent(RealtimeEvent.fromJson(decoded));
+        try {
+          final decoded = jsonDecode('$raw');
+          if (decoded is Map<String, dynamic>) {
+            onEvent(RealtimeEvent.fromJson(decoded));
+          }
+        } catch (_) {
+          // Malformed frames are ignored; the catch-up cursor remains the
+          // source of truth after a reconnect.
         }
       },
-      onError: onError,
-      onDone: onDone,
+      onError: (Object error) {
+        if (!identical(_channel, channel)) return;
+        _connecting = false;
+        _ready = false;
+        onError(error);
+      },
+      onDone: () {
+        if (!identical(_channel, channel)) return;
+        _connecting = false;
+        _ready = false;
+        onDone?.call();
+      },
       cancelOnError: true,
     );
+  }
+
+  void restoreSubscriptions(Iterable<int> conversationIds) {
+    _sendRaw({
+      'type': 'subscription.restore',
+      'eventId': const Uuid().v4(),
+      'payload': {
+        'conversationIds':
+            conversationIds.where((id) => id > 0).toSet().toList(),
+      },
+    }, queueWhenDisconnected: false);
   }
 
   bool sendEvent(
@@ -112,11 +177,13 @@ class RealtimeService {
   }
 
   Future<void> disconnect() async {
+    _connectionGeneration += 1;
     final subscription = _subscription;
     final channel = _channel;
     _subscription = null;
     _channel = null;
     _ready = false;
+    _connecting = false;
     _pendingEvents.clear();
     await subscription?.cancel();
     await channel?.sink.close();

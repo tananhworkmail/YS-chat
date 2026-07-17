@@ -6,45 +6,24 @@ const api = axios.create({
   timeout: 15000,
 });
 
-export const loginByAccount = async (params) => {
-  try {
-    const res = await api.post("/auth/login", {
-      userid: params.userid,
-      password: params.password,
-    });
-    return res;
-  } catch (error) {
-    throw error;
-  }
-};
+export const loginByAccount = (params) => api.post("/auth/login", {
+  userid: params.userid,
+  password: params.password,
+});
 
-export const register = async (params) => {
-  try {
-    const res = await api.post("/auth/register", {
-      userid: params.userid,
-      fullname: params.fullname,
-      password: params.password,
-      idCardSuffix: params.idCardSuffix,
-    });
-    return res;
-  } catch (error) {
-    throw error;
-  }
-};
+export const register = (params) => api.post("/auth/register", {
+  userid: params.userid,
+  fullname: params.fullname,
+  password: params.password,
+  idCardSuffix: params.idCardSuffix,
+});
 
-export const forgotPassword = async (params) => {
-  try {
-    const res = await api.post("/auth/forgot-password", {
-      userid: params.userid,
-      fullname: params.fullname,
-      birthday: params.birthday,
-      idCard: params.idCard,
-    });
-    return res;
-  } catch (error) {
-    throw error;
-  }
-};
+export const forgotPassword = (params) => api.post("/auth/forgot-password", {
+  userid: params.userid,
+  fullname: params.fullname,
+  birthday: params.birthday,
+  idCard: params.idCard,
+});
 
 // Đảm bảo object này có đủ 3 hàm
 export default {
