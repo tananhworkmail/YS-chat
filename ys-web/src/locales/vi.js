@@ -148,6 +148,8 @@ export default {
       addReaction: "Thêm cảm xúc",
       viewReactions: "Xem người đã thả cảm xúc",
       reactionDetails: "Người đã thả cảm xúc",
+      allReactions: "Tất cả cảm xúc",
+      readBy: "Người đã xem",
       removeMyReaction: "Gỡ cảm xúc của bạn",
       addMyReaction: "Thả cảm xúc này",
       editHistory: "Lịch sử chỉnh sửa",

@@ -672,6 +672,48 @@ class ChatMessageReference {
   }
 }
 
+class PinnedMessageState {
+  const PinnedMessageState({
+    required this.conversationId,
+    this.pinnedMessage,
+    this.systemMessage,
+    this.pinnedBy = '',
+    this.pinnedByName = '',
+    this.pinnedAt,
+    this.actorUserid = '',
+    this.actorName = '',
+  });
+
+  final int conversationId;
+  final ChatMessageReference? pinnedMessage;
+  final ChatMessage? systemMessage;
+  final String pinnedBy;
+  final String pinnedByName;
+  final DateTime? pinnedAt;
+  final String actorUserid;
+  final String actorName;
+
+  factory PinnedMessageState.fromJson(Map<String, dynamic> json) {
+    final rawMessage = _value(json, 'pinnedMessage', 'pinned_message');
+    final rawSystemMessage = _value(json, 'systemMessage', 'system_message');
+    return PinnedMessageState(
+      conversationId: _asInt(_value(json, 'conversationId', 'conversation_id')),
+      pinnedMessage: rawMessage is Map
+          ? ChatMessageReference.fromJson(Map<String, dynamic>.from(rawMessage))
+          : null,
+      systemMessage: rawSystemMessage is Map
+          ? ChatMessage.fromJson(Map<String, dynamic>.from(rawSystemMessage))
+          : null,
+      pinnedBy: _asString(_value(json, 'pinnedBy', 'pinned_by')),
+      pinnedByName: _asString(_value(json, 'pinnedByName', 'pinned_by_name')),
+      pinnedAt: _asDate(_value(json, 'pinnedAt', 'pinned_at')),
+      actorUserid:
+          _asString(_value(json, 'actorUserid', 'actor_userid', 'userid')),
+      actorName: _asString(_value(json, 'actorName', 'actor_name')),
+    );
+  }
+}
+
 class ChatRuntimeSnapshot {
   const ChatRuntimeSnapshot({
     this.pendingMessages = const [],
@@ -793,6 +835,7 @@ class ChatConversation {
     this.memberCount = 0,
     this.members = const [],
     this.lastMessage,
+    this.pinnedMessage,
     this.lastReadMessageId = 0,
     this.lastReadAt,
     this.unreadCount = 0,
@@ -807,6 +850,7 @@ class ChatConversation {
   final int memberCount;
   final List<ChatUser> members;
   final ChatMessage? lastMessage;
+  final ChatMessageReference? pinnedMessage;
   final int lastReadMessageId;
   final DateTime? lastReadAt;
   final int unreadCount;
@@ -814,6 +858,7 @@ class ChatConversation {
 
   factory ChatConversation.fromJson(Map<String, dynamic> json) {
     final lastMessageJson = _value(json, 'lastMessage', 'last_message');
+    final pinnedMessageJson = _value(json, 'pinnedMessage', 'pinned_message');
     final settingsJson =
         _value(json, 'userSettings', 'settings', 'conversationSettings');
     return ChatConversation(
@@ -826,6 +871,10 @@ class ChatConversation {
       members: _listOfMaps(json['members']).map(ChatUser.fromJson).toList(),
       lastMessage: lastMessageJson is Map
           ? ChatMessage.fromJson(Map<String, dynamic>.from(lastMessageJson))
+          : null,
+      pinnedMessage: pinnedMessageJson is Map
+          ? ChatMessageReference.fromJson(
+              Map<String, dynamic>.from(pinnedMessageJson))
           : null,
       lastReadMessageId:
           _asInt(_value(json, 'lastReadMessageId', 'last_read_message_id')),
@@ -841,6 +890,7 @@ class ChatConversation {
   ChatConversation copyWith({
     List<ChatUser>? members,
     ChatMessage? lastMessage,
+    Object? pinnedMessage = _unset,
     int? lastReadMessageId,
     DateTime? lastReadAt,
     int? unreadCount,
@@ -855,6 +905,9 @@ class ChatConversation {
       memberCount: memberCount,
       members: members ?? this.members,
       lastMessage: lastMessage ?? this.lastMessage,
+      pinnedMessage: identical(pinnedMessage, _unset)
+          ? this.pinnedMessage
+          : pinnedMessage as ChatMessageReference?,
       lastReadMessageId: lastReadMessageId ?? this.lastReadMessageId,
       lastReadAt: lastReadAt ?? this.lastReadAt,
       unreadCount: unreadCount ?? this.unreadCount,

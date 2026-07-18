@@ -1021,41 +1021,55 @@
 
                 <div v-if="messageReactionGroups(message).length" class="message-reactions">
                   <el-popover
-                    v-for="reaction in messageReactionGroups(message)"
-                    :key="`${message.id}-${reaction.emoji}`"
                     trigger="click"
                     placement="bottom"
-                    :width="250"
+                    :width="300"
                     popper-class="reaction-detail-popper"
                   >
                     <template #reference>
                       <button
+                        class="reaction-summary-button"
                         type="button"
-                        :class="{ mine: reaction.reactedByMe }"
-                        :disabled="Boolean(reactionPending[`${message.id}:${reaction.emoji}`])"
+                        :class="{ mine: messageReactionGroups(message).some((reaction) => reaction.reactedByMe) }"
                         :aria-label="homeT('chat.viewReactions')"
                       >
-                        <span>{{ reaction.emoji }}</span>
-                        <small>{{ reaction.count }}</small>
+                        <span class="reaction-summary-emojis">
+                          <span
+                            v-for="reaction in compactMessageReactions(message)"
+                            :key="`${message.id}-${reaction.emoji}`"
+                          >{{ reaction.emoji }}</span>
+                        </span>
+                        <small>{{ totalMessageReactions(message) }}</small>
                       </button>
                     </template>
-                    <div class="reaction-detail">
-                      <strong>{{ reaction.emoji }} {{ homeT("chat.reactionDetails") }}</strong>
-                      <ul>
-                        <li v-for="user in reactionUsers(reaction)" :key="user.userid">
-                          <el-avatar :size="25" :src="user.avatar || undefined">
-                            {{ initials(user.fullname) }}
-                          </el-avatar>
-                          <span>{{ user.fullname }}</span>
-                        </li>
-                      </ul>
-                      <button
-                        class="reaction-detail-toggle"
-                        type="button"
-                        @click="toggleReaction(message, reaction.emoji, reaction.reactedByMe)"
+                    <div class="reaction-detail reaction-overview">
+                      <strong>{{ homeT("chat.allReactions") }} · {{ totalMessageReactions(message) }}</strong>
+                      <section
+                        v-for="reaction in messageReactionGroups(message)"
+                        :key="`${message.id}-detail-${reaction.emoji}`"
+                        class="reaction-detail-group"
                       >
-                        {{ reaction.reactedByMe ? homeT("chat.removeMyReaction") : homeT("chat.addMyReaction") }}
-                      </button>
+                        <div class="reaction-detail-heading">
+                          <span>{{ reaction.emoji }}</span>
+                          <b>{{ reaction.count }}</b>
+                          <button
+                            class="reaction-detail-toggle"
+                            type="button"
+                            :disabled="Boolean(reactionPending[`${message.id}:${reaction.emoji}`])"
+                            @click="toggleReaction(message, reaction.emoji, reaction.reactedByMe)"
+                          >
+                            {{ reaction.reactedByMe ? homeT("chat.removeMyReaction") : homeT("chat.addMyReaction") }}
+                          </button>
+                        </div>
+                        <ul>
+                          <li v-for="user in reactionUsers(reaction)" :key="user.userid">
+                            <el-avatar :size="25" :src="user.avatar || undefined">
+                              {{ initials(user.fullname) }}
+                            </el-avatar>
+                            <span>{{ user.fullname }}</span>
+                          </li>
+                        </ul>
+                      </section>
                     </div>
                   </el-popover>
                 </div>
@@ -1145,12 +1159,41 @@
               <div v-if="isOwnMessage(message)" class="message-delivery-status" :class="messageDeliveryState(message)">
                 <button
                   v-if="messageDeliveryState(message) === 'failed'"
+                  class="message-retry-button"
                   type="button"
                   @click="retryPendingMessage(message)"
                 >
                   <RefreshCw :size="13" />
                   {{ homeT("chat.retrySend") }}
                 </button>
+                <el-popover
+                  v-else-if="canShowMessageReaders(message)"
+                  trigger="click"
+                  placement="bottom"
+                  :width="270"
+                  popper-class="message-readers-popper"
+                >
+                  <template #reference>
+                    <button class="message-readers-button" type="button">
+                      <CheckCheck :size="14" />
+                      <span>{{ messageStatusLabel(message) }}</span>
+                    </button>
+                  </template>
+                  <div class="message-readers-detail">
+                    <strong>{{ homeT("chat.readBy") }} · {{ messageReadUsers(message).length }}</strong>
+                    <ul>
+                      <li v-for="user in messageReadUsers(message)" :key="user.userid">
+                        <el-avatar :size="28" :src="user.avatar || undefined">
+                          {{ initials(user.fullname) }}
+                        </el-avatar>
+                        <span>
+                          <b>{{ user.fullname }}</b>
+                          <small v-if="user.readAt">{{ formatTime(user.readAt) }}</small>
+                        </span>
+                      </li>
+                    </ul>
+                  </div>
+                </el-popover>
                 <template v-else>
                   <CheckCheck v-if="messageDeliveryState(message) === 'read'" :size="14" />
                   <Check v-else :size="14" />
@@ -2323,7 +2366,6 @@ const activeConversationId = ref(null);
 const lastMessageIds = ref({});
 const readState = ref({});
 const unreadCounts = ref({});
-const pinnedMessages = ref({});
 const messageCursors = ref({});
 const pendingMessages = ref({});
 const typingUsers = ref({});
@@ -2462,7 +2504,6 @@ let ringtoneTimer = null;
 let discardRecording = false;
 const readStateStorageKey = `ys_chat_read_state_${currentUserid}`;
 const unreadStorageKey = `ys_chat_unread_counts_${currentUserid}`;
-const pinnedMessagesStorageKey = `ys_chat_pinned_messages_${currentUserid}`;
 const messageCursorStorageKey = `ys_chat_message_cursors_${currentUserid}`;
 const pendingMessagesStorageKey = `ys_chat_pending_messages_${currentUserid}`;
 const seenRealtimeEventIds = new Set();
@@ -2515,7 +2556,7 @@ const changeLocale = (lang) => {
 const activeConversation = computed(() =>
   conversations.value.find((conversation) => conversation.id === activeConversationId.value),
 );
-const activePinnedMessage = computed(() => pinnedMessages.value[String(activeConversationId.value)] || null);
+const activePinnedMessage = computed(() => activeConversation.value?.pinnedMessage || null);
 const canStartAudioCall = computed(() => activeConversation.value?.type === "direct" && callState.value === "idle");
 const callPeerName = computed(() => currentCall.value?.peerName || activeConversation.value?.name || "");
 const callStatusLabel = computed(() => {
@@ -2806,7 +2847,6 @@ const mentionOptionMatches = (option = {}, keyword = "") => {
 onMounted(async () => {
   readState.value = loadStoredObject(readStateStorageKey);
   unreadCounts.value = loadStoredObject(unreadStorageKey);
-  pinnedMessages.value = loadStoredObject(pinnedMessagesStorageKey);
   messageCursors.value = loadStoredObject(messageCursorStorageKey);
   pendingMessages.value = loadStoredObject(pendingMessagesStorageKey);
   await loadProfile();
@@ -2915,10 +2955,6 @@ const persistUnreadCounts = () => {
   localStorage.setItem(unreadStorageKey, JSON.stringify(unreadCounts.value));
 };
 
-const persistPinnedMessages = () => {
-  localStorage.setItem(pinnedMessagesStorageKey, JSON.stringify(pinnedMessages.value));
-};
-
 const persistMessageCursors = () => {
   localStorage.setItem(messageCursorStorageKey, JSON.stringify(messageCursors.value));
 };
@@ -3018,7 +3054,7 @@ const handleConversationNotifications = (nextConversations, isInitialLoad) => {
     const lastReadMessageId = serverLastReadMessageId || Number(readState.value[conversationId] || 0);
     const isNewMessage = previousLastMessageId && lastMessage.id !== previousLastMessageId;
     const isUnreadFromStorage = isInitialLoad && lastReadMessageId > 0 && lastMessage.id > lastReadMessageId;
-    const fromOtherUser = !useridsMatch(lastMessage.senderUserid, currentUserid);
+    const fromOtherUser = lastMessage.type !== "system" && !useridsMatch(lastMessage.senderUserid, currentUserid);
     const isActiveConversation = conversationId === activeConversationId.value;
 
     const hasServerUnread = Object.prototype.hasOwnProperty.call(conversation, "unreadCount");
@@ -3388,6 +3424,11 @@ const handleRealtimeEvent = async (rawEvent) => {
 
   if (event.type === "typing.start" || event.type === "typing.stop") {
     applyTypingEvent(event);
+    return;
+  }
+
+  if (event.type === "message.pinned" || event.type === "message.unpinned") {
+    applyPinnedMessageEvent(event);
     return;
   }
 
@@ -5371,26 +5412,58 @@ const cancelReply = () => {
 
 const isPinnedMessage = (message = {}) => activePinnedMessage.value?.id === message.id;
 
-const pinMessage = (message = {}) => {
-  if (!activeConversationId.value || !message.id) return;
-  pinnedMessages.value = {
-    ...pinnedMessages.value,
-    [String(activeConversationId.value)]: {
-      ...toMessageReference(message),
-      createdAt: message.createdAt,
-    },
-  };
-  persistPinnedMessages();
-  ElMessage.success(homeT("messages.messagePinned"));
+const applyPinnedMessageState = (conversationId, state = {}) => {
+  const normalizedConversationId = Number(conversationId || state.conversationId || 0);
+  if (!normalizedConversationId) return;
+  conversations.value = conversations.value.map((conversation) => (
+    conversation.id === normalizedConversationId
+      ? {
+        ...conversation,
+        pinnedMessage: state.pinnedMessage || null,
+        messagePinnedBy: state.pinnedBy || "",
+        messagePinnedByName: state.pinnedByName || "",
+        messagePinnedAt: state.pinnedAt || null,
+      }
+      : conversation
+  ));
 };
 
-const unpinActiveMessage = () => {
+const applyPinnedMessageEvent = (event = {}) => {
+  applyPinnedMessageState(event.conversationId, event.payload || {});
+};
+
+const applyPinnedMessageResponse = async (conversationId, state = {}) => {
+  applyPinnedMessageState(conversationId, state);
+  const systemMessage = state.systemMessage;
+  if (systemMessage?.id) {
+    processReceivedMessages([systemMessage]);
+    if (Number(systemMessage.conversationId) === Number(activeConversationId.value)) {
+      upsertMessage(systemMessage);
+      await nextTick();
+      await scrollToBottom();
+    }
+  }
+  await loadConversations(false, { silent: true });
+};
+
+const pinMessage = async (message = {}) => {
+  if (!activeConversationId.value || !message.id) return;
+  try {
+    const response = await chatApi.setPinnedMessage(activeConversationId.value, message.id);
+    await applyPinnedMessageResponse(activeConversationId.value, response.data?.pinState || {});
+  } catch (error) {
+    showApiError(error);
+  }
+};
+
+const unpinActiveMessage = async () => {
   if (!activeConversationId.value) return;
-  const nextPinnedMessages = { ...pinnedMessages.value };
-  delete nextPinnedMessages[String(activeConversationId.value)];
-  pinnedMessages.value = nextPinnedMessages;
-  persistPinnedMessages();
-  ElMessage.success(homeT("messages.messageUnpinned"));
+  try {
+    const response = await chatApi.setPinnedMessage(activeConversationId.value, 0);
+    await applyPinnedMessageResponse(activeConversationId.value, response.data?.pinState || {});
+  } catch (error) {
+    showApiError(error);
+  }
 };
 
 const handleMessageOption = (command, message) => {
@@ -5534,6 +5607,14 @@ const quickReactionEmojis = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
 const messageReactionGroups = (message = {}) => normalizeReactionGroups(message, currentUserid);
 
+const compactMessageReactions = (message = {}) => messageReactionGroups(message)
+  .slice()
+  .sort((left, right) => Number(right.count || 0) - Number(left.count || 0))
+  .slice(0, 3);
+
+const totalMessageReactions = (message = {}) => messageReactionGroups(message)
+  .reduce((total, reaction) => total + Number(reaction.count || 0), 0);
+
 const reactionUsers = (reaction = {}) => {
   const namedUsers = Array.isArray(reaction.users) ? reaction.users : [];
   const usersById = new Map(
@@ -5561,6 +5642,51 @@ const reactionUsers = (reaction = {}) => {
     };
   });
 };
+
+const messageReadUsers = (message = {}) => {
+  const receipts = Array.isArray(message.receipts)
+    ? message.receipts
+    : Array.isArray(message.readReceipts)
+      ? message.readReceipts
+      : [];
+  const readReceipts = receipts.filter((receipt) => receipt?.readAt || receipt?.read_at);
+  const receiptByUserid = new Map(
+    readReceipts
+      .filter((receipt) => hasUserid(receipt?.userid || receipt?.userId || receipt?.user_id))
+      .map((receipt) => [
+        normalizeUserid(receipt.userid || receipt.userId || receipt.user_id),
+        receipt,
+      ]),
+  );
+  const readBy = Array.isArray(message.readBy)
+    ? message.readBy
+    : Array.isArray(message.read_by)
+      ? message.read_by
+      : [];
+  const userids = [...new Set([
+    ...receiptByUserid.keys(),
+    ...readBy.map((entry) => normalizeUserid(entry?.userid || entry)),
+  ].filter(Boolean))];
+
+  return userids.map((userid) => {
+    const receipt = receiptByUserid.get(userid) || {};
+    const member = (activeConversation.value?.members || []).find((item) => useridsMatch(item.userid, userid));
+    return {
+      userid,
+      fullname: receipt.fullname
+        || receipt.fullName
+        || member?.nickname
+        || member?.fullname
+        || userid,
+      avatar: receipt.avatar || member?.avatar || "",
+      readAt: receipt.readAt || receipt.read_at || "",
+    };
+  });
+};
+
+const canShowMessageReaders = (message = {}) => activeConversation.value?.type === "group"
+  && isOwnMessage(message)
+  && messageReadUsers(message).length > 0;
 
 const formatEditHistoryTime = (value) => {
   const parsed = dayjs(value);
@@ -8412,7 +8538,7 @@ a {
   color: #e11d48;
 }
 
-.message-delivery-status button {
+.message-delivery-status .message-retry-button {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -8423,6 +8549,18 @@ a {
   cursor: pointer;
   font-size: 11px;
   font-weight: 800;
+}
+
+.message-readers-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
 }
 
 .message-reactions {
@@ -8450,6 +8588,34 @@ a {
   cursor: pointer;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
   font-size: 12px;
+}
+
+.message-reactions .reaction-summary-button {
+  height: 18px;
+  min-height: 18px;
+  gap: 4px;
+  padding: 0 5px 0 3px;
+}
+
+.reaction-summary-emojis {
+  display: inline-flex;
+  align-items: center;
+}
+
+.reaction-summary-emojis > span {
+  width: 14px;
+  height: 14px;
+  display: inline-grid;
+  place-items: center;
+  margin-left: -3px;
+  border-radius: 50%;
+  background: #fff;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.reaction-summary-emojis > span:first-child {
+  margin-left: 0;
 }
 
 .message-reactions button.mine {
@@ -8486,6 +8652,37 @@ a {
 :global(.reaction-detail) {
   display: grid;
   gap: 8px;
+}
+
+:global(.reaction-overview) {
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+:global(.reaction-detail-group) {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid #eef2f7;
+}
+
+:global(.reaction-detail-heading) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+:global(.reaction-detail-heading > span) {
+  font-size: 17px;
+}
+
+:global(.reaction-detail-heading > b) {
+  color: #475569;
+  font-size: 12px;
+}
+
+:global(.reaction-detail-heading .reaction-detail-toggle) {
+  margin-left: auto;
 }
 
 :global(.reaction-detail > strong) {
@@ -8526,6 +8723,62 @@ a {
   cursor: pointer;
   font-size: 12px;
   font-weight: 750;
+}
+
+:global(.reaction-detail-toggle:disabled) {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+:global(.message-readers-popper) {
+  padding: 10px !important;
+}
+
+:global(.message-readers-detail) {
+  display: grid;
+  gap: 8px;
+}
+
+:global(.message-readers-detail > strong) {
+  color: #1e293b;
+  font-size: 13px;
+}
+
+:global(.message-readers-detail ul) {
+  display: grid;
+  gap: 7px;
+  max-height: 280px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+:global(.message-readers-detail li) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+:global(.message-readers-detail li > span) {
+  min-width: 0;
+  display: grid;
+  flex: 1;
+}
+
+:global(.message-readers-detail li b) {
+  overflow: hidden;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:global(.message-readers-detail li small) {
+  color: #94a3b8;
+  font-size: 10px;
 }
 
 .edit-history-state {

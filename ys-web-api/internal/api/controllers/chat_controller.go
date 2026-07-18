@@ -589,6 +589,24 @@ func (h *ChatController) SetTyping(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"isTyping": req.IsTyping})
 }
 
+func (h *ChatController) SetPinnedMessage(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+	var req request.SetPinnedMessageRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+	state, err := services.ChatServiceInstance.SetPinnedMessage(currentUserid(c), conversationID, req.MessageID)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"pinState": state})
+}
+
 func (h *ChatController) CreatePoll(c *gin.Context) {
 	conversationID, ok := parseConversationID(c)
 	if !ok {

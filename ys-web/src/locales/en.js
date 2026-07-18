@@ -148,6 +148,8 @@ export default {
       addReaction: "Add reaction",
       viewReactions: "View reactions",
       reactionDetails: "People who reacted",
+      allReactions: "All reactions",
+      readBy: "Seen by",
       removeMyReaction: "Remove your reaction",
       addMyReaction: "React with this emoji",
       editHistory: "Edit history",

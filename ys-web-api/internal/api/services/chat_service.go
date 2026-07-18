@@ -55,14 +55,17 @@ var (
 )
 
 type chatConversationRecord struct {
-	ID         uint64    `gorm:"column:id;primaryKey"`
-	Type       string    `gorm:"column:type"`
-	Name       string    `gorm:"column:name"`
-	Avatar     string    `gorm:"column:avatar"`
-	Background string    `gorm:"column:background"`
-	CreatedBy  string    `gorm:"column:created_by"`
-	CreatedAt  time.Time `gorm:"column:created_at"`
-	UpdatedAt  time.Time `gorm:"column:updated_at"`
+	ID              uint64     `gorm:"column:id;primaryKey"`
+	Type            string     `gorm:"column:type"`
+	Name            string     `gorm:"column:name"`
+	Avatar          string     `gorm:"column:avatar"`
+	Background      string     `gorm:"column:background"`
+	PinnedMessageID *uint64    `gorm:"column:pinned_message_id"`
+	MessagePinnedBy string     `gorm:"column:message_pinned_by"`
+	MessagePinnedAt *time.Time `gorm:"column:message_pinned_at"`
+	CreatedBy       string     `gorm:"column:created_by"`
+	CreatedAt       time.Time  `gorm:"column:created_at"`
+	UpdatedAt       time.Time  `gorm:"column:updated_at"`
 }
 
 type chatMessageRecord struct {
@@ -121,21 +124,25 @@ type chatPollVoteRecord struct {
 }
 
 type conversationRow struct {
-	ID               uint64     `gorm:"column:id"`
-	Type             string     `gorm:"column:type"`
-	Name             string     `gorm:"column:name"`
-	Avatar           string     `gorm:"column:avatar"`
-	Background       string     `gorm:"column:background"`
-	MemberCount      int        `gorm:"column:member_count"`
-	CreatedAt        time.Time  `gorm:"column:created_at"`
-	UpdatedAt        time.Time  `gorm:"column:updated_at"`
-	LastMessageID    *uint64    `gorm:"column:last_message_id"`
-	LastSenderUserid string     `gorm:"column:last_sender_userid"`
-	LastSenderName   string     `gorm:"column:last_sender_name"`
-	LastSenderAvatar string     `gorm:"column:last_sender_avatar"`
-	LastMessageType  string     `gorm:"column:last_message_type"`
-	LastContent      string     `gorm:"column:last_content"`
-	LastCreatedAt    *time.Time `gorm:"column:last_created_at"`
+	ID                  uint64     `gorm:"column:id"`
+	Type                string     `gorm:"column:type"`
+	Name                string     `gorm:"column:name"`
+	Avatar              string     `gorm:"column:avatar"`
+	Background          string     `gorm:"column:background"`
+	MemberCount         int        `gorm:"column:member_count"`
+	PinnedMessageID     *uint64    `gorm:"column:pinned_message_id"`
+	MessagePinnedBy     string     `gorm:"column:message_pinned_by"`
+	MessagePinnedByName string     `gorm:"column:message_pinned_by_name"`
+	MessagePinnedAt     *time.Time `gorm:"column:message_pinned_at"`
+	CreatedAt           time.Time  `gorm:"column:created_at"`
+	UpdatedAt           time.Time  `gorm:"column:updated_at"`
+	LastMessageID       *uint64    `gorm:"column:last_message_id"`
+	LastSenderUserid    string     `gorm:"column:last_sender_userid"`
+	LastSenderName      string     `gorm:"column:last_sender_name"`
+	LastSenderAvatar    string     `gorm:"column:last_sender_avatar"`
+	LastMessageType     string     `gorm:"column:last_message_type"`
+	LastContent         string     `gorm:"column:last_content"`
+	LastCreatedAt       *time.Time `gorm:"column:last_created_at"`
 }
 
 type memberRow struct {
@@ -1486,6 +1493,9 @@ func ensureChatSchema(db *gorm.DB) error {
 			name VARCHAR(160) NULL,
 			avatar VARCHAR(255) NULL,
 			background VARCHAR(1024) NULL,
+			pinned_message_id BIGINT UNSIGNED NULL,
+			message_pinned_by VARCHAR(64) NULL,
+			message_pinned_at DATETIME NULL,
 			created_by VARCHAR(64) NOT NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -1702,6 +1712,16 @@ func ensureChatSchema(db *gorm.DB) error {
 	}
 	if err := ensureColumn(db, "chat_conversations", "background", "VARCHAR(1024) NULL AFTER avatar"); err != nil {
 		return err
+	}
+	conversationColumns := []struct{ name, definition string }{
+		{"pinned_message_id", "BIGINT UNSIGNED NULL AFTER background"},
+		{"message_pinned_by", "VARCHAR(64) NULL AFTER pinned_message_id"},
+		{"message_pinned_at", "DATETIME NULL AFTER message_pinned_by"},
+	}
+	for _, column := range conversationColumns {
+		if err := ensureColumn(db, "chat_conversations", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	if err := ensureColumn(db, "chat_messages", "reply_to_message_id", "BIGINT UNSIGNED NULL AFTER content"); err != nil {
 		return err
@@ -2066,6 +2086,12 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 		SELECT c.id, c.type, COALESCE(c.name, '') AS name, COALESCE(c.avatar, '') AS avatar,
 			COALESCE(c.background, '') AS background,
 			(SELECT COUNT(*) FROM chat_members cm_count WHERE cm_count.conversation_id = c.id) AS member_count,
+			c.pinned_message_id, COALESCE(c.message_pinned_by, '') AS message_pinned_by,
+			CASE
+				WHEN c.type = 'direct' THEN COALESCE(NULLIF(cc_pinner.nickname, ''), u_pinner.fullname, c.message_pinned_by, '')
+				ELSE COALESCE(NULLIF(cm_pinner.nickname, ''), u_pinner.fullname, c.message_pinned_by, '')
+			END AS message_pinned_by_name,
+			c.message_pinned_at,
 			c.created_at, c.updated_at,
 			m.id AS last_message_id,
 			COALESCE(m.sender_userid, '') AS last_sender_userid,
@@ -2089,8 +2115,11 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 		LEFT JOIN users u ON u.userid = m.sender_userid
 		LEFT JOIN chat_members cm_sender ON cm_sender.conversation_id = c.id AND cm_sender.userid = m.sender_userid
 		LEFT JOIN chat_contacts cc_sender ON cc_sender.owner_userid = ? AND cc_sender.contact_userid = m.sender_userid
+		LEFT JOIN chat_members cm_pinner ON cm_pinner.conversation_id = c.id AND cm_pinner.userid = c.message_pinned_by
+		LEFT JOIN users u_pinner ON u_pinner.userid = c.message_pinned_by
+		LEFT JOIN chat_contacts cc_pinner ON cc_pinner.owner_userid = ? AND cc_pinner.contact_userid = c.message_pinned_by
 	`
-	args := []interface{}{currentUserid, currentUserid, currentUserid}
+	args := []interface{}{currentUserid, currentUserid, currentUserid, currentUserid}
 	if conversationID > 0 {
 		query += " WHERE c.id = ?"
 		args = append(args, conversationID)
@@ -2105,11 +2134,19 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 	}
 
 	ids := make([]uint64, 0, len(rows))
+	pinnedMessageIDs := make([]uint64, 0, len(rows))
 	for _, row := range rows {
 		ids = append(ids, row.ID)
+		if row.PinnedMessageID != nil && *row.PinnedMessageID > 0 {
+			pinnedMessageIDs = append(pinnedMessageIDs, *row.PinnedMessageID)
+		}
 	}
 
 	membersByConversation, err := s.loadMembers(db, currentUserid, ids)
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+	pinnedReferences, err := s.loadMessageReferences(db, currentUserid, pinnedMessageIDs)
 	if err != nil {
 		return nil, errors.New(ErrSystem)
 	}
@@ -2118,15 +2155,18 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 	for _, row := range rows {
 		members := membersByConversation[row.ID]
 		conversation := types.ChatConversation{
-			ID:          row.ID,
-			Type:        row.Type,
-			Name:        row.Name,
-			Avatar:      row.Avatar,
-			Background:  row.Background,
-			MemberCount: row.MemberCount,
-			Members:     members,
-			CreatedAt:   row.CreatedAt,
-			UpdatedAt:   row.UpdatedAt,
+			ID:                  row.ID,
+			Type:                row.Type,
+			Name:                row.Name,
+			Avatar:              row.Avatar,
+			Background:          row.Background,
+			MemberCount:         row.MemberCount,
+			Members:             members,
+			MessagePinnedBy:     row.MessagePinnedBy,
+			MessagePinnedByName: row.MessagePinnedByName,
+			MessagePinnedAt:     row.MessagePinnedAt,
+			CreatedAt:           row.CreatedAt,
+			UpdatedAt:           row.UpdatedAt,
 		}
 
 		if conversation.Type == "direct" {
@@ -2160,6 +2200,9 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 				Content:        row.LastContent,
 				CreatedAt:      createdAt,
 			}
+		}
+		if row.PinnedMessageID != nil && *row.PinnedMessageID > 0 {
+			conversation.PinnedMessage = pinnedReferences[*row.PinnedMessageID]
 		}
 
 		conversations = append(conversations, conversation)

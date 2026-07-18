@@ -898,6 +898,29 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     );
   }
 
+  ChatMessageReference? pinnedMessageFor(int conversationId) {
+    if (selectedConversation?.id == conversationId) {
+      return selectedConversation?.pinnedMessage;
+    }
+    return conversations
+        .where((conversation) => conversation.id == conversationId)
+        .firstOrNull
+        ?.pinnedMessage;
+  }
+
+  Future<void> pinMessage(ChatMessage message) async {
+    if (message.conversationId <= 0 || message.id <= 0) return;
+    final state =
+        await apiClient.setPinnedMessage(message.conversationId, message.id);
+    _applyPinnedMessageState(state);
+  }
+
+  Future<void> unpinMessage(int conversationId) async {
+    if (conversationId <= 0) return;
+    final state = await apiClient.setPinnedMessage(conversationId, 0);
+    _applyPinnedMessageState(state);
+  }
+
   Future<bool> _persistRuntimeSnapshot() {
     _runtimePersistenceTimer?.cancel();
     _runtimePersistenceTimer = null;
@@ -1285,6 +1308,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         final wasKnown = _containsMessage(message);
         _upsertMessage(message);
         if (type == 'message.created' &&
+            message.type != 'system' &&
             message.senderUserid != tokenStore.userid) {
           unawaited(_ackDelivered(message.conversationId, message.id));
           final activelyReading = isAppResumed &&
@@ -1355,6 +1379,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     }
     if (type == 'typing.start' || type == 'typing.stop') {
       _applyTypingEvent(event, started: type == 'typing.start');
+      return;
+    }
+    if (type == 'message.pinned' || type == 'message.unpinned') {
+      final payload = Map<String, dynamic>.from(event.payload);
+      payload.putIfAbsent('conversationId', () => event.conversationId);
+      payload.putIfAbsent('actorUserid', () => event.userid);
+      final state = PinnedMessageState.fromJson(payload);
+      _applyPinnedMessageState(state);
       return;
     }
     if (type == 'conversation.settings.updated') {
@@ -1932,6 +1964,23 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       _typingUsers.remove(event.conversationId);
     } else {
       _typingUsers[event.conversationId] = users;
+    }
+    notifyListeners();
+  }
+
+  void _applyPinnedMessageState(PinnedMessageState state) {
+    if (state.conversationId <= 0) return;
+    conversations = conversations
+        .map((conversation) => conversation.id == state.conversationId
+            ? conversation.copyWith(pinnedMessage: state.pinnedMessage)
+            : conversation)
+        .toList();
+    if (selectedConversation?.id == state.conversationId) {
+      selectedConversation =
+          selectedConversation!.copyWith(pinnedMessage: state.pinnedMessage);
+    }
+    if (state.systemMessage != null) {
+      _upsertMessage(state.systemMessage!, notify: false);
     }
     notifyListeners();
   }

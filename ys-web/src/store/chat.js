@@ -117,6 +117,10 @@ export const setTyping = (conversationId, isTyping) => {
   return api.post(`/chat/conversations/${conversationId}/typing`, { isTyping });
 };
 
+export const setPinnedMessage = (conversationId, messageId = 0) => {
+  return api.put(`/chat/conversations/${conversationId}/pinned-message`, { messageId });
+};
+
 export const editMessage = (messageId, content, version) => {
   return api.patch(`/chat/messages/${messageId}`, {
     content,
@@ -234,6 +238,7 @@ export default {
   markConversationRead,
   markMessageDelivered,
   setTyping,
+  setPinnedMessage,
   editMessage,
   getMessageEditHistory,
   deleteMessageForMe,

@@ -35,7 +35,7 @@ func setupProductionChatTestDB(t *testing.T) *gorm.DB {
 
 	statements := []string{
 		`CREATE TABLE users (userid TEXT PRIMARY KEY, fullname TEXT, avatar TEXT)`,
-		`CREATE TABLE chat_conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, name TEXT, avatar TEXT, background TEXT, created_by TEXT, created_at DATETIME, updated_at DATETIME)`,
+		`CREATE TABLE chat_conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, name TEXT, avatar TEXT, background TEXT, pinned_message_id INTEGER, message_pinned_by TEXT, message_pinned_at DATETIME, created_by TEXT, created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE chat_members (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL, userid TEXT NOT NULL, role TEXT, nickname TEXT, last_delivered_message_id INTEGER, last_read_message_id INTEGER, last_read_at DATETIME, unread_count INTEGER NOT NULL DEFAULT 0, mute_until DATETIME, pinned_at DATETIME, archived_at DATETIME, joined_at DATETIME, UNIQUE(conversation_id, userid))`,
 		`CREATE TABLE chat_contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_userid TEXT, contact_userid TEXT, nickname TEXT, created_at DATETIME, UNIQUE(owner_userid, contact_userid))`,
 		`CREATE TABLE chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL, sender_userid TEXT NOT NULL, message_type TEXT NOT NULL, content TEXT, reply_to_message_id INTEGER, forwarded_from_message_id INTEGER, client_message_id TEXT, server_sequence INTEGER, version INTEGER NOT NULL DEFAULT 1, edited_at DATETIME, deleted_at DATETIME, deleted_by TEXT, created_at DATETIME, UNIQUE(sender_userid, client_message_id), UNIQUE(conversation_id, server_sequence))`,
@@ -123,6 +123,82 @@ func TestIdempotentSendDoesNotDuplicateOrDoubleUnread(t *testing.T) {
 		if unread != 1 {
 			t.Fatalf("%s unread=%d, want 1", userid, unread)
 		}
+	}
+}
+
+func TestPinnedMessageIsSharedAndBroadcastsPinChanges(t *testing.T) {
+	db := setupProductionChatTestDB(t)
+	messageID := sendTestMessage(t, "alice", "shared pin")
+
+	hub, err := NewRealtimeHubWithBus(NewInMemoryRealtimeEventBus(), RealtimeHubOptions{})
+	if err != nil {
+		t.Fatalf("create realtime hub: %v", err)
+	}
+	previousHub := RealtimeHubInstance
+	RealtimeHubInstance = hub
+	t.Cleanup(func() {
+		RealtimeHubInstance = previousHub
+		_ = hub.bus.Close()
+	})
+	bobClient := &realtimeClient{userid: "bob", send: make(chan RealtimeEvent, 4), hub: hub}
+	hub.clients["bob"] = map[*realtimeClient]struct{}{bobClient: {}}
+
+	state, err := ChatServiceInstance.SetPinnedMessage("alice", 1, messageID)
+	if err != nil {
+		t.Fatalf("pin message: %v", err)
+	}
+	if state.PinnedMessage == nil || state.PinnedMessage.ID != messageID || state.ActorUserid != "alice" {
+		t.Fatalf("unexpected pin state: %+v", state)
+	}
+
+	for _, userid := range []string{"bob", "carol"} {
+		conversations, listErr := ChatServiceInstance.ListConversations(userid)
+		if listErr != nil {
+			t.Fatalf("list conversations for %s: %v", userid, listErr)
+		}
+		if len(conversations) != 1 || conversations[0].PinnedMessage == nil || conversations[0].PinnedMessage.ID != messageID {
+			t.Fatalf("%s did not receive shared pin: %+v", userid, conversations)
+		}
+	}
+
+	pinEvent := <-bobClient.send
+	if pinEvent.Type != "message.pinned" || pinEvent.MessageID != messageID || pinEvent.Userid != "alice" {
+		t.Fatalf("unexpected pin event: %+v", pinEvent)
+	}
+	pinNoticeEvent := <-bobClient.send
+	if pinNoticeEvent.Type != "chat.message.created" || pinNoticeEvent.Message == nil || pinNoticeEvent.Message.Type != "system" || !strings.Contains(pinNoticeEvent.Message.Content, "đã ghim một tin nhắn") {
+		t.Fatalf("unexpected pin conversation notice: %+v", pinNoticeEvent)
+	}
+
+	state, err = ChatServiceInstance.SetPinnedMessage("bob", 1, 0)
+	if err != nil {
+		t.Fatalf("unpin message: %v", err)
+	}
+	if state.PinnedMessage != nil || state.ActorUserid != "bob" {
+		t.Fatalf("unexpected unpin state: %+v", state)
+	}
+	conversations, err := ChatServiceInstance.ListConversations("alice")
+	if err != nil {
+		t.Fatalf("list conversations after unpin: %v", err)
+	}
+	if len(conversations) != 1 || conversations[0].PinnedMessage != nil {
+		t.Fatalf("shared pin remained after unpin: %+v", conversations)
+	}
+	unpinEvent := <-bobClient.send
+	if unpinEvent.Type != "message.unpinned" || unpinEvent.MessageID != messageID || unpinEvent.Userid != "bob" {
+		t.Fatalf("unexpected unpin event: %+v", unpinEvent)
+	}
+	unpinNoticeEvent := <-bobClient.send
+	if unpinNoticeEvent.Type != "chat.message.created" || unpinNoticeEvent.Message == nil || unpinNoticeEvent.Message.Type != "system" || !strings.Contains(unpinNoticeEvent.Message.Content, "đã bỏ ghim tin nhắn") {
+		t.Fatalf("unexpected unpin conversation notice: %+v", unpinNoticeEvent)
+	}
+
+	var auditCount int64
+	if err := db.Table("chat_message_audit").Where("message_id = ? AND action IN ?", messageID, []string{"pin", "unpin"}).Count(&auditCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 2 {
+		t.Fatalf("pin audit rows=%d, want 2", auditCount)
 	}
 }
 

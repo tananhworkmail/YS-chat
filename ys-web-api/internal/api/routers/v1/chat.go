@@ -40,6 +40,7 @@ func ChatRouter(router *gin.RouterGroup) {
 	chat.POST("/conversations/:id/read", controllers.Chat.MarkRead)
 	chat.POST("/conversations/:id/delivered", controllers.Chat.MarkDelivered)
 	chat.POST("/conversations/:id/typing", controllers.Chat.SetTyping)
+	chat.PUT("/conversations/:id/pinned-message", controllers.Chat.SetPinnedMessage)
 	chat.GET("/messages/:id/edit-history", controllers.Chat.GetMessageEditHistory)
 	chat.PATCH("/messages/:id", controllers.Chat.EditMessage)
 	chat.POST("/messages/:id/recall", controllers.Chat.RecallMessage)

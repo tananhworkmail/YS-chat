@@ -280,6 +280,19 @@ class ApiClient {
     );
   }
 
+  Future<PinnedMessageState> setPinnedMessage(
+      int conversationId, int messageId) async {
+    final response = await _dio.put(
+      '/chat/conversations/$conversationId/pinned-message',
+      data: {'messageId': messageId},
+    );
+    final body = _body(response.data);
+    final raw = body['pinState'] ?? body;
+    return PinnedMessageState.fromJson(
+      raw is Map ? Map<String, dynamic>.from(raw) : const {},
+    );
+  }
+
   Future<ChatMessage> editMessage(
     int messageId, {
     required String content,

@@ -114,6 +114,10 @@ type SetTypingRequest struct {
 	IsTyping bool `json:"isTyping"`
 }
 
+type SetPinnedMessageRequest struct {
+	MessageID uint64 `json:"messageId"`
+}
+
 type SearchConversationMessagesRequest struct {
 	Keyword        string
 	SenderUserid   string

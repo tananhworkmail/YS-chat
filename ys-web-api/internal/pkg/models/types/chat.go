@@ -101,6 +101,17 @@ type ChatMessageReference struct {
 	Content      string `json:"content"`
 }
 
+type ChatPinnedMessageState struct {
+	ConversationID uint64                `json:"conversationId"`
+	PinnedMessage  *ChatMessageReference `json:"pinnedMessage"`
+	SystemMessage  *ChatMessage          `json:"systemMessage,omitempty"`
+	PinnedBy       string                `json:"pinnedBy,omitempty"`
+	PinnedByName   string                `json:"pinnedByName,omitempty"`
+	PinnedAt       *time.Time            `json:"pinnedAt,omitempty"`
+	ActorUserid    string                `json:"actorUserid"`
+	ActorName      string                `json:"actorName"`
+}
+
 type ChatPoll struct {
 	ID                 uint64           `json:"id"`
 	MessageID          uint64           `json:"messageId"`
@@ -137,22 +148,26 @@ type ChatPollVoter struct {
 }
 
 type ChatConversation struct {
-	ID                uint64       `json:"id"`
-	Type              string       `json:"type"`
-	Name              string       `json:"name"`
-	Avatar            string       `json:"avatar"`
-	Background        string       `json:"background"`
-	MemberCount       int          `json:"memberCount"`
-	Members           []ChatUser   `json:"members"`
-	LastMessage       *ChatMessage `json:"lastMessage"`
-	LastReadMessageID *uint64      `json:"lastReadMessageId,omitempty"`
-	LastReadAt        *time.Time   `json:"lastReadAt,omitempty"`
-	UnreadCount       int          `json:"unreadCount"`
-	MuteUntil         *time.Time   `json:"muteUntil,omitempty"`
-	PinnedAt          *time.Time   `json:"pinnedAt,omitempty"`
-	ArchivedAt        *time.Time   `json:"archivedAt,omitempty"`
-	CreatedAt         time.Time    `json:"createdAt"`
-	UpdatedAt         time.Time    `json:"updatedAt"`
+	ID                  uint64                `json:"id"`
+	Type                string                `json:"type"`
+	Name                string                `json:"name"`
+	Avatar              string                `json:"avatar"`
+	Background          string                `json:"background"`
+	MemberCount         int                   `json:"memberCount"`
+	Members             []ChatUser            `json:"members"`
+	LastMessage         *ChatMessage          `json:"lastMessage"`
+	LastReadMessageID   *uint64               `json:"lastReadMessageId,omitempty"`
+	LastReadAt          *time.Time            `json:"lastReadAt,omitempty"`
+	UnreadCount         int                   `json:"unreadCount"`
+	PinnedMessage       *ChatMessageReference `json:"pinnedMessage"`
+	MessagePinnedBy     string                `json:"messagePinnedBy,omitempty"`
+	MessagePinnedByName string                `json:"messagePinnedByName,omitempty"`
+	MessagePinnedAt     *time.Time            `json:"messagePinnedAt,omitempty"`
+	MuteUntil           *time.Time            `json:"muteUntil,omitempty"`
+	PinnedAt            *time.Time            `json:"pinnedAt,omitempty"`
+	ArchivedAt          *time.Time            `json:"archivedAt,omitempty"`
+	CreatedAt           time.Time             `json:"createdAt"`
+	UpdatedAt           time.Time             `json:"updatedAt"`
 }
 
 type ChatConversationReadState struct {

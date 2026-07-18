@@ -157,6 +157,38 @@ void main() {
       expect(conversation.settings.isArchived, isFalse);
     });
 
+    test('parses shared pinned message state and conversation notice', () {
+      final state = PinnedMessageState.fromJson({
+        'conversationId': 11,
+        'pinnedMessage': {
+          'id': 101,
+          'senderUserid': 'u1',
+          'senderName': 'User One',
+          'type': 'text',
+          'content': 'important',
+        },
+        'systemMessage': {
+          'id': 102,
+          'conversationId': 11,
+          'senderUserid': 'u2',
+          'senderName': 'User Two',
+          'type': 'system',
+          'content': 'User Two đã ghim một tin nhắn',
+        },
+        'actorUserid': 'u2',
+        'actorName': 'User Two',
+      });
+      final conversation = ChatConversation.fromJson({
+        'id': 11,
+        'pinnedMessage': state.pinnedMessage?.toJson(),
+      });
+
+      expect(state.pinnedMessage?.id, 101);
+      expect(state.systemMessage?.type, 'system');
+      expect(state.systemMessage?.content, contains('đã ghim'));
+      expect(conversation.pinnedMessage?.id, 101);
+    });
+
     test('recalled messages never expose attachments to the UI', () {
       final message = ChatMessage.fromJson({
         'id': 50,

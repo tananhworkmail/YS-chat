@@ -138,10 +138,49 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _addContact([String? keyword]) async {
     final state = context.read<AppState>();
     try {
-      final value = (keyword ?? _contactSearchController.text).trim();
+      var value = (keyword ?? _contactSearchController.text).trim();
+      if (value.isEmpty) {
+        final controller = TextEditingController();
+        final requested = await showDialog<String>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: Text(context.l10n.t('addContact')),
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              textInputAction: TextInputAction.search,
+              decoration: InputDecoration(
+                hintText: context.l10n.t('enterMemberUserid'),
+              ),
+              onSubmitted: (input) =>
+                  Navigator.of(dialogContext).pop(input.trim()),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: Text(context.l10n.t('cancel')),
+              ),
+              FilledButton(
+                onPressed: () =>
+                    Navigator.of(dialogContext).pop(controller.text.trim()),
+                child: Text(context.l10n.t('addContact')),
+              ),
+            ],
+          ),
+        );
+        controller.dispose();
+        if (requested == null || requested.trim().isEmpty || !mounted) return;
+        value = requested.trim();
+      }
       if (value.isEmpty) return;
       final users = await _findExactUsers(value);
       if (!mounted) return;
+      if (users.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(context.l10n.t('noUsersFound'))),
+        );
+        return;
+      }
       final selected = await showModalBottomSheet<ChatUser>(
         context: context,
         isScrollControlled: true,
@@ -1059,11 +1098,10 @@ class _SidePanelState extends State<_SidePanel> {
               onPrimary: () => isContacts
                   ? widget.onAddContact(searchController.text)
                   : widget.onCreateGroup(),
-              secondaryIcon: isContacts ? null : Icons.edit_square,
-              secondaryTooltip: isContacts ? null : context.l10n.t('openChat'),
-              onSecondary: isContacts
-                  ? null
-                  : () => widget.onSearchUser(searchController.text),
+              secondaryIcon: isContacts ? null : Icons.person_add_alt_outlined,
+              secondaryTooltip:
+                  isContacts ? null : context.l10n.t('addContact'),
+              onSecondary: isContacts ? null : () => widget.onAddContact(''),
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
@@ -2338,6 +2376,38 @@ class _ThreadState extends State<_Thread> {
     );
   }
 
+  Future<void> _togglePinnedMessage(ChatMessage message) async {
+    final state = context.read<AppState>();
+    final conversation = state.selectedConversation;
+    if (conversation == null || message.id <= 0) return;
+    final pinned = state.pinnedMessageFor(conversation.id);
+    try {
+      if (pinned?.id == message.id) {
+        await _unpinMessage(conversation.id);
+        return;
+      }
+      await state.pinMessage(message);
+    } catch (_) {
+      _showPinError();
+    }
+  }
+
+  Future<void> _unpinMessage(int conversationId) async {
+    try {
+      await context.read<AppState>().unpinMessage(conversationId);
+    } catch (_) {
+      _showPinError();
+    }
+  }
+
+  void _showPinError() {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+        SnackBar(content: Text(context.l10n.t('pinMessageFailed'))));
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
@@ -2375,6 +2445,8 @@ class _ThreadState extends State<_Thread> {
       });
     }
 
+    final pinnedMessage = state.pinnedMessageFor(conversation.id);
+
     return Container(
       color: AppColors.canvas,
       child: SafeArea(
@@ -2391,6 +2463,12 @@ class _ThreadState extends State<_Thread> {
               onAddContact: widget.onAddContact,
               onEditNickname: widget.onEditNickname,
             ),
+            if (pinnedMessage != null)
+              _PinnedMessageBar(
+                reference: pinnedMessage,
+                onOpen: () => _scrollToMessage(pinnedMessage.id),
+                onUnpin: () => _unpinMessage(conversation.id),
+              ),
             Expanded(
               child: Stack(
                 children: [
@@ -2427,7 +2505,10 @@ class _ThreadState extends State<_Thread> {
                         child: MessageBubble(
                           message: message,
                           mine: message.senderUserid == widget.currentUserid,
+                          isGroup: conversation.type == 'group',
                           resolveUrl: state.apiClient.absoluteUrl,
+                          pinned: pinnedMessage?.id == message.id,
+                          onTogglePin: _togglePinnedMessage,
                           onReply: widget.onReply,
                           onForward: widget.onForward,
                           onEdit: widget.onEdit,
@@ -2502,6 +2583,70 @@ class _ThreadState extends State<_Thread> {
               onRecord: widget.onRecord,
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PinnedMessageBar extends StatelessWidget {
+  const _PinnedMessageBar({
+    required this.reference,
+    required this.onOpen,
+    required this.onUnpin,
+  });
+
+  final ChatMessageReference reference;
+  final VoidCallback onOpen;
+  final VoidCallback onUnpin;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.brandSoftest,
+      child: InkWell(
+        onTap: onOpen,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 7, 4, 7),
+          child: Row(
+            children: [
+              const Icon(Icons.push_pin, size: 16, color: AppColors.brand),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      context.l10n.t('pinnedMessage'),
+                      style: const TextStyle(
+                        color: AppColors.brandDark,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 1),
+                    Text(
+                      messageReferencePreview(context, reference),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: AppColors.muted,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: onUnpin,
+                tooltip: context.l10n.t('unpinMessage'),
+                icon: const Icon(Icons.close, size: 17),
+                color: AppColors.muted,
+                visualDensity: VisualDensity.compact,
+              ),
+            ],
+          ),
         ),
       ),
     );

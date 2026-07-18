@@ -15,6 +15,7 @@ class MessageBubble extends StatelessWidget {
     super.key,
     required this.message,
     required this.mine,
+    required this.isGroup,
     required this.resolveUrl,
     required this.onReply,
     required this.onForward,
@@ -29,12 +30,15 @@ class MessageBubble extends StatelessWidget {
     required this.onClosePoll,
     required this.mentionUsers,
     required this.onOpenReference,
+    this.pinned = false,
+    this.onTogglePin,
     this.onOpenMentionProfile,
     this.onOpenSenderProfile,
   });
 
   final ChatMessage message;
   final bool mine;
+  final bool isGroup;
   final String Function(String url) resolveUrl;
   final ValueChanged<ChatMessage> onReply;
   final ValueChanged<ChatMessage> onForward;
@@ -50,6 +54,8 @@ class MessageBubble extends StatelessWidget {
   final ValueChanged<ChatMessage> onClosePoll;
   final List<ChatUser> mentionUsers;
   final ValueChanged<int> onOpenReference;
+  final bool pinned;
+  final ValueChanged<ChatMessage>? onTogglePin;
   final ValueChanged<ChatUser>? onOpenMentionProfile;
   final VoidCallback? onOpenSenderProfile;
 
@@ -110,9 +116,14 @@ class MessageBubble extends StatelessWidget {
         : mine
             ? Colors.white.withValues(alpha: 0.72)
             : AppColors.muted;
-    final visibleReactions = message.reactions
+    final allReactions = message.reactions
         .where((reaction) => reaction.count > 0)
         .toList(growable: false);
+    final visibleReactions = allReactions.toList()
+      ..sort((left, right) => right.count.compareTo(left.count));
+    final compactReactions = visibleReactions.take(3).toList(growable: false);
+    final totalReactions =
+        allReactions.fold<int>(0, (total, reaction) => total + reaction.count);
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
@@ -328,6 +339,13 @@ class MessageBubble extends StatelessWidget {
                                           message: message,
                                           color: metaColor,
                                           onRetry: () => onRetry(message),
+                                          onShowReaders: isGroup &&
+                                                  message.readReceipts.any(
+                                                      (receipt) =>
+                                                          receipt.readAt !=
+                                                          null)
+                                              ? () => _showReadReceipts(context)
+                                              : null,
                                         ),
                                       ],
                                     ],
@@ -342,16 +360,12 @@ class MessageBubble extends StatelessWidget {
                       Positioned(
                         right: 6,
                         bottom: 0,
-                        child: Wrap(
-                          spacing: 2,
-                          children: visibleReactions
-                              .map((reaction) => _ReactionChip(
-                                    reaction: reaction,
-                                    mine: false,
-                                    onTap: () =>
-                                        _showReactionDetails(context, reaction),
-                                  ))
-                              .toList(),
+                        child: _ReactionSummaryChip(
+                          reactions: compactReactions,
+                          total: totalReactions,
+                          mine: false,
+                          onTap: () =>
+                              _showReactionDetails(context, allReactions),
                         ),
                       ),
                   ],
@@ -429,6 +443,20 @@ class MessageBubble extends StatelessWidget {
                       onForward(message);
                     },
                   ),
+                if (onTogglePin != null &&
+                    !message.isDeleted &&
+                    message.id > 0 &&
+                    message.type != 'system')
+                  ListTile(
+                    leading:
+                        Icon(pinned ? Icons.push_pin : Icons.push_pin_outlined),
+                    title: Text(
+                        context.l10n.t(pinned ? 'unpinMessage' : 'pinMessage')),
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      onTogglePin?.call(message);
+                    },
+                  ),
                 if (message.content.trim().isNotEmpty)
                   ListTile(
                     leading: const Icon(Icons.copy),
@@ -502,9 +530,8 @@ class MessageBubble extends StatelessWidget {
     return resolveUrl(message.senderAvatar);
   }
 
-  Future<void> _showReactionDetails(
-      BuildContext context, ChatReaction reaction) async {
-    final namedUsers = <String, ChatUser>{
+  List<ChatUser> _reactionUsers(ChatReaction reaction) {
+    return <String, ChatUser>{
       for (final user in reaction.users) user.userid: user,
       for (final userid in reaction.userids)
         if (!reaction.users.any((user) => user.userid == userid))
@@ -512,6 +539,102 @@ class MessageBubble extends StatelessWidget {
               mentionUsers.where((user) => user.userid == userid).firstOrNull ??
                   ChatUser(userid: userid, fullname: userid),
     }.values.toList();
+  }
+
+  Future<void> _showReactionDetails(
+      BuildContext context, List<ChatReaction> reactions) async {
+    final total =
+        reactions.fold<int>(0, (sum, reaction) => sum + reaction.count);
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(sheetContext).height * .75),
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+            children: [
+              Text(
+                '${context.l10n.t('allReactions')} · $total',
+                style: const TextStyle(
+                    color: AppColors.ink,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 8),
+              for (final reaction in reactions) ...[
+                const Divider(height: 16),
+                Row(
+                  children: [
+                    Text(reaction.emoji, style: const TextStyle(fontSize: 19)),
+                    const SizedBox(width: 7),
+                    Text(
+                      '${reaction.count}',
+                      style: const TextStyle(
+                          color: AppColors.ink,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900),
+                    ),
+                    const Spacer(),
+                    TextButton(
+                      onPressed: () {
+                        Navigator.of(sheetContext).pop();
+                        onToggleReaction(message, reaction.emoji);
+                      },
+                      child: Text(context.l10n.t(reaction.reactedByMe
+                          ? 'removeMyReaction'
+                          : 'addMyReaction')),
+                    ),
+                  ],
+                ),
+                if (_reactionUsers(reaction).isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Text(context.l10n.t('noReactionUsers')),
+                  )
+                else
+                  for (final user in _reactionUsers(reaction))
+                    ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      leading: YSAvatar(
+                        label: user.displayName,
+                        imageUrl: user.avatar.trim().isEmpty
+                            ? null
+                            : resolveUrl(user.avatar),
+                        size: 30,
+                      ),
+                      title: Text(user.displayName),
+                      subtitle: user.displayName == user.userid
+                          ? null
+                          : Text(user.userid),
+                    ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showReadReceipts(BuildContext context) async {
+    final readers = message.readReceipts
+        .where((receipt) => receipt.readAt != null)
+        .map((receipt) {
+      final member = mentionUsers
+          .where((user) => user.userid == receipt.userid)
+          .firstOrNull;
+      return (
+        receipt: receipt,
+        user:
+            member ?? ChatUser(userid: receipt.userid, fullname: receipt.userid)
+      );
+    }).toList(growable: false);
+    final namedUsers = <String, ChatUser>{
+      for (final reader in readers) reader.user.userid: reader.user,
+    };
     await showModalBottomSheet<void>(
       context: context,
       builder: (sheetContext) => SafeArea(
@@ -522,25 +645,26 @@ class MessageBubble extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                '${reaction.emoji} ${context.l10n.t('reactionDetails')}',
+                '${context.l10n.t('readBy')} · ${readers.length}',
                 style: const TextStyle(
                     color: AppColors.ink,
                     fontSize: 16,
                     fontWeight: FontWeight.w900),
               ),
               const SizedBox(height: 8),
-              if (namedUsers.isEmpty)
+              if (readers.isEmpty)
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 12),
-                  child: Text(context.l10n.t('noReactionUsers')),
+                  child: Text(context.l10n.t('noReadUsers')),
                 )
               else
                 Flexible(
                   child: ListView.builder(
                     shrinkWrap: true,
-                    itemCount: namedUsers.length,
+                    itemCount: readers.length,
                     itemBuilder: (context, index) {
-                      final user = namedUsers[index];
+                      final reader = readers[index];
+                      final user = namedUsers[reader.user.userid]!;
                       return ListTile(
                         dense: true,
                         contentPadding: EdgeInsets.zero,
@@ -553,25 +677,14 @@ class MessageBubble extends StatelessWidget {
                         ),
                         title: Text(user.displayName),
                         subtitle: user.displayName == user.userid
-                            ? null
-                            : Text(user.userid),
+                            ? Text(DateFormat('dd/MM/yyyy HH:mm')
+                                .format(reader.receipt.readAt!.toLocal()))
+                            : Text(
+                                '${user.userid} · ${DateFormat('dd/MM/yyyy HH:mm').format(reader.receipt.readAt!.toLocal())}'),
                       );
                     },
                   ),
                 ),
-              const SizedBox(height: 4),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton(
-                  onPressed: () {
-                    Navigator.of(sheetContext).pop();
-                    onToggleReaction(message, reaction.emoji);
-                  },
-                  child: Text(context.l10n.t(reaction.reactedByMe
-                      ? 'removeMyReaction'
-                      : 'addMyReaction')),
-                ),
-              ),
             ],
           ),
         ),
@@ -580,20 +693,22 @@ class MessageBubble extends StatelessWidget {
   }
 }
 
-class _ReactionChip extends StatelessWidget {
-  const _ReactionChip({
-    required this.reaction,
+class _ReactionSummaryChip extends StatelessWidget {
+  const _ReactionSummaryChip({
+    required this.reactions,
+    required this.total,
     required this.mine,
     required this.onTap,
   });
 
-  final ChatReaction reaction;
+  final List<ChatReaction> reactions;
+  final int total;
   final bool mine;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final selected = reaction.reactedByMe;
+    final selected = reactions.any((reaction) => reaction.reactedByMe);
     return Material(
       color: selected
           ? (mine ? Colors.white24 : AppColors.brandSoft)
@@ -603,14 +718,24 @@ class _ReactionChip extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(999),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-          child: Text(
-            '${reaction.emoji} ${reaction.count}',
-            style: TextStyle(
-              color: AppColors.ink,
-              fontSize: 10.5,
-              fontWeight: selected ? FontWeight.w900 : FontWeight.w700,
-            ),
+          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                reactions.map((reaction) => reaction.emoji).join(),
+                style: const TextStyle(fontSize: 10.5, height: 1),
+              ),
+              const SizedBox(width: 3),
+              Text(
+                '$total',
+                style: TextStyle(
+                  color: AppColors.ink,
+                  fontSize: 9.5,
+                  fontWeight: selected ? FontWeight.w900 : FontWeight.w700,
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -623,11 +748,13 @@ class _MessageStateIcon extends StatelessWidget {
     required this.message,
     required this.color,
     required this.onRetry,
+    this.onShowReaders,
   });
 
   final ChatMessage message;
   final Color color;
   final VoidCallback onRetry;
+  final VoidCallback? onShowReaders;
 
   @override
   Widget build(BuildContext context) {
@@ -664,7 +791,7 @@ class _MessageStateIcon extends StatelessWidget {
     return Tooltip(
       message: label,
       child: InkWell(
-        onTap: message.canRetry ? onRetry : null,
+        onTap: message.canRetry ? onRetry : onShowReaders,
         borderRadius: BorderRadius.circular(999),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -2126,6 +2253,11 @@ String _formatDuration(Duration duration) {
   final minutes = total ~/ 60;
   final seconds = total % 60;
   return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+}
+
+String messageReferencePreview(
+    BuildContext context, ChatMessageReference reference) {
+  return _referencePreview(context, reference);
 }
 
 String _referencePreview(BuildContext context, ChatMessageReference reference) {

@@ -148,6 +148,8 @@ export default {
       addReaction: "添加表情回应",
       viewReactions: "查看表情回应",
       reactionDetails: "回应成员",
+      allReactions: "所有表情回应",
+      readBy: "已读成员",
       removeMyReaction: "移除你的回应",
       addMyReaction: "添加此回应",
       editHistory: "编辑历史",
