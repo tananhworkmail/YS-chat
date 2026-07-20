@@ -52,6 +52,7 @@ type SendCallEventRequest struct {
 	ConversationID uint64 `json:"conversationId" binding:"required"`
 	CallID         string `json:"callId" binding:"required"`
 	DeviceID       string `json:"deviceId" binding:"required"`
+	MediaType      string `json:"mediaType"`
 	Token          string `json:"token"`
 }
 
@@ -116,6 +117,13 @@ type SetTypingRequest struct {
 
 type SetPinnedMessageRequest struct {
 	MessageID uint64 `json:"messageId"`
+	Pinned    *bool  `json:"pinned"`
+}
+
+type CreateReminderRequest struct {
+	Title      string    `json:"title"`
+	RemindAt   time.Time `json:"remindAt"`
+	RepeatType string    `json:"repeatType"`
 }
 
 type SearchConversationMessagesRequest struct {

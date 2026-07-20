@@ -187,6 +187,7 @@ func (h *ChatController) SendCallEvent(c *gin.Context) {
 		req.ConversationID,
 		req.CallID,
 		req.DeviceID,
+		req.MediaType,
 		req.Token,
 	)
 	if err != nil {
@@ -599,12 +600,62 @@ func (h *ChatController) SetPinnedMessage(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
 		return
 	}
-	state, err := services.ChatServiceInstance.SetPinnedMessage(currentUserid(c), conversationID, req.MessageID)
+	var state *types.ChatPinnedMessageState
+	var err error
+	if req.Pinned != nil && !*req.Pinned {
+		state, err = services.ChatServiceInstance.RemovePinnedMessage(currentUserid(c), conversationID, req.MessageID)
+	} else {
+		state, err = services.ChatServiceInstance.SetPinnedMessage(currentUserid(c), conversationID, req.MessageID)
+	}
 	if err != nil {
 		writeChatError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"pinState": state})
+}
+
+func (h *ChatController) ListReminders(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+	reminders, err := services.ReminderServiceInstance.List(currentUserid(c), conversationID)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"reminders": reminders})
+}
+
+func (h *ChatController) CreateReminder(c *gin.Context) {
+	conversationID, ok := parseConversationID(c)
+	if !ok {
+		return
+	}
+	var req request.CreateReminderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+	reminder, err := services.ReminderServiceInstance.Create(currentUserid(c), conversationID, req)
+	if err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"reminder": reminder})
+}
+
+func (h *ChatController) CancelReminder(c *gin.Context) {
+	reminderID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || reminderID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidInput})
+		return
+	}
+	if err := services.ReminderServiceInstance.Cancel(currentUserid(c), reminderID); err != nil {
+		writeChatError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "REMINDER_CANCELED"})
 }
 
 func (h *ChatController) CreatePoll(c *gin.Context) {

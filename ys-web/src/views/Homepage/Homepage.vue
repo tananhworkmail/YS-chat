@@ -37,10 +37,39 @@
       </button>
     </div>
 
-    <div v-if="callState !== 'idle'" class="call-panel" :class="callState">
+    <div v-if="reminderNotice" class="reminder-call-panel">
+      <div class="reminder-call-card">
+        <span class="reminder-call-pulse"><AlarmClock :size="28" /></span>
+        <small>{{ homeT("reminder.due") }}</small>
+        <strong>{{ reminderNotice.title }}</strong>
+        <span class="reminder-call-time">{{ formatReminderTime(reminderNotice.remindAt) }}</span>
+        <button class="call-control end" type="button" :title="homeT('reminder.dismiss')" @click="dismissReminderNotice">
+          <X :size="20" />
+        </button>
+        <i></i>
+      </div>
+    </div>
+
+    <div v-if="callState !== 'idle'" class="call-panel" :class="[callState, { video: isVideoCall }]">
+      <div v-if="isVideoCall" class="call-video-stage">
+        <video ref="remoteVideoRef" class="call-video-remote" autoplay playsinline muted></video>
+        <div v-if="callState === 'incoming'" class="call-video-placeholder">
+          <Video :size="34" />
+          <span>{{ callText("incomingVideo") }}</span>
+        </div>
+        <video
+          v-show="!callCameraOff && callState !== 'incoming'"
+          ref="localVideoRef"
+          class="call-video-local"
+          autoplay
+          playsinline
+          muted
+        ></video>
+      </div>
       <div class="call-peer">
         <span class="call-pulse">
-          <PhoneCall :size="18" />
+          <Video v-if="isVideoCall" :size="18" />
+          <PhoneCall v-else :size="18" />
         </span>
         <span>
           <strong>{{ callPeerName }}</strong>
@@ -67,6 +96,17 @@
           <PhoneOff :size="19" />
         </button>
         <template v-else>
+          <button
+            v-if="isVideoCall"
+            class="call-control camera"
+            :class="{ muted: callCameraOff }"
+            type="button"
+            :title="callCameraOff ? callText('cameraOn') : callText('cameraOff')"
+            @click="toggleCallCamera"
+          >
+            <VideoOff v-if="callCameraOff" :size="18" />
+            <Video v-else :size="18" />
+          </button>
           <button
             class="call-control mute"
             :class="{ muted: callMuted }"
@@ -642,6 +682,11 @@
                 <Phone :size="20" />
               </button>
             </el-tooltip>
+            <el-tooltip v-if="activeConversation.type === 'direct'" :content="callText('startVideo')" placement="bottom">
+              <button class="icon-button" type="button" :disabled="!canStartAudioCall" @click="startVideoCall">
+                <Video :size="20" />
+              </button>
+            </el-tooltip>
             <el-tooltip
               v-if="activeConversation.type === 'direct' && directConversationPeer(activeConversation) && !isContactUser(directConversationPeer(activeConversation).userid)"
               :content="homeT('actions.addContact')"
@@ -649,19 +694,6 @@
             >
               <button class="icon-button" type="button" @click="addActiveConversationContact">
                 <UserPlus :size="20" />
-              </button>
-            </el-tooltip>
-            <el-tooltip
-              v-if="activeConversation.type === 'direct' && directConversationPeer(activeConversation) && isContactUser(directConversationPeer(activeConversation).userid)"
-              :content="homeT('info.setNickname')"
-              placement="bottom"
-            >
-              <button
-                class="icon-button"
-                type="button"
-                @click="openNicknameDialog(directConversationPeer(activeConversation), 'contact')"
-              >
-                <Pencil :size="19" />
               </button>
             </el-tooltip>
             <el-tooltip v-if="activeConversation.type === 'group'" :content="homeT('chat.addMember')" placement="bottom">
@@ -672,6 +704,11 @@
             <el-tooltip :content="homeT('chat.info')" placement="bottom">
               <button class="icon-button" type="button" @click="openInfoPanel">
                 <Info :size="20" />
+              </button>
+            </el-tooltip>
+            <el-tooltip :content="homeT('reminder.title')" placement="bottom">
+              <button class="icon-button" type="button" @click="openReminderDialog">
+                <CalendarClock :size="20" />
               </button>
             </el-tooltip>
           </div>
@@ -685,16 +722,38 @@
               <em>{{ messageReferencePreview(activePinnedMessage) }}</em>
             </span>
           </button>
+          <el-popover placement="bottom-end" :width="360" trigger="click">
+            <div class="pinned-message-list">
+              <strong>{{ homeT("chat.pinnedMessagesCount", { count: activePinnedMessages.length }) }}</strong>
+              <button
+                v-for="pinned in activePinnedMessages"
+                :key="pinned.id"
+                type="button"
+                @click="scrollToMessage(pinned.id)"
+              >
+                <Pin :size="14" />
+                <span>{{ messageReferencePreview(pinned) }}</span>
+                <X :size="15" @click.stop="unpinMessage(pinned)" />
+              </button>
+            </div>
+            <template #reference>
+              <button class="pinned-message-count" type="button">
+                {{ activePinnedMessages.length }}
+                <ChevronDown :size="15" />
+              </button>
+            </template>
+          </el-popover>
           <button
             class="pinned-message-remove"
             type="button"
             :title="homeT('chat.unpinMessage')"
-            @click="unpinActiveMessage"
+            @click="unpinMessage(activePinnedMessage)"
           >
             <X :size="15" />
           </button>
         </div>
 
+        <div class="message-list-wrap">
         <section ref="messageListRef" class="message-list" :style="messageListStyle" @scroll="handleMessageListScroll">
           <div v-if="loadingMessages" class="message-state">{{ homeT("chat.loadingMessages") }}</div>
           <div v-else-if="messages.length === 0" class="message-state">
@@ -867,7 +926,7 @@
                       <button
                         class="poll-pin-button"
                         type="button"
-                        @click="isPinnedMessage(message) ? unpinActiveMessage() : pinMessage(message)"
+                        @click="isPinnedMessage(message) ? unpinMessage(message) : pinMessage(message)"
                       >
                         <Pin :size="14" />
                         <span>{{ isPinnedMessage(message) ? homeT("chat.unpinMessage") : homeT("chat.pinMessage") }}</span>
@@ -1204,6 +1263,20 @@
           </div>
           </template>
         </section>
+        <button
+          v-if="showLatestButton"
+          class="latest-message-button"
+          type="button"
+          :aria-label="homeT('chat.scrollToLatest')"
+          :title="homeT('chat.scrollToLatest')"
+          @click="scrollToBottom"
+        >
+          <ChevronDown :size="21" />
+          <span v-if="newMessagesBelowCount" class="latest-message-badge">
+            {{ newMessagesBelowCount > 99 ? '99+' : newMessagesBelowCount }}
+          </span>
+        </button>
+        </div>
 
         <div v-if="typingIndicatorText" class="typing-indicator" aria-live="polite">
           <span><i></i><i></i><i></i></span>
@@ -1513,7 +1586,23 @@
             <Camera :size="15" />
           </button>
         </div>
-        <h3>{{ activeConversation.name }}</h3>
+        <div class="profile-title-row">
+          <h3>{{ activeConversation.name }}</h3>
+          <el-tooltip
+            v-if="activeConversation.type === 'direct' && directConversationPeer(activeConversation) && isContactUser(directConversationPeer(activeConversation).userid)"
+            :content="homeT('info.setNickname')"
+            placement="top"
+          >
+            <button
+              class="profile-nickname-button"
+              type="button"
+              :aria-label="homeT('info.setNickname')"
+              @click="openNicknameDialog(directConversationPeer(activeConversation), 'contact')"
+            >
+              <Pencil :size="15" />
+            </button>
+          </el-tooltip>
+        </div>
         <input
           ref="groupAvatarInputRef"
           hidden
@@ -2187,6 +2276,39 @@
       </template>
     </el-dialog>
 
+    <el-dialog v-model="reminderDialogVisible" :title="homeT('reminder.title')" width="500px" class="chat-dialog">
+      <div class="dialog-form">
+        <label>{{ homeT("reminder.content") }}</label>
+        <input v-model.trim="reminderForm.title" maxlength="240" type="text" :placeholder="homeT('reminder.placeholder')" />
+        <label>{{ homeT("reminder.time") }}</label>
+        <input v-model="reminderForm.remindAt" type="datetime-local" />
+        <label>{{ homeT("reminder.repeat") }}</label>
+        <select v-model="reminderForm.repeatType">
+          <option value="none">{{ homeT("reminder.repeatNone") }}</option>
+          <option value="daily">{{ homeT("reminder.repeatDaily") }}</option>
+          <option value="weekly">{{ homeT("reminder.repeatWeekly") }}</option>
+          <option value="monthly">{{ homeT("reminder.repeatMonthly") }}</option>
+        </select>
+      </div>
+      <div v-if="scheduledReminders.length" class="scheduled-reminder-list">
+        <div v-for="reminder in scheduledReminders" :key="reminder.id">
+          <AlarmClock :size="16" />
+          <span>
+            <strong>{{ reminder.title }}</strong>
+            <small>{{ formatReminderTime(reminder.remindAt) }} · {{ reminderRepeatLabel(reminder.repeatType) }}</small>
+          </span>
+          <button v-if="reminder.creatorUserid === currentUserid" type="button" @click="cancelScheduledReminder(reminder)">
+            <X :size="16" />
+          </button>
+        </div>
+      </div>
+      <p v-else class="muted reminder-empty">{{ homeT("reminder.empty") }}</p>
+      <template #footer>
+        <button class="dialog-button ghost" type="button" @click="reminderDialogVisible = false">{{ homeT("actions.cancel") }}</button>
+        <button class="dialog-button primary" type="button" :disabled="reminderSubmitting" @click="submitReminder">{{ homeT("reminder.schedule") }}</button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="forwardDialogVisible" :title="homeT('dialogs.forwardTitle')" width="440px" class="chat-dialog">
       <div class="forward-preview">
         <Forward :size="17" />
@@ -2262,9 +2384,11 @@ import BrandLogo from "@/components/BrandLogo.vue";
 import {
   Archive,
   ArchiveRestore,
+  AlarmClock,
   Bell,
   BellOff,
   Camera,
+  CalendarClock,
   Check,
   CheckCheck,
   ChevronLeft,
@@ -2317,6 +2441,8 @@ import {
   UserPlus,
   UserRound,
   Users,
+  Video,
+  VideoOff,
   X,
 } from "lucide-vue-next";
 import chatApi from "@/store/chat";
@@ -2395,6 +2521,8 @@ const conversationSearchKeyword = ref("");
 const conversationSearchIndex = ref(0);
 const conversationSearchServerResults = ref([]);
 const conversationSearchLoading = ref(false);
+const showLatestButton = ref(false);
+const newMessagesBelowCount = ref(0);
 const composerText = ref("");
 const mentionActive = ref(false);
 const mentionQuery = ref("");
@@ -2415,6 +2543,11 @@ const pollForm = ref({
 });
 const pollVotingMessageIds = ref({});
 const pollCustomInputs = ref({});
+const reminderDialogVisible = ref(false);
+const reminderSubmitting = ref(false);
+const scheduledReminders = ref([]);
+const reminderNotice = ref(null);
+const reminderForm = ref({ title: "", remindAt: "", repeatType: "none" });
 const pendingAttachments = ref([]);
 const pendingAttachmentType = ref("file");
 const isRecording = ref(false);
@@ -2453,9 +2586,12 @@ const avatarInputRef = ref(null);
 const groupAvatarInputRef = ref(null);
 const groupBackgroundInputRef = ref(null);
 const remoteAudioRef = ref(null);
+const remoteVideoRef = ref(null);
+const localVideoRef = ref(null);
 const callState = ref("idle");
 const currentCall = ref(null);
 const callMuted = ref(false);
+const callCameraOff = ref(false);
 const callDuration = ref(0);
 const realtimeStatus = ref("idle");
 const realtimeLastError = ref("");
@@ -2476,6 +2612,9 @@ let typingStopTimer = null;
 let typingLastSentAt = 0;
 let typingConversationId = null;
 let conversationSearchTimer = null;
+let reminderNoticeTimer = null;
+let reminderRingtoneContext = null;
+let reminderRingtoneTimer = null;
 let backgroundSyncPromise = null;
 let searchRequestId = 0;
 let conversationSearchRequestId = 0;
@@ -2556,8 +2695,14 @@ const changeLocale = (lang) => {
 const activeConversation = computed(() =>
   conversations.value.find((conversation) => conversation.id === activeConversationId.value),
 );
-const activePinnedMessage = computed(() => activeConversation.value?.pinnedMessage || null);
+const activePinnedMessages = computed(() => {
+  const pinned = activeConversation.value?.pinnedMessages;
+  if (Array.isArray(pinned) && pinned.length) return pinned;
+  return activeConversation.value?.pinnedMessage ? [activeConversation.value.pinnedMessage] : [];
+});
+const activePinnedMessage = computed(() => activePinnedMessages.value[0] || null);
 const canStartAudioCall = computed(() => activeConversation.value?.type === "direct" && callState.value === "idle");
+const isVideoCall = computed(() => currentCall.value?.mediaType === "video");
 const callPeerName = computed(() => currentCall.value?.peerName || activeConversation.value?.name || "");
 const callStatusLabel = computed(() => {
   if (callState.value === "incoming") return callText("incoming");
@@ -2866,6 +3011,8 @@ onBeforeUnmount(() => {
   if (searchTimer) window.clearTimeout(searchTimer);
   if (contactLookupTimer) window.clearTimeout(contactLookupTimer);
   if (conversationSearchTimer) window.clearTimeout(conversationSearchTimer);
+  if (reminderNoticeTimer) window.clearTimeout(reminderNoticeTimer);
+  stopReminderRingtone();
   if (readAckTimer) window.clearTimeout(readAckTimer);
   stopLocalTyping(true);
   typingExpiryTimers.forEach((timer) => window.clearTimeout(timer));
@@ -2924,6 +3071,10 @@ watch(activeConversationId, (nextConversationId, previousConversationId) => {
   conversationSearchServerResults.value = [];
   conversationSearchIndex.value = 0;
   infoPanelView.value = "details";
+  showLatestButton.value = false;
+  newMessagesBelowCount.value = 0;
+  scheduledReminders.value = [];
+  reminderDialogVisible.value = false;
 });
 
 watch(contactUserid, (value) => {
@@ -3124,6 +3275,87 @@ const notificationPreview = (message) => {
   if (message.type === "link") return `${sender}${homeT("previews.sentLink")}`;
   if (message.type === "poll") return `${sender}${message.content || homeT("previews.poll")}`;
   return `${sender}${message.content || homeT("previews.newMessage")}`;
+};
+
+const formatReminderTime = (value) => dayjs(value).format("DD/MM/YYYY HH:mm");
+
+const reminderRepeatLabel = (value) => homeT(`reminder.repeat_${value || "none"}`);
+
+const openReminderDialog = async () => {
+  if (!activeConversationId.value) return;
+  const conversationId = activeConversationId.value;
+  reminderForm.value = {
+    title: "",
+    remindAt: dayjs().add(1, "hour").format("YYYY-MM-DDTHH:mm"),
+    repeatType: "none",
+  };
+  reminderDialogVisible.value = true;
+  try {
+    const response = await chatApi.getReminders(conversationId);
+    if (Number(activeConversationId.value) !== Number(conversationId)) return;
+    scheduledReminders.value = response.data?.reminders || [];
+  } catch (error) {
+    showApiError(error);
+  }
+};
+
+const submitReminder = async () => {
+  const title = reminderForm.value.title.trim();
+  const remindAt = new Date(reminderForm.value.remindAt);
+  if (!title || Number.isNaN(remindAt.getTime()) || remindAt <= new Date()) {
+    ElMessage.warning(homeT("reminder.invalid"));
+    return;
+  }
+  try {
+    reminderSubmitting.value = true;
+    const response = await chatApi.createReminder(activeConversationId.value, {
+      title,
+      remindAt: remindAt.toISOString(),
+      repeatType: reminderForm.value.repeatType || "none",
+    });
+    const reminder = response.data?.reminder;
+    if (reminder) {
+      scheduledReminders.value = [...scheduledReminders.value.filter((item) => item.id !== reminder.id), reminder]
+        .sort((first, second) => new Date(first.remindAt) - new Date(second.remindAt));
+    }
+    reminderForm.value.title = "";
+    ElMessage.success(homeT("reminder.scheduled"));
+  } catch (error) {
+    showApiError(error);
+  } finally {
+    reminderSubmitting.value = false;
+  }
+};
+
+const cancelScheduledReminder = async (reminder) => {
+  try {
+    await chatApi.cancelReminder(reminder.id);
+    scheduledReminders.value = scheduledReminders.value.filter((item) => item.id !== reminder.id);
+  } catch (error) {
+    showApiError(error);
+  }
+};
+
+const handleReminderRealtimeEvent = (event = {}) => {
+  const reminder = event.payload || {};
+  if (event.type === "reminder.canceled") {
+    scheduledReminders.value = scheduledReminders.value.filter((item) => item.id !== Number(reminder.id));
+    return;
+  }
+  if (event.type === "reminder.created" || event.type === "reminder.updated") {
+    if (Number(reminder.conversationId) === Number(activeConversationId.value)) {
+      scheduledReminders.value = [...scheduledReminders.value.filter((item) => item.id !== reminder.id), reminder]
+        .sort((first, second) => new Date(first.remindAt) - new Date(second.remindAt));
+    }
+    return;
+  }
+  scheduledReminders.value = scheduledReminders.value.filter((item) => item.id !== reminder.id);
+  reminderNotice.value = reminder;
+  startReminderRingtone();
+  if (reminderNoticeTimer) window.clearTimeout(reminderNoticeTimer);
+  reminderNoticeTimer = window.setTimeout(() => {
+    if (reminderNotice.value?.id === reminder.id) dismissReminderNotice();
+  }, 5000);
 };
 
 const connectRealtime = async () => {
@@ -3369,6 +3601,11 @@ const handleRealtimeEvent = async (rawEvent) => {
     return;
   }
 
+  if (["reminder.created", "reminder.updated", "reminder.canceled", "reminder.due"].includes(event.type)) {
+    handleReminderRealtimeEvent(event);
+    return;
+  }
+
   if (event.type === "chat.presence.changed" && event.userid) {
     applyPresence(event.userid, Boolean(event.isOnline));
     return;
@@ -3390,6 +3627,7 @@ const handleRealtimeEvent = async (rawEvent) => {
       upsertMessage(message);
       if (document.visibilityState === "visible") markConversationRead(message.conversationId);
       if (shouldStickToBottom) await scrollToBottom();
+      else if (!isOwnMessage(message)) registerNewMessagesBelow(1);
     }
     await loadConversations(false, { silent: true });
     return;
@@ -3439,6 +3677,8 @@ const handleRealtimeEvent = async (rawEvent) => {
 
 const callText = (key) => ({
   start: "Gọi thoại",
+  startVideo: "Gọi video",
+  incomingVideo: "Cuộc gọi video đến",
   incoming: "Cuộc gọi đến",
   outgoing: "Đang gọi...",
   connecting: "Đang kết nối...",
@@ -3448,6 +3688,8 @@ const callText = (key) => ({
   end: "Kết thúc",
   mute: "Tắt micro",
   unmute: "Bật micro",
+  cameraOn: "Bật camera",
+  cameraOff: "Tắt camera",
   busy: "Người kia đang bận.",
   canceled: "Cuộc gọi đã hủy.",
   rejected: "Cuộc gọi bị từ chối.",
@@ -3455,6 +3697,7 @@ const callText = (key) => ({
   unavailable: "Trình duyệt này chưa hỗ trợ gọi thoại.",
   directOnly: "Chỉ hỗ trợ gọi trong chat cá nhân.",
   microphoneFailed: "Không thể truy cập micro.",
+  cameraFailed: "Không thể truy cập camera.",
   websocketUnavailable: "Kết nối realtime chưa sẵn sàng.",
 }[key] || key);
 
@@ -3493,6 +3736,7 @@ const sendCallEvent = (type, signal = null, call = currentCall.value) => {
     eventId: createClientMessageId(),
     conversationId: call.conversationId,
     callId: call.id,
+    mediaType: call.mediaType || "audio",
     sourceDeviceId: currentDeviceId,
     signal,
   });
@@ -3522,6 +3766,7 @@ const sendCallControlEvent = async (type, call = currentCall.value) => {
       conversationId: call.conversationId,
       callId: call.id,
       deviceId: currentDeviceId,
+      mediaType: call.mediaType || "audio",
     });
     return true;
   } catch {
@@ -3545,24 +3790,35 @@ const prepareLocalCallMedia = async () => {
       noiseSuppression: true,
       autoGainControl: true,
     },
-    video: false,
+    video: isVideoCall.value
+      ? {
+        facingMode: "user",
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+      }
+      : false,
   });
   callMuted.value = false;
+  callCameraOff.value = false;
+  await nextTick();
+  if (localVideoRef.value) localVideoRef.value.srcObject = localCallStream;
   return localCallStream;
 };
 
 const callMediaErrorMessage = (error = {}) => {
   if (!window.isSecureContext) {
-    return "Micro chi hoat dong tren HTTPS hoac localhost. Hay mo bang http://localhost tren may nay, hoac cau hinh HTTPS cho dia chi LAN/domain.";
+    return "Camera và micro chỉ hoạt động trên HTTPS hoặc localhost.";
   }
   if (!navigator.mediaDevices?.getUserMedia || error.message === "WEBRTC_UNAVAILABLE") {
     return callText("unavailable");
   }
   if (error.name === "NotAllowedError" || error.name === "SecurityError") {
-    return "Quyen micro dang bi chan. Hay bam bieu tuong o khoa tren thanh dia chi va Allow microphone.";
+    return isVideoCall.value
+      ? "Quyền camera hoặc micro đang bị chặn. Hãy cho phép camera và microphone trên trình duyệt."
+      : "Quyền micro đang bị chặn. Hãy cho phép microphone trên trình duyệt.";
   }
   if (error.name === "NotFoundError" || error.name === "DevicesNotFoundError") {
-    return "Khong tim thay micro tren thiet bi nay.";
+    return isVideoCall.value ? callText("cameraFailed") : callText("microphoneFailed");
   }
   if (error.name === "NotReadableError" || error.name === "TrackStartError") {
     return "Micro dang bi ung dung khac su dung hoac he thong dang chan.";
@@ -3570,11 +3826,21 @@ const callMediaErrorMessage = (error = {}) => {
   return callText("microphoneFailed");
 };
 
+const attachLocalCallStream = async () => {
+  await nextTick();
+  if (localVideoRef.value && localCallStream) {
+    localVideoRef.value.srcObject = localCallStream;
+  }
+};
+
 const attachRemoteCallStream = async () => {
   await nextTick();
   if (!remoteAudioRef.value || !remoteCallStream) return;
   if (remoteAudioRef.value.srcObject !== remoteCallStream) {
     remoteAudioRef.value.srcObject = remoteCallStream;
+  }
+  if (remoteVideoRef.value && remoteVideoRef.value.srcObject !== remoteCallStream) {
+    remoteVideoRef.value.srcObject = remoteCallStream;
   }
   try {
     await remoteAudioRef.value.play();
@@ -3711,6 +3977,54 @@ const stopRingtone = () => {
   }
 };
 
+const startReminderRingtone = () => {
+  stopReminderRingtone();
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return;
+
+  try {
+    reminderRingtoneContext = new AudioContextClass();
+    const playTone = () => {
+      if (!reminderRingtoneContext) return;
+      const oscillator = reminderRingtoneContext.createOscillator();
+      const gain = reminderRingtoneContext.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, reminderRingtoneContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.14, reminderRingtoneContext.currentTime + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.0001, reminderRingtoneContext.currentTime + 0.38);
+      oscillator.connect(gain);
+      gain.connect(reminderRingtoneContext.destination);
+      oscillator.start();
+      oscillator.stop(reminderRingtoneContext.currentTime + 0.42);
+    };
+    void reminderRingtoneContext.resume().then(playTone).catch(() => {});
+    reminderRingtoneTimer = window.setInterval(playTone, 1400);
+  } catch {
+    reminderRingtoneContext = null;
+  }
+};
+
+const stopReminderRingtone = () => {
+  if (reminderRingtoneTimer) {
+    window.clearInterval(reminderRingtoneTimer);
+    reminderRingtoneTimer = null;
+  }
+  if (reminderRingtoneContext) {
+    void reminderRingtoneContext.close().catch(() => {});
+    reminderRingtoneContext = null;
+  }
+};
+
+const dismissReminderNotice = () => {
+  reminderNotice.value = null;
+  if (reminderNoticeTimer) {
+    window.clearTimeout(reminderNoticeTimer);
+    reminderNoticeTimer = null;
+  }
+  stopReminderRingtone();
+};
+
 const notifyIncomingCall = (peerName) => {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
   try {
@@ -3729,7 +4043,7 @@ const requestNotificationPermission = () => {
   void Notification.requestPermission().catch(() => {});
 };
 
-const startAudioCall = async () => {
+const startCall = async (mediaType = "audio") => {
   if (!activeConversation.value || activeConversation.value.type !== "direct") {
     ElMessage.warning(callText("directOnly"));
     return;
@@ -3743,6 +4057,7 @@ const startAudioCall = async () => {
     peerUserid: peer?.userid || "",
     peerName: activeConversation.value.name,
     direction: "outgoing",
+    mediaType: mediaType === "video" ? "video" : "audio",
   };
 
   try {
@@ -3750,12 +4065,13 @@ const startAudioCall = async () => {
       ElMessage.error(realtimeUnavailableMessage());
       return;
     }
-    await prepareLocalCallMedia();
     currentCall.value = call;
+    await prepareLocalCallMedia();
     if (!transitionCallState("outgoing")) {
       cleanupCall();
       return;
     }
+    await attachLocalCallStream();
     startRingtone();
     requestNotificationPermission();
     if (!(await sendCallControlEvent("call.invite", call))) {
@@ -3764,10 +4080,14 @@ const startAudioCall = async () => {
     }
     startCallTimeout();
   } catch (error) {
+    const mediaError = callMediaErrorMessage(error);
     cleanupCall();
-    ElMessage.error(callMediaErrorMessage(error));
+    ElMessage.error(mediaError);
   }
 };
+
+const startAudioCall = () => startCall("audio");
+const startVideoCall = () => startCall("video");
 
 const acceptIncomingCall = async () => {
   if (callState.value !== "incoming" || !currentCall.value) return;
@@ -3786,9 +4106,10 @@ const acceptIncomingCall = async () => {
     await ensurePeerConnection();
     startCallTimeout();
   } catch (error) {
+    const mediaError = callMediaErrorMessage(error);
     void sendCallControlEvent("call.end");
     cleanupCall();
-    ElMessage.error(callMediaErrorMessage(error));
+    ElMessage.error(mediaError);
   }
 };
 
@@ -3812,6 +4133,14 @@ const toggleCallMute = () => {
   callMuted.value = !callMuted.value;
   localCallStream?.getAudioTracks().forEach((track) => {
     track.enabled = !callMuted.value;
+  });
+};
+
+const toggleCallCamera = () => {
+  if (!isVideoCall.value) return;
+  callCameraOff.value = !callCameraOff.value;
+  localCallStream?.getVideoTracks().forEach((track) => {
+    track.enabled = !callCameraOff.value;
   });
 };
 
@@ -3840,9 +4169,12 @@ const cleanupCall = (message = "") => {
   if (remoteAudioRef.value) {
     remoteAudioRef.value.srcObject = null;
   }
+  if (remoteVideoRef.value) remoteVideoRef.value.srcObject = null;
+  if (localVideoRef.value) localVideoRef.value.srcObject = null;
   currentCall.value = null;
   transitionCallState("idle");
   callMuted.value = false;
+  callCameraOff.value = false;
   callDuration.value = 0;
   callStartedAt = 0;
   if (message) {
@@ -3898,6 +4230,7 @@ const handleCallRealtimeEvent = async (event) => {
       peerUserid: event.fromUserid || event.userid || "",
       peerName: conversation.name,
       direction: "incoming",
+      mediaType: event.mediaType === "video" ? "video" : "audio",
     };
     if (!transitionCallState("incoming")) {
       currentCall.value = null;
@@ -3922,7 +4255,7 @@ const handleCallRealtimeEvent = async (event) => {
     try {
       await prepareLocalCallMedia();
       const pc = await ensurePeerConnection();
-      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: false });
+      const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: isVideoCall.value });
       await pc.setLocalDescription(offer);
       sendCallEvent("call.offer", pc.localDescription?.toJSON ? pc.localDescription.toJSON() : pc.localDescription);
       startCallTimeout();
@@ -4612,6 +4945,7 @@ const catchUpConversation = async (conversationId, cursorSnapshot = {}) => {
   let afterSequence = Number(stored.afterSequence || 0);
   let afterMessageId = Number(stored.afterMessageId || 0);
   let appendedToActive = false;
+  let inboundMessagesBelow = 0;
   const shouldStickToBottom = conversationId === activeConversationId.value && isMessageListNearBottom();
   try {
     while (true) {
@@ -4628,6 +4962,9 @@ const catchUpConversation = async (conversationId, cursorSnapshot = {}) => {
         if (conversationId === activeConversationId.value) {
           messages.value = mergeMessageLists(messages.value, caughtUpMessages);
           appendedToActive = true;
+          if (!shouldStickToBottom) {
+            inboundMessagesBelow += caughtUpMessages.filter((message) => !isOwnMessage(message)).length;
+          }
         }
       }
 
@@ -4662,6 +4999,7 @@ const catchUpConversation = async (conversationId, cursorSnapshot = {}) => {
     if (appendedToActive) {
       markConversationRead(conversationId);
       if (shouldStickToBottom) await scrollToBottom();
+      else registerNewMessagesBelow(inboundMessagesBelow);
     }
   } catch {
     // Keep the last processed cursor. A broad snapshot here could jump over the
@@ -4726,8 +5064,11 @@ const openInfoPanel = async () => {
 
 const handleMessageListScroll = () => {
   const listEl = messageListRef.value;
-  if (!listEl || listEl.scrollTop > 80) return;
-  void loadOlderMessages();
+  if (!listEl) return;
+  const nearBottom = isMessageListNearBottom();
+  showLatestButton.value = !nearBottom;
+  if (nearBottom) newMessagesBelowCount.value = 0;
+  if (listEl.scrollTop <= 80) void loadOlderMessages();
 };
 
 const startDirectChat = async (userid) => {
@@ -5410,7 +5751,7 @@ const cancelReply = () => {
   replyingTo.value = null;
 };
 
-const isPinnedMessage = (message = {}) => activePinnedMessage.value?.id === message.id;
+const isPinnedMessage = (message = {}) => activePinnedMessages.value.some((item) => item.id === message.id);
 
 const applyPinnedMessageState = (conversationId, state = {}) => {
   const normalizedConversationId = Number(conversationId || state.conversationId || 0);
@@ -5420,6 +5761,10 @@ const applyPinnedMessageState = (conversationId, state = {}) => {
       ? {
         ...conversation,
         pinnedMessage: state.pinnedMessage || null,
+        pinnedMessages: Array.isArray(state.pinnedMessages)
+          ? state.pinnedMessages
+          : (state.pinnedMessage ? [state.pinnedMessage] : []),
+        pinnedCount: Number(state.pinnedCount || state.pinnedMessages?.length || (state.pinnedMessage ? 1 : 0)),
         messagePinnedBy: state.pinnedBy || "",
         messagePinnedByName: state.pinnedByName || "",
         messagePinnedAt: state.pinnedAt || null,
@@ -5456,10 +5801,10 @@ const pinMessage = async (message = {}) => {
   }
 };
 
-const unpinActiveMessage = async () => {
-  if (!activeConversationId.value) return;
+const unpinMessage = async (message = {}) => {
+  if (!activeConversationId.value || !message.id) return;
   try {
-    const response = await chatApi.setPinnedMessage(activeConversationId.value, 0);
+    const response = await chatApi.setPinnedMessage(activeConversationId.value, message.id, false);
     await applyPinnedMessageResponse(activeConversationId.value, response.data?.pinState || {});
   } catch (error) {
     showApiError(error);
@@ -5472,7 +5817,7 @@ const handleMessageOption = (command, message) => {
     return;
   }
   if (command === "unpin") {
-    unpinActiveMessage();
+    unpinMessage(message);
     return;
   }
   if (command === "copy") {
@@ -6386,6 +6731,8 @@ const sendCurrentMessage = async () => {
 };
 
 const scrollToBottom = async () => {
+  showLatestButton.value = false;
+  newMessagesBelowCount.value = 0;
   await nextTick();
   const el = messageListRef.value;
   if (!el) return;
@@ -6403,6 +6750,12 @@ const isMessageListNearBottom = () => {
   const el = messageListRef.value;
   if (!el) return true;
   return el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+};
+
+const registerNewMessagesBelow = (count = 1) => {
+  if (count <= 0) return;
+  newMessagesBelowCount.value += count;
+  showLatestButton.value = true;
 };
 
 const scrollToMessage = async (messageId) => {
@@ -6974,6 +7327,56 @@ a {
   box-shadow: 0 18px 50px rgba(15, 23, 42, 0.24);
 }
 
+.call-panel.video {
+  width: min(720px, calc(100vw - 28px));
+  background: #0f172a;
+  color: #fff;
+}
+
+.call-video-stage {
+  position: relative;
+  grid-column: 1 / -1;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border-radius: 7px;
+  background: #020617;
+}
+
+.call-video-remote {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.call-video-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  color: #cbd5e1;
+  text-align: center;
+}
+
+.call-video-local {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: min(28%, 170px);
+  aspect-ratio: 3 / 4;
+  border: 2px solid rgba(255, 255, 255, 0.78);
+  border-radius: 7px;
+  background: #111827;
+  object-fit: cover;
+  transform: scaleX(-1);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.call-panel.video .call-peer small {
+  color: #cbd5e1;
+}
+
 .call-peer {
   min-width: 0;
   display: flex;
@@ -7041,6 +7444,14 @@ a {
 
 .call-control.mute {
   background: #334155;
+}
+
+.call-control.camera {
+  background: #334155;
+}
+
+.call-control.camera.muted {
+  background: #b45309;
 }
 
 .call-control.mute.muted {
@@ -7259,7 +7670,8 @@ a {
 .search-box input,
 .quick-start input,
 .chip-input input,
-.dialog-form input {
+.dialog-form input,
+.dialog-form select {
   min-width: 0;
   width: 100%;
   border: 0;
@@ -8048,13 +8460,58 @@ a {
 .pinned-message-bar {
   min-height: 44px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 32px;
+  grid-template-columns: minmax(0, 1fr) auto 32px;
   align-items: center;
   gap: 8px;
   padding: 6px 18px;
   border-bottom: 1px solid #dce3ee;
   background: #ffffff;
   flex: 0 0 auto;
+}
+
+.pinned-message-count {
+  min-width: 42px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+  cursor: pointer;
+  font-weight: 900;
+}
+
+.pinned-message-list {
+  display: grid;
+  gap: 6px;
+}
+
+.pinned-message-list > strong {
+  padding: 2px 4px 6px;
+  color: #172033;
+}
+
+.pinned-message-list > button {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px;
+  border-radius: 8px;
+  background: #f6f8fb;
+  color: #475569;
+  cursor: pointer;
+  text-align: left;
+}
+
+.pinned-message-list > button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pinned-message-main {
@@ -8155,6 +8612,56 @@ a {
   padding: 20px 28px;
   background-position: center;
   background-size: cover;
+}
+
+.message-list-wrap {
+  position: relative;
+  min-height: 0;
+  display: flex;
+  flex: 1 1 auto;
+}
+
+.message-list-wrap .message-list {
+  flex: 1 1 auto;
+}
+
+.latest-message-button {
+  position: absolute;
+  right: 22px;
+  bottom: 18px;
+  z-index: 5;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(8, 145, 178, 0.22);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--brand-dark);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.2);
+  cursor: pointer;
+}
+
+.latest-message-button:hover {
+  background: var(--brand-softest);
+}
+
+.latest-message-badge {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  min-width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0 5px;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
 }
 
 .message-history-loader {
@@ -9879,6 +10386,37 @@ textarea:focus,
   letter-spacing: 0;
 }
 
+.profile-title-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.profile-title-row h3 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-nickname-button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--brand-softest);
+  color: var(--brand-dark);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.profile-nickname-button:hover {
+  background: var(--brand-soft);
+}
+
 .conversation-setting-actions {
   display: grid;
   gap: 7px;
@@ -10305,7 +10843,8 @@ textarea:focus,
   font-weight: 700;
 }
 
-.dialog-form > input {
+.dialog-form > input,
+.dialog-form > select {
   height: 40px;
   border: 1px solid #dce3ee;
   border-radius: 8px;
@@ -10540,7 +11079,7 @@ textarea:focus,
 }
 
 @media (max-width: 820px) {
-  .call-panel {
+.call-panel {
     top: 10px;
     right: 10px;
     left: 10px;
@@ -10779,4 +11318,92 @@ textarea:focus,
     bottom: 0;
   }
 }
+
+.reminder-call-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 16000;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(17, 24, 39, 0.96);
+  color: #ffffff;
+}
+
+.reminder-call-card {
+  position: relative;
+  width: min(420px, 100%);
+  min-height: 360px;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 12px;
+  overflow: hidden;
+  border-radius: 14px;
+  padding: 34px 24px 44px;
+  text-align: center;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.36);
+}
+
+.reminder-call-pulse {
+  width: 86px;
+  height: 86px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #0891b2;
+  box-shadow: 0 0 0 0 rgba(8, 145, 178, 0.42);
+  animation: callPulse 1.5s infinite;
+}
+
+.reminder-call-card small,
+.reminder-call-time {
+  color: rgba(255, 255, 255, 0.72);
+  font-weight: 800;
+}
+
+.reminder-call-card strong {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  font-size: 24px;
+  line-height: 1.25;
+}
+
+.reminder-call-card .call-control {
+  margin-top: 28px;
+}
+
+.reminder-call-card > i { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: #ffffff; animation: reminder-countdown 5s linear forwards; transform-origin: left; }
+
+@keyframes reminder-countdown { to { transform: scaleX(0); } }
+
+.scheduled-reminder-list {
+  max-height: 240px;
+  display: grid;
+  gap: 6px;
+  margin-top: 16px;
+  overflow-y: auto;
+}
+
+.scheduled-reminder-list > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 9px;
+  border-radius: 8px;
+  background: #f6f8fb;
+  color: var(--brand-dark);
+}
+
+.scheduled-reminder-list span { min-width: 0; display: grid; gap: 2px; }
+.scheduled-reminder-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #172033; }
+.scheduled-reminder-list small { color: #64748b; }
+.scheduled-reminder-list button { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: #64748b; cursor: pointer; }
+.reminder-empty { padding: 18px 0 4px; text-align: center; }
 </style>

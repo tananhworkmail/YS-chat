@@ -55,10 +55,12 @@ class ChatCallLog {
   const ChatCallLog({
     required this.status,
     required this.duration,
+    this.kind = 'audio',
   });
 
   final String status;
   final int duration;
+  final String kind;
 
   bool get isMissed => status == 'missed';
 
@@ -77,6 +79,7 @@ class ChatCallLog {
         return ChatCallLog(
           status: status,
           duration: duration < 0 ? 0 : duration,
+          kind: '${decoded['kind'] ?? 'audio'}' == 'video' ? 'video' : 'audio',
         );
       }
     } catch (_) {
@@ -672,10 +675,57 @@ class ChatMessageReference {
   }
 }
 
+class ChatReminder {
+  const ChatReminder({
+    required this.id,
+    required this.conversationId,
+    required this.title,
+    required this.remindAt,
+    this.creatorUserid = '',
+    this.creatorName = '',
+    this.repeatType = 'none',
+    this.status = 'scheduled',
+    this.firedAt,
+    this.createdAt,
+  });
+
+  final int id;
+  final int conversationId;
+  final String creatorUserid;
+  final String creatorName;
+  final String title;
+  final DateTime remindAt;
+  final String repeatType;
+  final String status;
+  final DateTime? firedAt;
+  final DateTime? createdAt;
+
+  factory ChatReminder.fromJson(Map<String, dynamic> json) => ChatReminder(
+        id: _asInt(json['id']),
+        conversationId:
+            _asInt(_value(json, 'conversationId', 'conversation_id')),
+        creatorUserid:
+            _asString(_value(json, 'creatorUserid', 'creator_userid')),
+        creatorName: _asString(_value(json, 'creatorName', 'creator_name')),
+        title: _asString(json['title']),
+        remindAt: _asDate(_value(json, 'remindAt', 'remind_at')) ??
+            DateTime.fromMillisecondsSinceEpoch(0, isUtc: true),
+        repeatType:
+            _asString(_value(json, 'repeatType', 'repeat_type')).trim().isEmpty
+                ? 'none'
+                : _asString(_value(json, 'repeatType', 'repeat_type')),
+        status: _asString(json['status']),
+        firedAt: _asDate(_value(json, 'firedAt', 'fired_at')),
+        createdAt: _asDate(_value(json, 'createdAt', 'created_at')),
+      );
+}
+
 class PinnedMessageState {
   const PinnedMessageState({
     required this.conversationId,
     this.pinnedMessage,
+    this.pinnedMessages = const [],
+    this.pinnedCount = 0,
     this.systemMessage,
     this.pinnedBy = '',
     this.pinnedByName = '',
@@ -686,6 +736,8 @@ class PinnedMessageState {
 
   final int conversationId;
   final ChatMessageReference? pinnedMessage;
+  final List<ChatMessageReference> pinnedMessages;
+  final int pinnedCount;
   final ChatMessage? systemMessage;
   final String pinnedBy;
   final String pinnedByName;
@@ -696,11 +748,16 @@ class PinnedMessageState {
   factory PinnedMessageState.fromJson(Map<String, dynamic> json) {
     final rawMessage = _value(json, 'pinnedMessage', 'pinned_message');
     final rawSystemMessage = _value(json, 'systemMessage', 'system_message');
+    final pinnedMessages = _listOfMaps(
+      _value(json, 'pinnedMessages', 'pinned_messages'),
+    ).map(ChatMessageReference.fromJson).toList();
     return PinnedMessageState(
       conversationId: _asInt(_value(json, 'conversationId', 'conversation_id')),
       pinnedMessage: rawMessage is Map
           ? ChatMessageReference.fromJson(Map<String, dynamic>.from(rawMessage))
           : null,
+      pinnedMessages: pinnedMessages,
+      pinnedCount: _asInt(_value(json, 'pinnedCount', 'pinned_count')),
       systemMessage: rawSystemMessage is Map
           ? ChatMessage.fromJson(Map<String, dynamic>.from(rawSystemMessage))
           : null,
@@ -836,6 +893,8 @@ class ChatConversation {
     this.members = const [],
     this.lastMessage,
     this.pinnedMessage,
+    this.pinnedMessages = const [],
+    this.pinnedCount = 0,
     this.lastReadMessageId = 0,
     this.lastReadAt,
     this.unreadCount = 0,
@@ -851,6 +910,8 @@ class ChatConversation {
   final List<ChatUser> members;
   final ChatMessage? lastMessage;
   final ChatMessageReference? pinnedMessage;
+  final List<ChatMessageReference> pinnedMessages;
+  final int pinnedCount;
   final int lastReadMessageId;
   final DateTime? lastReadAt;
   final int unreadCount;
@@ -859,6 +920,9 @@ class ChatConversation {
   factory ChatConversation.fromJson(Map<String, dynamic> json) {
     final lastMessageJson = _value(json, 'lastMessage', 'last_message');
     final pinnedMessageJson = _value(json, 'pinnedMessage', 'pinned_message');
+    final pinnedMessages = _listOfMaps(
+      _value(json, 'pinnedMessages', 'pinned_messages'),
+    ).map(ChatMessageReference.fromJson).toList();
     final settingsJson =
         _value(json, 'userSettings', 'settings', 'conversationSettings');
     return ChatConversation(
@@ -876,6 +940,8 @@ class ChatConversation {
           ? ChatMessageReference.fromJson(
               Map<String, dynamic>.from(pinnedMessageJson))
           : null,
+      pinnedMessages: pinnedMessages,
+      pinnedCount: _asInt(_value(json, 'pinnedCount', 'pinned_count')),
       lastReadMessageId:
           _asInt(_value(json, 'lastReadMessageId', 'last_read_message_id')),
       lastReadAt: _asDate(_value(json, 'lastReadAt', 'last_read_at')),
@@ -891,6 +957,8 @@ class ChatConversation {
     List<ChatUser>? members,
     ChatMessage? lastMessage,
     Object? pinnedMessage = _unset,
+    List<ChatMessageReference>? pinnedMessages,
+    int? pinnedCount,
     int? lastReadMessageId,
     DateTime? lastReadAt,
     int? unreadCount,
@@ -908,6 +976,8 @@ class ChatConversation {
       pinnedMessage: identical(pinnedMessage, _unset)
           ? this.pinnedMessage
           : pinnedMessage as ChatMessageReference?,
+      pinnedMessages: pinnedMessages ?? this.pinnedMessages,
+      pinnedCount: pinnedCount ?? this.pinnedCount,
       lastReadMessageId: lastReadMessageId ?? this.lastReadMessageId,
       lastReadAt: lastReadAt ?? this.lastReadAt,
       unreadCount: unreadCount ?? this.unreadCount,
@@ -955,6 +1025,7 @@ class RealtimeEvent {
     this.userid = '',
     this.fromUserid = '',
     this.callId = '',
+    this.mediaType = 'audio',
     this.sourceDeviceId = '',
     this.signal,
     this.isOnline = false,
@@ -971,6 +1042,7 @@ class RealtimeEvent {
   final String userid;
   final String fromUserid;
   final String callId;
+  final String mediaType;
   final String sourceDeviceId;
   final Map<String, dynamic>? signal;
   final bool isOnline;
@@ -1005,6 +1077,9 @@ class RealtimeEvent {
       fromUserid: _asString(_value(json, 'fromUserid', 'fromUserId') ??
           _value(payload, 'fromUserid', 'fromUserId')),
       callId: _asString(json['callId'] ?? payload['callId']),
+      mediaType: _asString(_value(json, 'mediaType', 'media_type') ??
+          _value(payload, 'mediaType', 'media_type') ??
+          'audio'),
       sourceDeviceId: _asString(
           _value(json, 'sourceDeviceId', 'source_device_id') ??
               _value(payload, 'sourceDeviceId', 'source_device_id')),

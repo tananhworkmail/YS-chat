@@ -57,6 +57,19 @@ void main() {
       expect(event.version, 1);
     });
 
+    test('parses video call signaling and call history kind', () {
+      final event = RealtimeEvent.fromJson({
+        'type': 'call.invite',
+        'payload': {'callId': 'video-1', 'mediaType': 'video'},
+      });
+      final log = ChatCallLog.tryParse(
+          '{"kind":"video","status":"completed","duration":12}');
+
+      expect(event.mediaType, 'video');
+      expect(log?.kind, 'video');
+      expect(log?.duration, 12);
+    });
+
     test('derives group delivery state from receipt summary', () {
       final message = ChatMessage.fromJson({
         'id': 20,
@@ -167,6 +180,23 @@ void main() {
           'type': 'text',
           'content': 'important',
         },
+        'pinnedMessages': [
+          {
+            'id': 101,
+            'senderUserid': 'u1',
+            'senderName': 'User One',
+            'type': 'text',
+            'content': 'important',
+          },
+          {
+            'id': 99,
+            'senderUserid': 'u2',
+            'senderName': 'User Two',
+            'type': 'text',
+            'content': 'older pin',
+          },
+        ],
+        'pinnedCount': 2,
         'systemMessage': {
           'id': 102,
           'conversationId': 11,
@@ -181,12 +211,50 @@ void main() {
       final conversation = ChatConversation.fromJson({
         'id': 11,
         'pinnedMessage': state.pinnedMessage?.toJson(),
+        'pinnedMessages':
+            state.pinnedMessages.map((message) => message.toJson()).toList(),
+        'pinnedCount': state.pinnedCount,
       });
 
       expect(state.pinnedMessage?.id, 101);
+      expect(state.pinnedMessages.map((message) => message.id), [101, 99]);
+      expect(state.pinnedCount, 2);
       expect(state.systemMessage?.type, 'system');
       expect(state.systemMessage?.content, contains('đã ghim'));
       expect(conversation.pinnedMessage?.id, 101);
+      expect(conversation.pinnedMessages, hasLength(2));
+      expect(conversation.pinnedCount, 2);
+    });
+
+    test('parses scheduled and fired reminders', () {
+      final scheduled = ChatReminder.fromJson({
+        'id': 7,
+        'conversationId': 11,
+        'creatorUserid': 'u1',
+        'creatorName': 'User One',
+        'title': 'Project review',
+        'remindAt': '2026-07-20T09:30:00Z',
+        'repeatType': 'weekly',
+        'status': 'scheduled',
+        'createdAt': '2026-07-20T08:00:00Z',
+      });
+      final fired = ChatReminder.fromJson({
+        'id': 7,
+        'conversation_id': 11,
+        'title': 'Project review',
+        'remind_at': '2026-07-20T09:30:00Z',
+        'repeat_type': 'daily',
+        'status': 'fired',
+        'fired_at': '2026-07-20T09:30:01Z',
+      });
+
+      expect(scheduled.conversationId, 11);
+      expect(scheduled.creatorUserid, 'u1');
+      expect(scheduled.repeatType, 'weekly');
+      expect(scheduled.remindAt.toUtc(), DateTime.utc(2026, 7, 20, 9, 30));
+      expect(fired.repeatType, 'daily');
+      expect(fired.status, 'fired');
+      expect(fired.firedAt?.toUtc(), DateTime.utc(2026, 7, 20, 9, 30, 1));
     });
 
     test('recalled messages never expose attachments to the UI', () {

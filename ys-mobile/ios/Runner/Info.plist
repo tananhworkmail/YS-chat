@@ -18,6 +18,8 @@
 	<string>YS Chat</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>YS Chat can record voice messages.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>YS Chat uses the camera for video calls.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>YS Chat can attach photos and update your avatar.</string>
 	<key>CFBundlePackageType</key>

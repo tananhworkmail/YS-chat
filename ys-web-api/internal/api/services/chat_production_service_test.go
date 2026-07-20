@@ -36,6 +36,8 @@ func setupProductionChatTestDB(t *testing.T) *gorm.DB {
 	statements := []string{
 		`CREATE TABLE users (userid TEXT PRIMARY KEY, fullname TEXT, avatar TEXT)`,
 		`CREATE TABLE chat_conversations (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, name TEXT, avatar TEXT, background TEXT, pinned_message_id INTEGER, message_pinned_by TEXT, message_pinned_at DATETIME, created_by TEXT, created_at DATETIME, updated_at DATETIME)`,
+		`CREATE TABLE chat_pinned_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL, message_id INTEGER NOT NULL, pinned_by TEXT NOT NULL, pinned_at DATETIME NOT NULL, UNIQUE(conversation_id, message_id))`,
+		`CREATE TABLE chat_reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL, creator_userid TEXT NOT NULL, title TEXT NOT NULL, remind_at DATETIME NOT NULL, repeat_type TEXT NOT NULL DEFAULT 'none', status TEXT NOT NULL DEFAULT 'scheduled', fired_at DATETIME, created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE chat_members (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL, userid TEXT NOT NULL, role TEXT, nickname TEXT, last_delivered_message_id INTEGER, last_read_message_id INTEGER, last_read_at DATETIME, unread_count INTEGER NOT NULL DEFAULT 0, mute_until DATETIME, pinned_at DATETIME, archived_at DATETIME, joined_at DATETIME, UNIQUE(conversation_id, userid))`,
 		`CREATE TABLE chat_contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_userid TEXT, contact_userid TEXT, nickname TEXT, created_at DATETIME, UNIQUE(owner_userid, contact_userid))`,
 		`CREATE TABLE chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL, sender_userid TEXT NOT NULL, message_type TEXT NOT NULL, content TEXT, reply_to_message_id INTEGER, forwarded_from_message_id INTEGER, client_message_id TEXT, server_sequence INTEGER, version INTEGER NOT NULL DEFAULT 1, edited_at DATETIME, deleted_at DATETIME, deleted_by TEXT, created_at DATETIME, UNIQUE(sender_userid, client_message_id), UNIQUE(conversation_id, server_sequence))`,
@@ -45,7 +47,7 @@ func setupProductionChatTestDB(t *testing.T) *gorm.DB {
 		`CREATE TABLE chat_message_user_deletions (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL, conversation_id INTEGER NOT NULL, userid TEXT NOT NULL, deleted_at DATETIME, UNIQUE(message_id, userid))`,
 		`CREATE TABLE chat_message_reactions (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL, conversation_id INTEGER NOT NULL, userid TEXT NOT NULL, emoji TEXT NOT NULL, created_at DATETIME, updated_at DATETIME, UNIQUE(userid, message_id, emoji))`,
 		`CREATE TABLE chat_message_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL, conversation_id INTEGER NOT NULL, actor_userid TEXT NOT NULL, action TEXT NOT NULL, previous_version INTEGER, new_version INTEGER, snapshot_json TEXT, created_at DATETIME)`,
-		`CREATE TABLE chat_calls (call_id TEXT PRIMARY KEY, conversation_id INTEGER NOT NULL, caller_userid TEXT NOT NULL, callee_userid TEXT NOT NULL, accepted_by_device_id TEXT, started_at DATETIME NOT NULL, answered_at DATETIME, ended_at DATETIME, status TEXT NOT NULL, duration_seconds INTEGER NOT NULL DEFAULT 0, end_reason TEXT, updated_at DATETIME)`,
+		`CREATE TABLE chat_calls (call_id TEXT PRIMARY KEY, conversation_id INTEGER NOT NULL, caller_userid TEXT NOT NULL, callee_userid TEXT NOT NULL, media_type TEXT NOT NULL DEFAULT 'audio', accepted_by_device_id TEXT, started_at DATETIME NOT NULL, answered_at DATETIME, ended_at DATETIME, status TEXT NOT NULL, duration_seconds INTEGER NOT NULL DEFAULT 0, end_reason TEXT, updated_at DATETIME)`,
 		`CREATE TABLE chat_polls (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER, conversation_id INTEGER, question TEXT, allow_custom_options INTEGER, allow_multiple INTEGER, show_voters INTEGER, is_closed INTEGER, closed_by TEXT, closed_at DATETIME, created_by TEXT, created_at DATETIME, updated_at DATETIME)`,
 		`CREATE TABLE chat_poll_options (id INTEGER PRIMARY KEY AUTOINCREMENT, poll_id INTEGER, option_text TEXT, created_by TEXT, is_custom INTEGER, created_at DATETIME)`,
 		`CREATE TABLE chat_poll_votes (id INTEGER PRIMARY KEY AUTOINCREMENT, poll_id INTEGER, option_id INTEGER, userid TEXT, created_at DATETIME)`,
@@ -129,6 +131,7 @@ func TestIdempotentSendDoesNotDuplicateOrDoubleUnread(t *testing.T) {
 func TestPinnedMessageIsSharedAndBroadcastsPinChanges(t *testing.T) {
 	db := setupProductionChatTestDB(t)
 	messageID := sendTestMessage(t, "alice", "shared pin")
+	secondMessageID := sendTestMessage(t, "alice", "newest shared pin")
 
 	hub, err := NewRealtimeHubWithBus(NewInMemoryRealtimeEventBus(), RealtimeHubOptions{})
 	if err != nil {
@@ -147,7 +150,7 @@ func TestPinnedMessageIsSharedAndBroadcastsPinChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pin message: %v", err)
 	}
-	if state.PinnedMessage == nil || state.PinnedMessage.ID != messageID || state.ActorUserid != "alice" {
+	if state.PinnedMessage == nil || state.PinnedMessage.ID != messageID || state.PinnedCount != 1 || len(state.PinnedMessages) != 1 || state.ActorUserid != "alice" {
 		t.Fatalf("unexpected pin state: %+v", state)
 	}
 
@@ -170,35 +173,193 @@ func TestPinnedMessageIsSharedAndBroadcastsPinChanges(t *testing.T) {
 		t.Fatalf("unexpected pin conversation notice: %+v", pinNoticeEvent)
 	}
 
-	state, err = ChatServiceInstance.SetPinnedMessage("bob", 1, 0)
+	state, err = ChatServiceInstance.SetPinnedMessage("alice", 1, secondMessageID)
+	if err != nil {
+		t.Fatalf("pin second message: %v", err)
+	}
+	if state.PinnedMessage == nil || state.PinnedMessage.ID != secondMessageID || state.PinnedCount != 2 || len(state.PinnedMessages) != 2 || state.PinnedMessages[0].ID != secondMessageID || state.PinnedMessages[1].ID != messageID {
+		t.Fatalf("unexpected multi-pin state: %+v", state)
+	}
+	secondPinEvent := <-bobClient.send
+	if secondPinEvent.Type != "message.pinned" || secondPinEvent.MessageID != secondMessageID {
+		t.Fatalf("unexpected second pin event: %+v", secondPinEvent)
+	}
+	secondPinNotice := <-bobClient.send
+	if secondPinNotice.Type != "chat.message.created" || secondPinNotice.Message == nil || secondPinNotice.Message.Type != "system" {
+		t.Fatalf("unexpected second pin notice: %+v", secondPinNotice)
+	}
+
+	state, err = ChatServiceInstance.RemovePinnedMessage("bob", 1, secondMessageID)
 	if err != nil {
 		t.Fatalf("unpin message: %v", err)
 	}
-	if state.PinnedMessage != nil || state.ActorUserid != "bob" {
+	if state.PinnedMessage == nil || state.PinnedMessage.ID != messageID || state.PinnedCount != 1 || len(state.PinnedMessages) != 1 || state.ActorUserid != "bob" {
 		t.Fatalf("unexpected unpin state: %+v", state)
 	}
 	conversations, err := ChatServiceInstance.ListConversations("alice")
 	if err != nil {
 		t.Fatalf("list conversations after unpin: %v", err)
 	}
-	if len(conversations) != 1 || conversations[0].PinnedMessage != nil {
-		t.Fatalf("shared pin remained after unpin: %+v", conversations)
+	if len(conversations) != 1 || conversations[0].PinnedMessage == nil || conversations[0].PinnedMessage.ID != messageID || conversations[0].PinnedCount != 1 {
+		t.Fatalf("older shared pin was not restored after unpin: %+v", conversations)
 	}
 	unpinEvent := <-bobClient.send
-	if unpinEvent.Type != "message.unpinned" || unpinEvent.MessageID != messageID || unpinEvent.Userid != "bob" {
+	if unpinEvent.Type != "message.unpinned" || unpinEvent.MessageID != secondMessageID || unpinEvent.Userid != "bob" {
 		t.Fatalf("unexpected unpin event: %+v", unpinEvent)
 	}
 	unpinNoticeEvent := <-bobClient.send
 	if unpinNoticeEvent.Type != "chat.message.created" || unpinNoticeEvent.Message == nil || unpinNoticeEvent.Message.Type != "system" || !strings.Contains(unpinNoticeEvent.Message.Content, "đã bỏ ghim tin nhắn") {
 		t.Fatalf("unexpected unpin conversation notice: %+v", unpinNoticeEvent)
 	}
+	state, err = ChatServiceInstance.SetPinnedMessage("bob", 1, 0)
+	if err != nil {
+		t.Fatalf("unpin last message: %v", err)
+	}
+	if state.PinnedMessage != nil || state.PinnedCount != 0 || len(state.PinnedMessages) != 0 {
+		t.Fatalf("unexpected empty pin state: %+v", state)
+	}
+	<-bobClient.send
+	<-bobClient.send
 
 	var auditCount int64
-	if err := db.Table("chat_message_audit").Where("message_id = ? AND action IN ?", messageID, []string{"pin", "unpin"}).Count(&auditCount).Error; err != nil {
+	if err := db.Table("chat_message_audit").Where("message_id IN ? AND action IN ?", []uint64{messageID, secondMessageID}, []string{"pin", "unpin"}).Count(&auditCount).Error; err != nil {
 		t.Fatal(err)
 	}
-	if auditCount != 2 {
-		t.Fatalf("pin audit rows=%d, want 2", auditCount)
+	if auditCount != 4 {
+		t.Fatalf("pin audit rows=%d, want 4", auditCount)
+	}
+}
+
+func TestReminderCanBeScheduledListedAndCanceled(t *testing.T) {
+	db := setupProductionChatTestDB(t)
+	remindAt := time.Now().UTC().Add(time.Minute).Truncate(time.Millisecond)
+
+	reminder, err := ReminderServiceInstance.Create("alice", 1, request.CreateReminderRequest{Title: "Project review", RemindAt: remindAt})
+	if err != nil {
+		t.Fatalf("create reminder: %v", err)
+	}
+	if reminder.ID == 0 || reminder.ConversationID != 1 || reminder.CreatorUserid != "alice" || reminder.Title != "Project review" || reminder.RepeatType != "none" || reminder.Status != "scheduled" {
+		t.Fatalf("unexpected reminder: %+v", reminder)
+	}
+
+	listed, err := ReminderServiceInstance.List("bob", 1)
+	if err != nil {
+		t.Fatalf("list reminders: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != reminder.ID || !listed[0].RemindAt.Equal(remindAt) {
+		t.Fatalf("unexpected reminder list: %+v", listed)
+	}
+	if err := ReminderServiceInstance.Cancel("bob", reminder.ID); err == nil || err.Error() != ErrChatNoPermission {
+		t.Fatalf("non-creator cancel error=%v, want %s", err, ErrChatNoPermission)
+	}
+	if err := ReminderServiceInstance.Cancel("alice", reminder.ID); err != nil {
+		t.Fatalf("cancel reminder: %v", err)
+	}
+	listed, err = ReminderServiceInstance.List("alice", 1)
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("scheduled reminders after cancel=%+v, err=%v", listed, err)
+	}
+
+	var status string
+	if err := db.Table("chat_reminders").Select("status").Where("id = ?", reminder.ID).Scan(&status).Error; err != nil {
+		t.Fatal(err)
+	}
+	if status != "canceled" {
+		t.Fatalf("reminder status=%q, want canceled", status)
+	}
+}
+
+func TestReminderFiresOnceAndBroadcastsDueEvent(t *testing.T) {
+	db := setupProductionChatTestDB(t)
+	hub, err := NewRealtimeHubWithBus(NewInMemoryRealtimeEventBus(), RealtimeHubOptions{})
+	if err != nil {
+		t.Fatalf("create realtime hub: %v", err)
+	}
+	previousHub := RealtimeHubInstance
+	RealtimeHubInstance = hub
+	t.Cleanup(func() {
+		RealtimeHubInstance = previousHub
+		_ = hub.bus.Close()
+	})
+	bobClient := &realtimeClient{userid: "bob", send: make(chan RealtimeEvent, 2), hub: hub}
+	hub.clients["bob"] = map[*realtimeClient]struct{}{bobClient: {}}
+
+	remindAt := time.Now().UTC().Add(time.Minute)
+	reminder, err := ReminderServiceInstance.Create("alice", 1, request.CreateReminderRequest{Title: "Stand-up", RemindAt: remindAt})
+	if err != nil {
+		t.Fatalf("create reminder: %v", err)
+	}
+	createdEvent := <-bobClient.send
+	if createdEvent.Type != "reminder.created" || createdEvent.ConversationID != 1 {
+		t.Fatalf("unexpected reminder created event: %+v", createdEvent)
+	}
+
+	ReminderServiceInstance.fireDue(db, remindAt.Add(time.Second))
+	dueEvent := <-bobClient.send
+	if dueEvent.Type != "reminder.due" || dueEvent.ConversationID != 1 {
+		t.Fatalf("unexpected reminder due event: %+v", dueEvent)
+	}
+	ReminderServiceInstance.fireDue(db, remindAt.Add(2*time.Second))
+	if len(bobClient.send) != 0 {
+		t.Fatalf("reminder fired more than once: %+v", <-bobClient.send)
+	}
+
+	var status string
+	if err := db.Table("chat_reminders").Select("status").Where("id = ?", reminder.ID).Scan(&status).Error; err != nil {
+		t.Fatal(err)
+	}
+	if status != "fired" {
+		t.Fatalf("reminder status=%q, want fired", status)
+	}
+}
+
+func TestRecurringReminderAdvancesAfterDueEvent(t *testing.T) {
+	db := setupProductionChatTestDB(t)
+	hub, err := NewRealtimeHubWithBus(NewInMemoryRealtimeEventBus(), RealtimeHubOptions{})
+	if err != nil {
+		t.Fatalf("create realtime hub: %v", err)
+	}
+	previousHub := RealtimeHubInstance
+	RealtimeHubInstance = hub
+	t.Cleanup(func() {
+		RealtimeHubInstance = previousHub
+		_ = hub.bus.Close()
+	})
+	bobClient := &realtimeClient{userid: "bob", send: make(chan RealtimeEvent, 3), hub: hub}
+	hub.clients["bob"] = map[*realtimeClient]struct{}{bobClient: {}}
+
+	remindAt := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	reminder, err := ReminderServiceInstance.Create("alice", 1, request.CreateReminderRequest{Title: "Daily check", RemindAt: remindAt, RepeatType: "daily"})
+	if err != nil {
+		t.Fatalf("create reminder: %v", err)
+	}
+	<-bobClient.send
+
+	ReminderServiceInstance.fireDue(db, remindAt.Add(time.Second))
+	dueEvent := <-bobClient.send
+	updatedEvent := <-bobClient.send
+	if dueEvent.Type != "reminder.due" || updatedEvent.Type != "reminder.updated" {
+		t.Fatalf("unexpected recurring events: due=%+v updated=%+v", dueEvent, updatedEvent)
+	}
+
+	var record chatReminderRecord
+	if err := db.Table("chat_reminders").Where("id = ?", reminder.ID).Take(&record).Error; err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "scheduled" || record.RepeatType != "daily" || !record.RemindAt.Equal(remindAt.AddDate(0, 0, 1)) || record.FiredAt == nil {
+		t.Fatalf("unexpected recurring reminder record: %+v", record)
+	}
+}
+
+func TestMonthlyReminderClampsToLastDayOfNextMonth(t *testing.T) {
+	remindAt := time.Date(2026, time.January, 31, 9, 30, 0, 0, time.UTC)
+	next, ok := nextReminderTime(remindAt, ReminderRepeatMonthly, remindAt.Add(time.Second))
+	if !ok {
+		t.Fatal("expected monthly reminder to advance")
+	}
+	expected := time.Date(2026, time.February, 28, 9, 30, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Fatalf("next monthly reminder=%s, want %s", next, expected)
 	}
 }
 

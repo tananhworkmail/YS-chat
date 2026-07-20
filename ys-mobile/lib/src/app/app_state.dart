@@ -48,6 +48,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   List<ChatConversation> conversations = [];
   List<ChatUser> contacts = [];
   List<ChatMessage> messages = [];
+  List<ChatReminder> reminders = [];
   Map<int, int> unreadMessageCounts = {};
   final Map<int, Map<String, DateTime>> _typingUsers = {};
   final Map<String, ChatMessage> _pendingMessagesByClientId = {};
@@ -65,9 +66,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   String callPeerName = '';
   bool callMuted = false;
   bool callSpeakerOn = false;
+  bool callIsVideo = false;
+  bool callCameraOff = false;
   int callDuration = 0;
   String callNotice = '';
   int callNoticeSequence = 0;
+  ChatReminder? reminderNotice;
+  int reminderNoticeSequence = 0;
+  Timer? _reminderNoticeTimer;
   String languageCode = 'vi';
   Timer? _reconnectTimer;
   Timer? _realtimeStableTimer;
@@ -106,8 +112,15 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   late final StreamSubscription<List<ConnectivityResult>>
       _connectivitySubscription;
   RTCPeerConnection? _peerConnection;
+  Future<RTCPeerConnection>? _peerConnectionFuture;
   MediaStream? _localCallStream;
+  Future<void>? _localCallMediaFuture;
+  MediaStream? _remoteCallStream;
+  bool _acceptingIncomingCall = false;
   final List<Map<String, dynamic>> _pendingIceCandidates = [];
+
+  MediaStream? get localCallStream => _localCallStream;
+  MediaStream? get remoteCallStream => _remoteCallStream;
 
   bool get isAuthenticated => tokenStore.token?.isNotEmpty == true;
   bool get isAppResumed => _appLifecycleState == AppLifecycleState.resumed;
@@ -123,6 +136,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
           _connectRealtime();
         }
       }
+      unawaited(_resumeNativeCallActions());
       unawaited(_reconcileCurrentCall());
       unawaited(_markSelectedConversationReadOnResume());
     } else {
@@ -357,6 +371,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     messageFocusConversationId = 0;
     loadingOlderMessages = false;
     final page = await apiClient.messages(conversation.id, limit: 50);
+    if (selectedConversation?.id != conversation.id) return;
     final serverClientMessageIds = page.messages
         .where((message) => message.senderUserid == tokenStore.userid)
         .map((message) => message.clientMessageId)
@@ -377,6 +392,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     messages = [...page.messages, ...pending];
     hasMoreMessages = page.hasMore;
     messages.sort(_sortMessages);
+    List<ChatReminder> loadedReminders;
+    try {
+      loadedReminders = await apiClient.reminders(conversation.id);
+    } catch (_) {
+      loadedReminders = [];
+    }
+    if (selectedConversation?.id != conversation.id) return;
+    reminders = loadedReminders;
     for (final message in page.messages) {
       _observeMessageCursor(message);
     }
@@ -466,6 +489,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     messageFocusId = 0;
     messageFocusConversationId = 0;
     messages = [];
+    reminders = [];
     hasMoreMessages = false;
     loadingOlderMessages = false;
     notifyListeners();
@@ -908,6 +932,19 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         ?.pinnedMessage;
   }
 
+  List<ChatMessageReference> pinnedMessagesFor(int conversationId) {
+    final conversation = selectedConversation?.id == conversationId
+        ? selectedConversation
+        : conversations.where((item) => item.id == conversationId).firstOrNull;
+    if (conversation == null) return const [];
+    if (conversation.pinnedMessages.isNotEmpty) {
+      return conversation.pinnedMessages;
+    }
+    return conversation.pinnedMessage == null
+        ? const []
+        : [conversation.pinnedMessage!];
+  }
+
   Future<void> pinMessage(ChatMessage message) async {
     if (message.conversationId <= 0 || message.id <= 0) return;
     final state =
@@ -915,10 +952,35 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _applyPinnedMessageState(state);
   }
 
-  Future<void> unpinMessage(int conversationId) async {
-    if (conversationId <= 0) return;
-    final state = await apiClient.setPinnedMessage(conversationId, 0);
+  Future<void> unpinMessage(int conversationId, int messageId) async {
+    if (conversationId <= 0 || messageId <= 0) return;
+    final state = await apiClient.setPinnedMessage(
+      conversationId,
+      messageId,
+      pinned: false,
+    );
     _applyPinnedMessageState(state);
+  }
+
+  Future<void> createReminder(String title, DateTime remindAt,
+      {String repeatType = 'none'}) async {
+    final conversation = selectedConversation;
+    if (conversation == null) return;
+    final reminder = await apiClient.createReminder(
+      conversation.id,
+      title,
+      remindAt,
+      repeatType: repeatType,
+    );
+    reminders = [...reminders.where((item) => item.id != reminder.id), reminder]
+      ..sort((a, b) => a.remindAt.compareTo(b.remindAt));
+    notifyListeners();
+  }
+
+  Future<void> cancelReminder(ChatReminder reminder) async {
+    await apiClient.cancelReminder(reminder.id);
+    reminders = reminders.where((item) => item.id != reminder.id).toList();
+    notifyListeners();
   }
 
   Future<bool> _persistRuntimeSnapshot() {
@@ -1389,6 +1451,37 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       _applyPinnedMessageState(state);
       return;
     }
+    if (type == 'reminder.created' ||
+        type == 'reminder.updated' ||
+        type == 'reminder.canceled' ||
+        type == 'reminder.due') {
+      if (type == 'reminder.canceled') {
+        final id = _eventInt(event, 'id');
+        reminders = reminders.where((item) => item.id != id).toList();
+      } else {
+        final reminder = ChatReminder.fromJson(event.payload);
+        reminders = reminders.where((item) => item.id != reminder.id).toList();
+        if ((type == 'reminder.created' || type == 'reminder.updated') &&
+            selectedConversation?.id == reminder.conversationId) {
+          reminders = [...reminders, reminder]
+            ..sort((a, b) => a.remindAt.compareTo(b.remindAt));
+        }
+        if (type == 'reminder.due') {
+          unawaited(pushService.showReminderAlert(reminder));
+          reminderNotice = reminder;
+          reminderNoticeSequence += 1;
+          final sequence = reminderNoticeSequence;
+          _reminderNoticeTimer?.cancel();
+          _reminderNoticeTimer = Timer(const Duration(seconds: 5), () {
+            if (reminderNoticeSequence != sequence) return;
+            reminderNotice = null;
+            notifyListeners();
+          });
+        }
+      }
+      notifyListeners();
+      return;
+    }
     if (type == 'conversation.settings.updated') {
       final raw = event.payload['settings'];
       if (raw is Map) {
@@ -1415,6 +1508,13 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       }).toList();
       notifyListeners();
     }
+  }
+
+  void dismissReminderNotice() {
+    reminderNotice = null;
+    _reminderNoticeTimer?.cancel();
+    _reminderNoticeTimer = null;
+    notifyListeners();
   }
 
   void _upsertMessage(ChatMessage message, {bool notify = true}) {
@@ -1972,12 +2072,19 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (state.conversationId <= 0) return;
     conversations = conversations
         .map((conversation) => conversation.id == state.conversationId
-            ? conversation.copyWith(pinnedMessage: state.pinnedMessage)
+            ? conversation.copyWith(
+                pinnedMessage: state.pinnedMessage,
+                pinnedMessages: state.pinnedMessages,
+                pinnedCount: state.pinnedCount,
+              )
             : conversation)
         .toList();
     if (selectedConversation?.id == state.conversationId) {
-      selectedConversation =
-          selectedConversation!.copyWith(pinnedMessage: state.pinnedMessage);
+      selectedConversation = selectedConversation!.copyWith(
+        pinnedMessage: state.pinnedMessage,
+        pinnedMessages: state.pinnedMessages,
+        pinnedCount: state.pinnedCount,
+      );
     }
     if (state.systemMessage != null) {
       _upsertMessage(state.systemMessage!, notify: false);
@@ -2069,7 +2176,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     return true;
   }
 
-  Future<void> startAudioCall() async {
+  Future<void> _startCall({required bool video}) async {
     final conversation = selectedConversation;
     if (conversation == null ||
         conversation.type != 'direct' ||
@@ -2079,6 +2186,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     callId = const Uuid().v4();
     callConversationId = conversation.id;
     callPeerName = conversation.titleFor(tokenStore.userid ?? '');
+    callIsVideo = video;
+    callCameraOff = false;
     if (!_transitionCallState('outgoing')) return;
     callStatus = 'Dang goi...';
     callMuted = false;
@@ -2098,13 +2207,28 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       }
       _startCallTimeout();
     } catch (_) {
-      _cleanupCall('Khong truy cap duoc micro');
+      _cleanupCall(video
+          ? 'Khong truy cap duoc camera hoac micro'
+          : 'Khong truy cap duoc micro');
     }
   }
 
+  Future<void> startAudioCall() => _startCall(video: false);
+
+  Future<void> startVideoCall() => _startCall(video: true);
+
   Future<void> acceptIncomingCall() async {
-    if (callState != 'incoming' || callId.isEmpty) return;
+    if (callState != 'incoming' || callId.isEmpty || _acceptingIncomingCall) {
+      return;
+    }
+    _acceptingIncomingCall = true;
+    final incomingCallId = callId;
+    var accepted = false;
     try {
+      // Prepare media before notifying the caller. Otherwise call.offer can
+      // race this method and initialize getUserMedia/PeerConnection twice.
+      await _prepareLocalCallMedia();
+      if (callState != 'incoming' || callId.isEmpty) return;
       if (!await _sendCallControlEvent(
         type: 'call.accept',
         conversationId: callConversationId,
@@ -2113,15 +2237,22 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         _cleanupCall('Cuoc goi da duoc nghe tren thiet bi khac');
         return;
       }
+      accepted = true;
       if (!_transitionCallState('connecting')) return;
       callStatus = 'Dang ket noi...';
       notifyListeners();
-      await _prepareLocalCallMedia();
       await _ensurePeerConnection();
       _startCallTimeout();
     } catch (_) {
-      _sendCallEvent('call.end');
-      _cleanupCall('Khong truy cap duoc micro');
+      if (callId != incomingCallId) return;
+      _sendCallEvent(accepted ? 'call.end' : 'call.reject');
+      _cleanupCall(callIsVideo
+          ? 'Khong truy cap duoc camera hoac micro'
+          : 'Khong truy cap duoc micro');
+    } finally {
+      if (callId == incomingCallId || callState == 'idle') {
+        _acceptingIncomingCall = false;
+      }
     }
   }
 
@@ -2149,6 +2280,24 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  void toggleCallCamera() {
+    if (!callIsVideo) return;
+    callCameraOff = !callCameraOff;
+    for (final track
+        in _localCallStream?.getVideoTracks() ?? <MediaStreamTrack>[]) {
+      track.enabled = !callCameraOff;
+    }
+    notifyListeners();
+  }
+
+  Future<void> switchCallCamera() async {
+    final track = _localCallStream?.getVideoTracks().firstOrNull;
+    if (!callIsVideo || track == null) return;
+    try {
+      await Helper.switchCamera(track);
+    } catch (_) {}
+  }
+
   Future<void> toggleCallSpeaker() async {
     final nextValue = !callSpeakerOn;
     try {
@@ -2174,6 +2323,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       _pendingNativeCallAction = action;
       return;
     }
+    if (action.type == NativeCallActionType.accept && !isAppResumed) {
+      // Android can terminate camera access initiated while the app is still
+      // backgrounded after accepting from the native incoming-call screen.
+      _pendingNativeCallAction = action;
+      return;
+    }
 
     if (action.type == NativeCallActionType.accept) {
       if (callState == 'idle') {
@@ -2186,8 +2341,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         callPeerName = action.callerName.trim().isNotEmpty
             ? action.callerName.trim()
             : conversation.titleFor(tokenStore.userid ?? '');
+        callIsVideo = action.mediaType == 'video';
+        callCameraOff = false;
         if (!_transitionCallState('incoming')) return;
-        callStatus = 'Cuoc goi den';
+        callStatus = callIsVideo ? 'Cuoc goi video den' : 'Cuoc goi den';
         callMuted = false;
         callSpeakerOn = false;
         _callStartedByMe = false;
@@ -2288,12 +2445,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       callId = event.callId;
       callConversationId = event.conversationId;
       callPeerName = conversation.titleFor(tokenStore.userid ?? '');
+      callIsVideo = event.mediaType == 'video';
+      callCameraOff = false;
       if (!_transitionCallState('incoming')) {
         callId = '';
         callConversationId = 0;
         return;
       }
-      callStatus = 'Cuoc goi den';
+      callStatus = callIsVideo ? 'Cuoc goi video den' : 'Cuoc goi den';
       callMuted = false;
       callSpeakerOn = false;
       _callStartedByMe = false;
@@ -2309,6 +2468,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         avatarUrl: caller == null || caller.avatar.isEmpty
             ? ''
             : apiClient.absoluteUrl(caller.avatar),
+        mediaType: callIsVideo ? 'video' : 'audio',
       ));
       notifyListeners();
       return;
@@ -2393,26 +2553,79 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _prepareLocalCallMedia() async {
     if (_localCallStream != null) return;
-    _localCallStream = await navigator.mediaDevices.getUserMedia({
+    final pending = _localCallMediaFuture;
+    if (pending != null) return pending;
+    final future = _createLocalCallMedia();
+    _localCallMediaFuture = future;
+    try {
+      await future;
+    } finally {
+      if (identical(_localCallMediaFuture, future)) {
+        _localCallMediaFuture = null;
+      }
+    }
+  }
+
+  Future<void> _createLocalCallMedia() async {
+    final requestedCallId = callId;
+    final stream = await navigator.mediaDevices.getUserMedia({
       'audio': {
         'echoCancellation': true,
         'noiseSuppression': true,
         'autoGainControl': true,
       },
-      'video': false,
+      'video': callIsVideo
+          ? {
+              'facingMode': 'user',
+              'width': {'ideal': 1280},
+              'height': {'ideal': 720},
+            }
+          : false,
     });
+    if (requestedCallId.isEmpty ||
+        callId != requestedCallId ||
+        callState == 'idle') {
+      for (final track in stream.getTracks()) {
+        track.stop();
+      }
+      await stream.dispose();
+      throw StateError('Call ended while media was being prepared');
+    }
+    _localCallStream = stream;
     callMuted = false;
-    callSpeakerOn = false;
+    callSpeakerOn = callIsVideo;
     try {
-      await Helper.setSpeakerphoneOn(false);
+      await Helper.setSpeakerphoneOn(callSpeakerOn);
     } catch (_) {}
+    notifyListeners();
   }
 
   Future<RTCPeerConnection> _ensurePeerConnection() async {
     if (_peerConnection != null) return _peerConnection!;
+    final pending = _peerConnectionFuture;
+    if (pending != null) return pending;
+    final future = _createCallPeerConnection();
+    _peerConnectionFuture = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_peerConnectionFuture, future)) {
+        _peerConnectionFuture = null;
+      }
+    }
+  }
+
+  Future<RTCPeerConnection> _createCallPeerConnection() async {
+    final requestedCallId = callId;
     final pc = await createPeerConnection({
       'iceServers': await apiClient.iceServers(),
     });
+    if (requestedCallId.isEmpty ||
+        callId != requestedCallId ||
+        callState == 'idle') {
+      await pc.close();
+      throw StateError('Call ended while peer connection was being prepared');
+    }
     _peerConnection = pc;
     for (final track in _localCallStream?.getTracks() ?? <MediaStreamTrack>[]) {
       await pc.addTrack(track, _localCallStream!);
@@ -2422,7 +2635,13 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         _sendCallEvent('call.ice', candidate.toMap());
       }
     };
-    pc.onTrack = (_) => _activateCall();
+    pc.onTrack = (event) {
+      if (event.streams.isNotEmpty) {
+        _remoteCallStream = event.streams.first;
+      }
+      _activateCall();
+      notifyListeners();
+    };
     pc.onConnectionState = (state) {
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
         _activateCall();
@@ -2445,7 +2664,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       await _prepareLocalCallMedia();
       final pc = await _ensurePeerConnection();
       final offer = await pc.createOffer(
-          {'offerToReceiveAudio': true, 'offerToReceiveVideo': false});
+          {'offerToReceiveAudio': true, 'offerToReceiveVideo': callIsVideo});
       await pc.setLocalDescription(offer);
       _sendCallEvent('call.offer', offer.toMap());
       _startCallTimeout();
@@ -2468,6 +2687,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         type: type,
         conversationId: conversationId,
         callId: callId,
+        mediaType: callIsVideo ? 'video' : 'audio',
         deviceId: deviceId,
         token: token,
       );
@@ -2500,6 +2720,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       'eventId': const Uuid().v4(),
       'conversationId': callConversationId,
       'callId': callId,
+      'mediaType': callIsVideo ? 'video' : 'audio',
       'sourceDeviceId': tokenStore.deviceId ?? '',
       if (signal != null) 'signal': signal,
     });
@@ -2565,6 +2786,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     final previousState = callState;
     final previousConversationId = callConversationId;
     final previousDuration = callDuration;
+    final previousWasVideo = callIsVideo;
+    final localStreamToDispose = _localCallStream;
+    final remoteStreamToDispose = _remoteCallStream;
     final shouldLogCall = _callStartedByMe && previousConversationId > 0;
     _callTimeoutTimer?.cancel();
     _callTimeoutTimer = null;
@@ -2572,11 +2796,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _callDurationTimer = null;
     _peerConnection?.close();
     _peerConnection = null;
-    for (final track in _localCallStream?.getTracks() ?? <MediaStreamTrack>[]) {
-      track.stop();
-    }
-    _localCallStream?.dispose();
+    _peerConnectionFuture = null;
     _localCallStream = null;
+    _localCallMediaFuture = null;
+    _remoteCallStream = null;
     _pendingIceCandidates.clear();
     _transitionCallState('idle');
     callStatus = message;
@@ -2585,10 +2808,13 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     callPeerName = '';
     callMuted = false;
     callSpeakerOn = false;
+    callIsVideo = false;
+    callCameraOff = false;
     callDuration = 0;
     _callStartedAt = null;
     _callStartedByMe = false;
     _callOfferStarted = false;
+    _acceptingIncomingCall = false;
     if (message.trim().isNotEmpty) {
       callNotice = message.trim();
       callNoticeSequence += 1;
@@ -2598,12 +2824,23 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     } catch (_) {}
     unawaited(pushService.endIncomingCall(previousCallId));
     notifyListeners();
+    for (final track
+        in localStreamToDispose?.getTracks() ?? <MediaStreamTrack>[]) {
+      track.stop();
+    }
+    if (localStreamToDispose != null) {
+      unawaited(localStreamToDispose.dispose());
+    }
+    if (remoteStreamToDispose != null) {
+      unawaited(remoteStreamToDispose.dispose());
+    }
     if (shouldLogCall) {
       unawaited(_logCallToConversation(
         previousConversationId,
         previousState,
         previousDuration,
         message,
+        previousWasVideo,
       ));
     }
   }
@@ -2613,8 +2850,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     String previousState,
     int duration,
     String message,
+    bool wasVideo,
   ) async {
-    final content = _callLogContent(previousState, duration, message);
+    final content = _callLogContent(previousState, duration, message, wasVideo);
     if (content.isEmpty || !isAuthenticated) return;
     try {
       final pending = _newPendingMessage(
@@ -2630,10 +2868,11 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  String _callLogContent(String previousState, int duration, String message) {
+  String _callLogContent(
+      String previousState, int duration, String message, bool wasVideo) {
     if (previousState == 'active' || duration > 0) {
       return jsonEncode({
-        'kind': 'audio',
+        'kind': wasVideo ? 'video' : 'audio',
         'status': 'completed',
         'duration': duration,
       });
@@ -2641,7 +2880,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     final normalized = message.toLowerCase();
     if (normalized.contains('het thoi gian')) {
       return jsonEncode({
-        'kind': 'audio',
+        'kind': wasVideo ? 'video' : 'audio',
         'status': 'missed',
         'duration': 0,
       });
@@ -2654,6 +2893,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _reconnectTimer?.cancel();
     _realtimeStableTimer?.cancel();
+    _reminderNoticeTimer?.cancel();
     unawaited(realtimeService.disconnect());
     _resetMessagingSessionState();
     _callTimeoutTimer?.cancel();

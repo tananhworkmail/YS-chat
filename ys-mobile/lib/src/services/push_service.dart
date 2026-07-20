@@ -40,6 +40,7 @@ class NativeCallAction {
     required this.conversationId,
     required this.callerName,
     required this.fromUserid,
+    this.mediaType = 'audio',
   });
 
   final NativeCallActionType type;
@@ -47,6 +48,7 @@ class NativeCallAction {
   final int conversationId;
   final String callerName;
   final String fromUserid;
+  final String mediaType;
 
   factory NativeCallAction.fromParams(
     NativeCallActionType type,
@@ -59,6 +61,7 @@ class NativeCallAction {
       conversationId: _asInt(extra['conversationId']),
       callerName: '${extra['callerName'] ?? params.nameCaller ?? ''}',
       fromUserid: '${extra['fromUserid'] ?? params.handle ?? ''}',
+      mediaType: '${extra['mediaType'] ?? 'audio'}',
     );
   }
 
@@ -255,6 +258,7 @@ class PushService {
     required String callerName,
     required String fromUserid,
     String avatarUrl = '',
+    String mediaType = 'audio',
   }) async {
     if (callId.isEmpty || conversationId <= 0) return;
     if (!_shownNativeCallIds.add(callId)) return;
@@ -265,6 +269,7 @@ class PushService {
         'callerName': callerName,
         'fromUserid': fromUserid,
         'avatarUrl': avatarUrl,
+        'mediaType': mediaType,
       });
     } catch (_) {
       _shownNativeCallIds.remove(callId);
@@ -322,6 +327,38 @@ class PushService {
         ),
       ),
       payload: '${message.conversationId}',
+    );
+  }
+
+  Future<void> showReminderAlert(ChatReminder reminder) async {
+    await _ensureLocalInitialized();
+    final notificationId = (reminder.id.hashCode ^ 0x526d696e) & 0x7fffffff;
+    await _notifications.show(
+      notificationId,
+      'Nhắc hẹn',
+      reminder.title,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'ys_reminders',
+          'YS Chat reminders',
+          channelDescription: 'Conversation reminder alerts',
+          importance: Importance.max,
+          priority: Priority.max,
+          category: AndroidNotificationCategory.alarm,
+          channelShowBadge: true,
+          color: AppColors.brand,
+          enableVibration: true,
+          playSound: true,
+          fullScreenIntent: true,
+          groupKey: 'ys_reminders',
+        ),
+        iOS: DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+        ),
+      ),
+      payload: '${reminder.conversationId}',
     );
   }
 
@@ -402,6 +439,7 @@ class PushService {
         callerName: '${data['callerName'] ?? data['title'] ?? 'YS Chat'}',
         fromUserid: '${data['fromUserid'] ?? ''}',
         avatarUrl: '${data['avatarUrl'] ?? ''}',
+        mediaType: '${data['mediaType'] ?? 'audio'}',
       );
       return;
     }
@@ -412,6 +450,38 @@ class PushService {
         callId: '${message.data['callId'] ?? ''}',
         conversationId: _asInt(message.data['conversationId']),
       ));
+      return;
+    }
+    if (type == 'reminder.due') {
+      await _ensureLocalInitialized();
+      final id = (_asInt(message.data['reminderId']) ^ 0x526d696e) & 0x7fffffff;
+      await _notifications.show(
+        id,
+        'Nhắc hẹn',
+        '${message.data['title'] ?? message.notification?.body ?? ''}',
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'ys_reminders',
+            'YS Chat reminders',
+            channelDescription: 'Conversation reminder alerts',
+            importance: Importance.max,
+            priority: Priority.max,
+            category: AndroidNotificationCategory.alarm,
+            channelShowBadge: true,
+            color: AppColors.brand,
+            enableVibration: true,
+            playSound: true,
+            fullScreenIntent: true,
+            groupKey: 'ys_reminders',
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        ),
+        payload: '${message.data['conversationId'] ?? ''}',
+      );
     }
   }
 
@@ -433,6 +503,16 @@ class PushService {
         description: 'Realtime chat notifications',
         importance: Importance.high,
         playSound: true,
+      ),
+    );
+    await androidNotifications?.createNotificationChannel(
+      const AndroidNotificationChannel(
+        'ys_reminders',
+        'YS Chat reminders',
+        description: 'Conversation reminder alerts',
+        importance: Importance.max,
+        playSound: true,
+        enableVibration: true,
       ),
     );
     await androidNotifications?.requestNotificationsPermission();
@@ -520,6 +600,8 @@ Future<void> _showNativeIncomingCall(Map<String, dynamic> data) async {
       '${data['callerName'] ?? data['title'] ?? 'YS Chat'}'.trim();
   final fromUserid = '${data['fromUserid'] ?? ''}'.trim();
   final avatarUrl = _resolveCallAvatar('${data['avatarUrl'] ?? ''}'.trim());
+  final mediaType =
+      '${data['mediaType'] ?? 'audio'}' == 'video' ? 'video' : 'audio';
   if (callId.isEmpty || conversationId <= 0) return;
 
   final params = CallKitParams(
@@ -528,15 +610,20 @@ Future<void> _showNativeIncomingCall(Map<String, dynamic> data) async {
     avatar: avatarUrl.isEmpty ? null : avatarUrl,
     appName: 'YS Chat',
     handle: fromUserid,
-    type: 0,
+    // flutter_callkit_incoming starts an Android camera/microphone foreground
+    // service immediately on native accept. That can throw SecurityException
+    // before Flutter has a foreground Activity in which to request permission.
+    // Preserve the real media type in extra and let the in-app WebRTC flow own
+    // camera/microphone startup after resume.
+    type: Platform.isAndroid ? 0 : (mediaType == 'video' ? 1 : 0),
     duration: 45000,
     missedCallNotification: const NotificationParams(
       showNotification: true,
       isShowCallback: false,
       subtitle: 'Cuộc gọi nhỡ',
     ),
-    callingNotification: const NotificationParams(
-      showNotification: true,
+    callingNotification: NotificationParams(
+      showNotification: !Platform.isAndroid,
       isShowCallback: true,
       subtitle: 'Đang gọi',
       callbackText: 'Kết thúc',
@@ -546,6 +633,7 @@ Future<void> _showNativeIncomingCall(Map<String, dynamic> data) async {
       'callId': callId,
       'callerName': callerName,
       'fromUserid': fromUserid,
+      'mediaType': mediaType,
     },
     android: const AndroidParams(
       isCustomNotification: true,
@@ -563,12 +651,12 @@ Future<void> _showNativeIncomingCall(Map<String, dynamic> data) async {
       textAccept: 'Nghe máy',
       textDecline: 'Từ chối',
     ),
-    ios: const IOSParams(
+    ios: IOSParams(
       handleType: 'generic',
-      supportsVideo: false,
+      supportsVideo: mediaType == 'video',
       maximumCallGroups: 1,
       maximumCallsPerCallGroup: 1,
-      audioSessionMode: 'voiceChat',
+      audioSessionMode: mediaType == 'video' ? 'videoChat' : 'voiceChat',
       audioSessionActive: true,
       supportsDTMF: false,
       supportsHolding: false,

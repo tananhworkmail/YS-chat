@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"web-api/internal/pkg/models/types"
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/messaging"
@@ -24,6 +25,45 @@ type PushService struct {
 }
 
 var PushServiceInstance = &PushService{}
+
+func (s *PushService) SendReminderNotification(db *gorm.DB, reminder *types.ChatReminder) {
+	if db == nil || reminder == nil {
+		return
+	}
+	client, ok := s.client()
+	if !ok {
+		return
+	}
+	tokens, err := s.deviceTokens(db, reminder.ConversationID, "", "", "", true)
+	if err != nil || len(tokens) == 0 {
+		return
+	}
+	var conversationName string
+	_ = db.Table("chat_conversations").Where("id = ?", reminder.ConversationID).Pluck("name", &conversationName).Error
+	title := "Nhắc hẹn"
+	if strings.TrimSpace(conversationName) != "" {
+		title += " · " + strings.TrimSpace(conversationName)
+	}
+	data := map[string]string{
+		"type": "reminder.due", "reminderId": strconv.FormatUint(reminder.ID, 10),
+		"conversationId": strconv.FormatUint(reminder.ConversationID, 10), "title": reminder.Title,
+		"remindAt": reminder.RemindAt.Format(time.RFC3339), "repeatType": reminder.RepeatType,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for start := 0; start < len(tokens); start += 500 {
+		end := start + 500
+		if end > len(tokens) {
+			end = len(tokens)
+		}
+		response, sendErr := client.SendEachForMulticast(ctx, &messaging.MulticastMessage{
+			Tokens: tokens[start:end], Notification: &messaging.Notification{Title: title, Body: reminder.Title}, Data: data,
+			Android: &messaging.AndroidConfig{Priority: "high", DirectBootOK: true, Notification: &messaging.AndroidNotification{Title: title, Body: reminder.Title, Icon: "ic_launcher", Color: "#0891B2", Sound: "default", ChannelID: "ys_reminders"}},
+			APNS:    &messaging.APNSConfig{Payload: &messaging.APNSPayload{Aps: &messaging.Aps{Sound: "default"}}},
+		})
+		s.logMulticastResult(db, "reminder.due", tokens[start:end], response, sendErr)
+	}
+}
 
 func (s *PushService) SendChatMessageNotification(db *gorm.DB, senderUserid string, conversationID uint64, messageID uint64, messageType string, content string) {
 	if db == nil {
@@ -89,7 +129,7 @@ func (s *PushService) SendChatMessageNotification(db *gorm.DB, senderUserid stri
 	}
 }
 
-func (s *PushService) SendCallInvitationNotification(db *gorm.DB, senderUserid string, conversationID uint64, callID string, sourceDeviceID string, sourceToken string) {
+func (s *PushService) SendCallInvitationNotification(db *gorm.DB, senderUserid string, conversationID uint64, callID string, sourceDeviceID string, mediaType string, sourceToken string) {
 	if db == nil {
 		return
 	}
@@ -106,12 +146,19 @@ func (s *PushService) SendCallInvitationNotification(db *gorm.DB, senderUserid s
 
 	title := s.notificationTitle(db, conversationID, senderUserid)
 	avatarURL := s.notificationAvatar(db, senderUserid)
+	if mediaType != "video" {
+		mediaType = "audio"
+	}
 	body := "Cuộc gọi đến"
+	if mediaType == "video" {
+		body = "Cuộc gọi video đến"
+	}
 	data := map[string]string{
 		"type":           "call.invite",
 		"avatarUrl":      avatarURL,
 		"conversationId": strconv.FormatUint(conversationID, 10),
 		"callId":         callID,
+		"mediaType":      mediaType,
 		"fromUserid":     senderUserid,
 		"callerName":     title,
 		"title":          title,

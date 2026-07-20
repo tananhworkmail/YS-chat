@@ -280,17 +280,47 @@ class ApiClient {
     );
   }
 
-  Future<PinnedMessageState> setPinnedMessage(
-      int conversationId, int messageId) async {
+  Future<PinnedMessageState> setPinnedMessage(int conversationId, int messageId,
+      {bool pinned = true}) async {
     final response = await _dio.put(
       '/chat/conversations/$conversationId/pinned-message',
-      data: {'messageId': messageId},
+      data: {'messageId': messageId, 'pinned': pinned},
     );
     final body = _body(response.data);
     final raw = body['pinState'] ?? body;
     return PinnedMessageState.fromJson(
       raw is Map ? Map<String, dynamic>.from(raw) : const {},
     );
+  }
+
+  Future<List<ChatReminder>> reminders(int conversationId) async {
+    final response =
+        await _dio.get('/chat/conversations/$conversationId/reminders');
+    final body = _body(response.data);
+    return _maps(body['reminders']).map(ChatReminder.fromJson).toList();
+  }
+
+  Future<ChatReminder> createReminder(
+    int conversationId,
+    String title,
+    DateTime remindAt, {
+    String repeatType = 'none',
+  }) async {
+    final response = await _dio.post(
+      '/chat/conversations/$conversationId/reminders',
+      data: {
+        'title': title.trim(),
+        'remindAt': remindAt.toUtc().toIso8601String(),
+        'repeatType': repeatType,
+      },
+    );
+    final body = _body(response.data);
+    return ChatReminder.fromJson(
+        Map<String, dynamic>.from(body['reminder'] as Map));
+  }
+
+  Future<void> cancelReminder(int reminderId) async {
+    await _dio.delete('/chat/reminders/$reminderId');
   }
 
   Future<ChatMessage> editMessage(
@@ -567,12 +597,14 @@ class ApiClient {
     required int conversationId,
     required String callId,
     required String deviceId,
+    String mediaType = 'audio',
     String token = '',
   }) async {
     await _dio.post('/chat/calls/events', data: {
       'type': type,
       'conversationId': conversationId,
       'callId': callId,
+      'mediaType': mediaType,
       'deviceId': deviceId,
       if (token.isNotEmpty) 'token': token,
     });

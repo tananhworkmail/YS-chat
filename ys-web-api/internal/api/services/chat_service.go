@@ -68,6 +68,27 @@ type chatConversationRecord struct {
 	UpdatedAt       time.Time  `gorm:"column:updated_at"`
 }
 
+type chatPinnedMessageRecord struct {
+	ID             uint64    `gorm:"column:id;primaryKey"`
+	ConversationID uint64    `gorm:"column:conversation_id"`
+	MessageID      uint64    `gorm:"column:message_id"`
+	PinnedBy       string    `gorm:"column:pinned_by"`
+	PinnedAt       time.Time `gorm:"column:pinned_at"`
+}
+
+type chatReminderRecord struct {
+	ID             uint64     `gorm:"column:id;primaryKey"`
+	ConversationID uint64     `gorm:"column:conversation_id"`
+	CreatorUserid  string     `gorm:"column:creator_userid"`
+	Title          string     `gorm:"column:title"`
+	RemindAt       time.Time  `gorm:"column:remind_at"`
+	RepeatType     string     `gorm:"column:repeat_type"`
+	Status         string     `gorm:"column:status"`
+	FiredAt        *time.Time `gorm:"column:fired_at"`
+	CreatedAt      time.Time  `gorm:"column:created_at"`
+	UpdatedAt      time.Time  `gorm:"column:updated_at"`
+}
+
 type chatMessageRecord struct {
 	ID                     uint64    `gorm:"column:id;primaryKey"`
 	ConversationID         uint64    `gorm:"column:conversation_id"`
@@ -1515,6 +1536,31 @@ func ensureChatSchema(db *gorm.DB) error {
 			INDEX idx_chat_members_userid (userid),
 			INDEX idx_chat_members_conversation (conversation_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS chat_pinned_messages (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			conversation_id BIGINT UNSIGNED NOT NULL,
+			message_id BIGINT UNSIGNED NOT NULL,
+			pinned_by VARCHAR(64) NOT NULL,
+			pinned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			UNIQUE KEY uk_chat_pinned_messages_conversation_message (conversation_id, message_id),
+			INDEX idx_chat_pinned_messages_conversation_time (conversation_id, pinned_at, id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS chat_reminders (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+			conversation_id BIGINT UNSIGNED NOT NULL,
+			creator_userid VARCHAR(64) NOT NULL,
+			title VARCHAR(240) NOT NULL,
+			remind_at DATETIME NOT NULL,
+			repeat_type VARCHAR(16) NOT NULL DEFAULT 'none',
+			status VARCHAR(20) NOT NULL DEFAULT 'scheduled',
+			fired_at DATETIME NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			PRIMARY KEY (id),
+			INDEX idx_chat_reminders_due (status, remind_at),
+			INDEX idx_chat_reminders_conversation (conversation_id, remind_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS chat_contacts (
 			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 			owner_userid VARCHAR(64) NOT NULL,
@@ -1703,6 +1749,11 @@ func ensureChatSchema(db *gorm.DB) error {
 			return err
 		}
 	}
+	if err := db.Exec(`INSERT IGNORE INTO chat_pinned_messages (conversation_id, message_id, pinned_by, pinned_at)
+		SELECT id, pinned_message_id, COALESCE(message_pinned_by, created_by), COALESCE(message_pinned_at, updated_at)
+		FROM chat_conversations WHERE pinned_message_id IS NOT NULL`).Error; err != nil {
+		return err
+	}
 
 	if err := ensureColumn(db, "chat_members", "nickname", "VARCHAR(80) NULL AFTER role"); err != nil {
 		return err
@@ -1766,6 +1817,9 @@ func ensureChatSchema(db *gorm.DB) error {
 		return err
 	}
 	if err := ensureColumn(db, "chat_device_tokens", "device_id", "VARCHAR(128) NOT NULL DEFAULT '' AFTER token"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "chat_reminders", "repeat_type", "VARCHAR(16) NOT NULL DEFAULT 'none' AFTER remind_at"); err != nil {
 		return err
 	}
 	if err := ensureColumn(db, "chat_polls", "is_closed", "TINYINT(1) NOT NULL DEFAULT 0 AFTER show_voters"); err != nil {
@@ -2204,6 +2258,13 @@ func (s *ChatService) loadConversations(db *gorm.DB, currentUserid string, conve
 		if row.PinnedMessageID != nil && *row.PinnedMessageID > 0 {
 			conversation.PinnedMessage = pinnedReferences[*row.PinnedMessageID]
 		}
+		pinState, pinErr := s.loadPinnedMessageState(db, currentUserid, row.ID)
+		if pinErr != nil {
+			return nil, errors.New(ErrSystem)
+		}
+		conversation.PinnedMessage = pinState.PinnedMessage
+		conversation.PinnedMessages = pinState.PinnedMessages
+		conversation.PinnedCount = pinState.PinnedCount
 
 		conversations = append(conversations, conversation)
 	}

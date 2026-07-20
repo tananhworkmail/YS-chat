@@ -50,6 +50,7 @@ func Run(configPath string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	services.CallServiceInstance.StartReaper(ctx, config.WebRTC)
+	services.ReminderServiceInstance.StartScheduler(ctx)
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)

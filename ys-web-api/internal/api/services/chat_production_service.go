@@ -1167,6 +1167,13 @@ func (s *ChatService) SetTyping(currentUserid string, conversationID uint64, isT
 }
 
 func (s *ChatService) SetPinnedMessage(currentUserid string, conversationID, messageID uint64) (*types.ChatPinnedMessageState, error) {
+	if messageID == 0 {
+		return s.updatePinnedMessageList(currentUserid, conversationID, 0, false)
+	}
+	return s.updatePinnedMessageList(currentUserid, conversationID, messageID, true)
+
+	// Legacy single-pin implementation is intentionally retained below as
+	// unreachable migration context for older deployments.
 	db, err := s.productionDB()
 	if err != nil {
 		return nil, errors.New(ErrSystem)
@@ -1346,6 +1353,200 @@ func (s *ChatService) SetPinnedMessage(currentUserid string, conversationID, mes
 	}
 	if state.SystemMessage != nil {
 		s.broadcastMessageCreated(db, conversationID, state.SystemMessage)
+	}
+	return state, nil
+}
+
+func (s *ChatService) RemovePinnedMessage(currentUserid string, conversationID, messageID uint64) (*types.ChatPinnedMessageState, error) {
+	return s.updatePinnedMessageList(currentUserid, conversationID, messageID, false)
+}
+
+func (s *ChatService) updatePinnedMessageList(currentUserid string, conversationID, messageID uint64, pinned bool) (*types.ChatPinnedMessageState, error) {
+	db, err := s.productionDB()
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+	now := time.Now().UTC()
+	changed := false
+	var affectedMessageID uint64
+	var systemMessageID uint64
+
+	err = db.Transaction(func(tx *gorm.DB) error {
+		if err := lockChatConversationRows(tx, conversationID); err != nil {
+			return err
+		}
+		isMember, err := s.isConversationMember(tx, conversationID, currentUserid)
+		if err != nil {
+			return err
+		}
+		if !isMember {
+			return errors.New(ErrChatNoPermission)
+		}
+
+		if pinned {
+			accessible, err := s.messageInConversation(tx, currentUserid, conversationID, messageID)
+			if err != nil {
+				return err
+			}
+			if !accessible {
+				return errors.New(ErrChatMessageNotFound)
+			}
+			var count int64
+			if err := tx.Table("chat_pinned_messages").Where("conversation_id = ? AND message_id = ?", conversationID, messageID).Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 0 {
+				record := chatPinnedMessageRecord{ConversationID: conversationID, MessageID: messageID, PinnedBy: currentUserid, PinnedAt: now}
+				if err := tx.Table("chat_pinned_messages").Create(&record).Error; err != nil {
+					return err
+				}
+				changed = true
+			}
+			affectedMessageID = messageID
+		} else {
+			if messageID == 0 {
+				var latest chatPinnedMessageRecord
+				if err := tx.Table("chat_pinned_messages").Where("conversation_id = ?", conversationID).Order("pinned_at DESC, id DESC").Take(&latest).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						return nil
+					}
+					return err
+				}
+				messageID = latest.MessageID
+			}
+			result := tx.Table("chat_pinned_messages").Where("conversation_id = ? AND message_id = ?", conversationID, messageID).Delete(&chatPinnedMessageRecord{})
+			if result.Error != nil {
+				return result.Error
+			}
+			changed = result.RowsAffected > 0
+			affectedMessageID = messageID
+		}
+
+		if !changed {
+			return nil
+		}
+		updates := map[string]interface{}{
+			"pinned_message_id": nil,
+			"message_pinned_by": nil,
+			"message_pinned_at": nil,
+			"updated_at":        now,
+		}
+		var latest chatPinnedMessageRecord
+		if err := tx.Table("chat_pinned_messages").Where("conversation_id = ?", conversationID).Order("pinned_at DESC, id DESC").Take(&latest).Error; err == nil {
+			updates["pinned_message_id"] = latest.MessageID
+			updates["message_pinned_by"] = latest.PinnedBy
+			updates["message_pinned_at"] = latest.PinnedAt
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err := tx.Table("chat_conversations").Where("id = ?", conversationID).Updates(updates).Error; err != nil {
+			return err
+		}
+
+		action := "pin"
+		if !pinned {
+			action = "unpin"
+		}
+		snapshot, _ := json.Marshal(map[string]interface{}{"messageId": affectedMessageID, "pinned": pinned})
+		if err := tx.Table("chat_message_audit").Create(&productionAuditRecord{
+			MessageID: affectedMessageID, ConversationID: conversationID, ActorUserid: currentUserid,
+			Action: action, PreviousVersion: 1, NewVersion: 1, SnapshotJSON: string(snapshot), CreatedAt: now,
+		}).Error; err != nil {
+			return err
+		}
+		actorName, err := s.conversationUserDisplayName(tx, conversationID, currentUserid)
+		if err != nil {
+			return err
+		}
+		content := actorName + " đã ghim một tin nhắn"
+		if !pinned {
+			content = actorName + " đã bỏ ghim tin nhắn"
+		}
+		systemMessageID, err = s.createSystemMessage(tx, conversationID, currentUserid, content, now)
+		return err
+	})
+	if err != nil {
+		return nil, normalizeProductionError(err)
+	}
+
+	state, err := s.loadPinnedMessageState(db, currentUserid, conversationID)
+	if err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+	state.ActorUserid = currentUserid
+	state.ActorName, _ = s.userDisplayName(db, currentUserid)
+	if state.ActorName == "" {
+		state.ActorName = currentUserid
+	}
+	if systemMessageID > 0 {
+		state.SystemMessage, err = s.loadMessageByID(db, currentUserid, systemMessageID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if changed {
+		recipients, _ := s.conversationMemberUserids(db, conversationID)
+		eventType := "message.pinned"
+		if !pinned {
+			eventType = "message.unpinned"
+		}
+		for _, recipient := range recipients {
+			recipientState, loadErr := s.loadPinnedMessageState(db, recipient, conversationID)
+			if loadErr != nil {
+				continue
+			}
+			recipientState.ActorUserid = state.ActorUserid
+			recipientState.ActorName = state.ActorName
+			RealtimeHubInstance.BroadcastToUsers([]string{recipient}, RealtimeEvent{
+				Type: eventType, ConversationID: conversationID, MessageID: affectedMessageID,
+				Userid: currentUserid, Payload: recipientState,
+			})
+		}
+	}
+	if state.SystemMessage != nil {
+		s.broadcastMessageCreated(db, conversationID, state.SystemMessage)
+	}
+	return state, nil
+}
+
+func (s *ChatService) loadPinnedMessageState(db *gorm.DB, currentUserid string, conversationID uint64) (*types.ChatPinnedMessageState, error) {
+	var pins []chatPinnedMessageRecord
+	if err := db.Table("chat_pinned_messages").Where("conversation_id = ?", conversationID).Order("pinned_at DESC, id DESC").Find(&pins).Error; err != nil {
+		return nil, err
+	}
+	state := &types.ChatPinnedMessageState{
+		ConversationID: conversationID,
+		PinnedMessages: []*types.ChatMessageReference{},
+		PinnedCount:    len(pins),
+	}
+	ids := make([]uint64, 0, len(pins))
+	for _, pin := range pins {
+		ids = append(ids, pin.MessageID)
+	}
+	references, err := s.loadMessageReferences(db, currentUserid, ids)
+	if err != nil {
+		return nil, err
+	}
+	var latestVisiblePin *chatPinnedMessageRecord
+	for _, pin := range pins {
+		if reference := references[pin.MessageID]; reference != nil {
+			state.PinnedMessages = append(state.PinnedMessages, reference)
+			if latestVisiblePin == nil {
+				pinCopy := pin
+				latestVisiblePin = &pinCopy
+			}
+		}
+	}
+	state.PinnedCount = len(state.PinnedMessages)
+	if len(state.PinnedMessages) > 0 && latestVisiblePin != nil {
+		state.PinnedMessage = state.PinnedMessages[0]
+		state.PinnedBy = latestVisiblePin.PinnedBy
+		state.PinnedAt = &latestVisiblePin.PinnedAt
+		state.PinnedByName, _ = s.userDisplayName(db, latestVisiblePin.PinnedBy)
+		if state.PinnedByName == "" {
+			state.PinnedByName = latestVisiblePin.PinnedBy
+		}
 	}
 	return state, nil
 }

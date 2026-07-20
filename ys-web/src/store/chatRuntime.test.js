@@ -56,6 +56,12 @@ test("normalizes versioned payload and legacy realtime frames", () => {
 
   const legacy = normalizeRealtimeEvent({ type: "chat.message.created", message });
   assert.equal(legacy.message, message);
+
+  const videoInvite = normalizeRealtimeEvent({
+    type: "call.invite",
+    payload: { callId: "video-1", mediaType: "video" },
+  });
+  assert.equal(videoInvite.mediaType, "video");
 });
 
 test("accepts camelCase and snake_case client message IDs", () => {

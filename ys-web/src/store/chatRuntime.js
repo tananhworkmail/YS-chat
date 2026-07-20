@@ -47,6 +47,7 @@ export const normalizeRealtimeEvent = (rawEvent = {}) => {
     isOnline: value("isOnline", "is_online"),
     fromUserid: value("fromUserid", "from_userid") || "",
     callId: value("callId", "call_id") || "",
+    mediaType: value("mediaType", "media_type") || "audio",
     sourceDeviceId: value("sourceDeviceId", "source_device_id") || "",
     signal: value("signal", "signal") || null,
   };

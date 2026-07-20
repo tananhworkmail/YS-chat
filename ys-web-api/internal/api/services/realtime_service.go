@@ -29,6 +29,7 @@ type RealtimeEvent struct {
 	Userid          string                  `json:"userid,omitempty"`
 	FromUserid      string                  `json:"fromUserid,omitempty"`
 	CallID          string                  `json:"callId,omitempty"`
+	MediaType       string                  `json:"mediaType,omitempty"`
 	SourceDeviceID  string                  `json:"sourceDeviceId,omitempty"`
 	SourceToken     string                  `json:"-"`
 	Signal          json.RawMessage         `json:"signal,omitempty"`
@@ -488,7 +489,7 @@ func fmtUint(value uint64) string {
 	return strconv.FormatUint(value, 10)
 }
 
-func (h *RealtimeHub) RelayCallControlEvent(userid string, eventType string, conversationID uint64, callID string, sourceDeviceID string, sourceToken string) error {
+func (h *RealtimeHub) RelayCallControlEvent(userid string, eventType string, conversationID uint64, callID string, sourceDeviceID string, mediaType string, sourceToken string) error {
 	switch strings.TrimSpace(eventType) {
 	case "call.invite", "call.accept", "call.reject", "call.busy", "call.cancel", "call.end":
 	default:
@@ -499,6 +500,7 @@ func (h *RealtimeHub) RelayCallControlEvent(userid string, eventType string, con
 		ConversationID: conversationID,
 		CallID:         callID,
 		SourceDeviceID: strings.TrimSpace(sourceDeviceID),
+		MediaType:      strings.TrimSpace(mediaType),
 		SourceToken:    strings.TrimSpace(sourceToken),
 	})
 }
@@ -532,6 +534,7 @@ func (h *RealtimeHub) relayCallEvent(userid string, event RealtimeEvent) error {
 		"userid":         userid,
 		"callId":         event.CallID,
 		"sourceDeviceId": event.SourceDeviceID,
+		"mediaType":      transition.Call.MediaType,
 		"status":         transition.Call.Status,
 	}
 	if len(event.Signal) > 0 {
@@ -547,6 +550,7 @@ func (h *RealtimeHub) relayCallEvent(userid string, event RealtimeEvent) error {
 				event.ConversationID,
 				event.CallID,
 				event.SourceDeviceID,
+				transition.Call.MediaType,
 				event.SourceToken,
 			)
 		} else {

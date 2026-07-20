@@ -23,6 +23,7 @@ type CallRecord struct {
 	ConversationID     uint64     `json:"conversationId" gorm:"column:conversation_id"`
 	CallerUserid       string     `json:"caller" gorm:"column:caller_userid"`
 	CalleeUserid       string     `json:"callee" gorm:"column:callee_userid"`
+	MediaType          string     `json:"mediaType" gorm:"column:media_type"`
 	AcceptedByDeviceID string     `json:"acceptedByDeviceId,omitempty" gorm:"column:accepted_by_device_id"`
 	StartedAt          time.Time  `json:"startedAt" gorm:"column:started_at"`
 	AnsweredAt         *time.Time `json:"answeredAt,omitempty" gorm:"column:answered_at"`
@@ -50,6 +51,13 @@ func (s *CallService) ProcessEvent(userid string, event RealtimeEvent) (*CallTra
 	event.Type = strings.TrimSpace(event.Type)
 	event.CallID = strings.TrimSpace(event.CallID)
 	event.SourceDeviceID = strings.TrimSpace(event.SourceDeviceID)
+	event.MediaType = strings.ToLower(strings.TrimSpace(event.MediaType))
+	if event.MediaType == "" {
+		event.MediaType = "audio"
+	}
+	if event.MediaType != "audio" && event.MediaType != "video" {
+		return nil, errors.New(ErrInvalidInput)
+	}
 	if userid == "" || event.CallID == "" || len(event.CallID) > 128 || event.ConversationID == 0 {
 		return nil, errors.New(ErrInvalidInput)
 	}
@@ -160,6 +168,7 @@ func (s *CallService) createCall(db *gorm.DB, userid string, event RealtimeEvent
 	call := CallRecord{
 		CallID: event.CallID, ConversationID: event.ConversationID,
 		CallerUserid: userid, CalleeUserid: recipients[0],
+		MediaType: event.MediaType,
 		StartedAt: now, Status: "ringing", UpdatedAt: now,
 	}
 	result := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&call)

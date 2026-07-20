@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:intl/intl.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
@@ -39,6 +40,7 @@ class _ChatScreenState extends State<ChatScreen> {
   ChatMessage? _replyingTo;
   AppState? _observedAppState;
   int _lastCallNoticeSequence = 0;
+  int _lastReminderNoticeSequence = 0;
 
   @override
   void didChangeDependencies() {
@@ -53,6 +55,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _handleCallNotice() {
     final state = _observedAppState;
+    if (state != null &&
+        state.reminderNoticeSequence > _lastReminderNoticeSequence) {
+      _lastReminderNoticeSequence = state.reminderNoticeSequence;
+    }
     if (state == null ||
         state.callNoticeSequence <= _lastCallNoticeSequence ||
         state.callNotice.trim().isEmpty) {
@@ -448,7 +454,10 @@ class _ChatScreenState extends State<ChatScreen> {
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      builder: (_) => _InfoPanel(onDownload: _downloadAttachment),
+      builder: (_) => _InfoPanel(
+        onDownload: _downloadAttachment,
+        onEditNickname: _editActiveConversationNickname,
+      ),
     );
   }
 
@@ -501,7 +510,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 onDownload: _downloadAttachment,
                 onInfo: _showInfoPanel,
                 onAddContact: _addActiveConversationContact,
-                onEditNickname: _editActiveConversationNickname,
                 onCreatePoll: _openPollSheet,
                 onSend: _sendText,
                 onPickFiles: () => _pickFiles(FileType.any),
@@ -542,6 +550,7 @@ class _ChatScreenState extends State<ChatScreen> {
             },
           ),
           const _CallPanel(),
+          const _ReminderNoticePanel(),
         ],
       ),
     );
@@ -709,12 +718,175 @@ class _RailButton extends StatelessWidget {
   }
 }
 
-class _CallPanel extends StatelessWidget {
-  const _CallPanel();
+class _ReminderNoticePanel extends StatelessWidget {
+  const _ReminderNoticePanel();
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    final reminder = state.reminderNotice;
+    if (reminder == null) {
+      return const SizedBox.shrink();
+    }
+    return Positioned.fill(
+      child: Material(
+        color: const Color(0xff111827).withValues(alpha: 0.96),
+        child: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.symmetric(horizontal: 24),
+                    padding: const EdgeInsets.fromLTRB(24, 34, 24, 0),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 86,
+                          height: 86,
+                          decoration: const BoxDecoration(
+                            color: AppColors.brand,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            Icons.alarm,
+                            color: Colors.white,
+                            size: 34,
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        Text(
+                          context.l10n.t('reminderDue'),
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          reminder.title,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 24,
+                            fontWeight: FontWeight.w900,
+                            height: 1.22,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          DateFormat('dd/MM/yyyy HH:mm')
+                              .format(reminder.remindAt.toLocal()),
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 30),
+                        _CallActionButton(
+                          icon: Icons.call_end,
+                          label: context.l10n.t('dismissReminder'),
+                          color: AppColors.danger,
+                          onTap: () =>
+                              context.read<AppState>().dismissReminderNotice(),
+                        ),
+                        const SizedBox(height: 28),
+                        TweenAnimationBuilder<double>(
+                          key: ValueKey(state.reminderNoticeSequence),
+                          tween: Tween(begin: 1, end: 0),
+                          duration: const Duration(seconds: 5),
+                          builder: (_, value, __) => LinearProgressIndicator(
+                            value: value,
+                            minHeight: 4,
+                            backgroundColor: Colors.white12,
+                            valueColor:
+                                const AlwaysStoppedAnimation(Colors.white),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CallPanel extends StatefulWidget {
+  const _CallPanel();
+
+  @override
+  State<_CallPanel> createState() => _CallPanelState();
+}
+
+class _CallPanelState extends State<_CallPanel> {
+  final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
+  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
+  bool _renderersReady = false;
+  MediaStream? _boundLocalStream;
+  MediaStream? _boundRemoteStream;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_initializeRenderers());
+  }
+
+  Future<void> _initializeRenderers() async {
+    try {
+      await Future.wait(
+          [_localRenderer.initialize(), _remoteRenderer.initialize()]);
+      if (mounted) setState(() => _renderersReady = true);
+    } catch (_) {
+      // Keep audio calls usable on devices that cannot create video textures.
+    }
+  }
+
+  @override
+  void dispose() {
+    _localRenderer.srcObject = null;
+    _remoteRenderer.srcObject = null;
+    _localRenderer.dispose();
+    _remoteRenderer.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    if (_renderersReady) {
+      final localStream = state.callState != 'idle' && state.callIsVideo
+          ? state.localCallStream
+          : null;
+      final remoteStream = state.callState != 'idle' && state.callIsVideo
+          ? state.remoteCallStream
+          : null;
+      if (!identical(_boundLocalStream, localStream)) {
+        _boundLocalStream = localStream;
+        _localRenderer.srcObject = localStream;
+      }
+      if (!identical(_boundRemoteStream, remoteStream)) {
+        _boundRemoteStream = remoteStream;
+        _remoteRenderer.srcObject = remoteStream;
+      }
+    }
     if (state.callState == 'idle') return const SizedBox.shrink();
 
     final currentUserid = state.tokenStore.userid ?? '';
@@ -758,23 +930,75 @@ class _CallPanel extends StatelessWidget {
                     ),
                   ],
                 ),
-                const Spacer(flex: 2),
-                Container(
-                  padding: const EdgeInsets.all(5),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: Colors.white.withValues(alpha: 0.24),
-                      width: 2,
+                if (state.callIsVideo)
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 18),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(14),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            ColoredBox(
+                              color: Colors.black,
+                              child: _renderersReady &&
+                                      state.remoteCallStream != null
+                                  ? RTCVideoView(
+                                      _remoteRenderer,
+                                      objectFit: RTCVideoViewObjectFit
+                                          .RTCVideoViewObjectFitCover,
+                                    )
+                                  : Center(
+                                      child: YSAvatar(
+                                        label: state.callPeerName,
+                                        imageUrl: imageUrl,
+                                        online: member?.isOnline,
+                                        size: 96,
+                                      ),
+                                    ),
+                            ),
+                            if (_renderersReady &&
+                                state.localCallStream != null &&
+                                !state.callCameraOff)
+                              Positioned(
+                                right: 12,
+                                bottom: 12,
+                                width: 110,
+                                height: 150,
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(10),
+                                  child: RTCVideoView(
+                                    _localRenderer,
+                                    mirror: true,
+                                    objectFit: RTCVideoViewObjectFit
+                                        .RTCVideoViewObjectFitCover,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                else ...[
+                  const Spacer(flex: 2),
+                  Container(
+                    padding: const EdgeInsets.all(5),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.24),
+                        width: 2,
+                      ),
+                    ),
+                    child: YSAvatar(
+                      label: state.callPeerName,
+                      imageUrl: imageUrl,
+                      online: member?.isOnline,
+                      size: 96,
                     ),
                   ),
-                  child: YSAvatar(
-                    label: state.callPeerName,
-                    imageUrl: imageUrl,
-                    online: member?.isOnline,
-                    size: 96,
-                  ),
-                ),
+                ],
                 const SizedBox(height: 26),
                 Text(
                   state.callPeerName,
@@ -799,7 +1023,10 @@ class _CallPanel extends StatelessWidget {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                const Spacer(flex: 3),
+                if (state.callIsVideo)
+                  const SizedBox(height: 16)
+                else
+                  const Spacer(flex: 3),
                 if (state.callState == 'incoming')
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
@@ -821,8 +1048,10 @@ class _CallPanel extends StatelessWidget {
                     ],
                   )
                 else
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 14,
+                    runSpacing: 12,
                     children: [
                       _CallActionButton(
                         icon: state.callMuted ? Icons.mic_off : Icons.mic,
@@ -833,6 +1062,28 @@ class _CallPanel extends StatelessWidget {
                             : Colors.white.withValues(alpha: 0.16),
                         onTap: () => context.read<AppState>().toggleCallMute(),
                       ),
+                      if (state.callIsVideo)
+                        _CallActionButton(
+                          icon: state.callCameraOff
+                              ? Icons.videocam_off
+                              : Icons.videocam,
+                          label: context.l10n.t(state.callCameraOff
+                              ? 'cameraOnCall'
+                              : 'cameraOffCall'),
+                          color: state.callCameraOff
+                              ? const Color(0xfff59e0b)
+                              : Colors.white.withValues(alpha: 0.16),
+                          onTap: () =>
+                              context.read<AppState>().toggleCallCamera(),
+                        ),
+                      if (state.callIsVideo)
+                        _CallActionButton(
+                          icon: Icons.cameraswitch_outlined,
+                          label: context.l10n.t('switchCamera'),
+                          color: Colors.white.withValues(alpha: 0.16),
+                          onTap: () =>
+                              context.read<AppState>().switchCallCamera(),
+                        ),
                       _CallActionButton(
                         icon: state.callSpeakerOn
                             ? Icons.volume_up
@@ -2267,7 +2518,6 @@ class _Thread extends StatefulWidget {
     required this.onDownload,
     required this.onInfo,
     required this.onAddContact,
-    required this.onEditNickname,
     required this.onCreatePoll,
     required this.onSend,
     required this.onPickFiles,
@@ -2291,7 +2541,6 @@ class _Thread extends StatefulWidget {
   final ValueChanged<ChatAttachment> onDownload;
   final VoidCallback onInfo;
   final Future<void> Function() onAddContact;
-  final Future<void> Function() onEditNickname;
   final VoidCallback onCreatePoll;
   final VoidCallback onSend;
   final VoidCallback onPickFiles;
@@ -2306,6 +2555,9 @@ class _ThreadState extends State<_Thread> {
   late final ScrollController _scrollController;
   final Map<int, GlobalKey> _messageKeys = {};
   bool _showLatestButton = false;
+  int _newMessagesBelowCount = 0;
+  int _trackedConversationId = 0;
+  int _latestKnownMessageId = 0;
   int _lastMessageFocusSequence = 0;
 
   @override
@@ -2324,9 +2576,16 @@ class _ThreadState extends State<_Thread> {
   void _onScroll() {
     if (!_scrollController.hasClients) return;
     final position = _scrollController.position;
-    final shouldShowLatest = position.pixels > 220;
-    if (shouldShowLatest != _showLatestButton && mounted) {
-      setState(() => _showLatestButton = shouldShowLatest);
+    final reachedLatest = position.pixels <= 40;
+    final shouldShowLatest =
+        position.pixels > 220 || (!reachedLatest && _newMessagesBelowCount > 0);
+    if ((shouldShowLatest != _showLatestButton ||
+            (reachedLatest && _newMessagesBelowCount > 0)) &&
+        mounted) {
+      setState(() {
+        _showLatestButton = shouldShowLatest;
+        if (reachedLatest) _newMessagesBelowCount = 0;
+      });
     }
     if (position.pixels >= position.maxScrollExtent - 180) {
       context.read<AppState>().loadOlderMessages();
@@ -2335,10 +2594,73 @@ class _ThreadState extends State<_Thread> {
 
   Future<void> _scrollToLatest() async {
     if (!_scrollController.hasClients) return;
+    if (_showLatestButton || _newMessagesBelowCount > 0) {
+      setState(() {
+        _showLatestButton = false;
+        _newMessagesBelowCount = 0;
+      });
+    }
     await _scrollController.animateTo(
       0,
       duration: const Duration(milliseconds: 240),
       curve: Curves.easeOutCubic,
+    );
+  }
+
+  void _trackNewMessages(AppState state, ChatConversation conversation) {
+    final latestMessageId = state.messages.fold<int>(
+      0,
+      (latest, message) => message.id > latest ? message.id : latest,
+    );
+    if (_trackedConversationId != conversation.id) {
+      _trackedConversationId = conversation.id;
+      _latestKnownMessageId = latestMessageId;
+      _newMessagesBelowCount = 0;
+      _showLatestButton = false;
+      return;
+    }
+
+    final previousLatestId = _latestKnownMessageId;
+    if (latestMessageId <= previousLatestId) return;
+    _latestKnownMessageId = latestMessageId;
+    if (previousLatestId <= 0 ||
+        !_scrollController.hasClients ||
+        _scrollController.position.pixels <= 40) {
+      return;
+    }
+    final inboundCount = state.messages
+        .where((message) =>
+            message.id > previousLatestId &&
+            message.senderUserid != widget.currentUserid)
+        .length;
+    if (inboundCount <= 0) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _trackedConversationId != conversation.id) return;
+      setState(() {
+        _newMessagesBelowCount += inboundCount;
+        _showLatestButton = true;
+      });
+    });
+  }
+
+  Future<void> _showConversationSearch() async {
+    final conversation = context.read<AppState>().selectedConversation;
+    if (conversation == null) return;
+    final message = await showModalBottomSheet<ChatMessage>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _ConversationMessageSearchSheet(
+        conversationId: conversation.id,
+      ),
+    );
+    if (message != null && mounted) await _scrollToMessage(message.id);
+  }
+
+  Future<void> _showReminders() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => const _ReminderSheet(),
     );
   }
 
@@ -2380,10 +2702,12 @@ class _ThreadState extends State<_Thread> {
     final state = context.read<AppState>();
     final conversation = state.selectedConversation;
     if (conversation == null || message.id <= 0) return;
-    final pinned = state.pinnedMessageFor(conversation.id);
+    final pinned = state
+        .pinnedMessagesFor(conversation.id)
+        .any((item) => item.id == message.id);
     try {
-      if (pinned?.id == message.id) {
-        await _unpinMessage(conversation.id);
+      if (pinned) {
+        await _unpinMessage(conversation.id, message.id);
         return;
       }
       await state.pinMessage(message);
@@ -2392,12 +2716,49 @@ class _ThreadState extends State<_Thread> {
     }
   }
 
-  Future<void> _unpinMessage(int conversationId) async {
+  Future<void> _unpinMessage(int conversationId, int messageId) async {
     try {
-      await context.read<AppState>().unpinMessage(conversationId);
+      await context.read<AppState>().unpinMessage(conversationId, messageId);
     } catch (_) {
       _showPinError();
     }
+  }
+
+  Future<void> _showPinnedMessages(
+      int conversationId, List<ChatMessageReference> pinnedMessages) async {
+    final selected = await showModalBottomSheet<ChatMessageReference>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: ListView.separated(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+          shrinkWrap: true,
+          itemCount: pinnedMessages.length,
+          separatorBuilder: (_, __) => const Divider(height: 1),
+          itemBuilder: (context, index) {
+            final reference = pinnedMessages[index];
+            return ListTile(
+              leading: const Icon(Icons.push_pin, color: AppColors.brand),
+              title: Text(
+                messageReferencePreview(context, reference),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(reference.senderName),
+              onTap: () => Navigator.of(sheetContext).pop(reference),
+              trailing: IconButton(
+                tooltip: context.l10n.t('unpinMessage'),
+                onPressed: () async {
+                  Navigator.of(sheetContext).pop();
+                  await _unpinMessage(conversationId, reference.id);
+                },
+                icon: const Icon(Icons.close),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+    if (selected != null && mounted) await _scrollToMessage(selected.id);
   }
 
   void _showPinError() {
@@ -2429,6 +2790,7 @@ class _ThreadState extends State<_Thread> {
                 ?.displayName ??
             userid)
         .toList(growable: false);
+    _trackNewMessages(state, conversation);
 
     if (state.messageFocusConversationId == conversation.id &&
         state.messageFocusSequence > _lastMessageFocusSequence &&
@@ -2445,7 +2807,8 @@ class _ThreadState extends State<_Thread> {
       });
     }
 
-    final pinnedMessage = state.pinnedMessageFor(conversation.id);
+    final pinnedMessages = state.pinnedMessagesFor(conversation.id);
+    final pinnedMessage = pinnedMessages.firstOrNull;
 
     return Container(
       color: AppColors.canvas,
@@ -2460,14 +2823,18 @@ class _ThreadState extends State<_Thread> {
               wide: widget.wide,
               onBack: widget.onBack,
               onInfo: widget.onInfo,
+              onSearch: _showConversationSearch,
+              onReminder: _showReminders,
               onAddContact: widget.onAddContact,
-              onEditNickname: widget.onEditNickname,
             ),
             if (pinnedMessage != null)
               _PinnedMessageBar(
                 reference: pinnedMessage,
+                count: pinnedMessages.length,
                 onOpen: () => _scrollToMessage(pinnedMessage.id),
-                onUnpin: () => _unpinMessage(conversation.id),
+                onShowAll: () =>
+                    _showPinnedMessages(conversation.id, pinnedMessages),
+                onUnpin: () => _unpinMessage(conversation.id, pinnedMessage.id),
               ),
             Expanded(
               child: Stack(
@@ -2507,7 +2874,8 @@ class _ThreadState extends State<_Thread> {
                           mine: message.senderUserid == widget.currentUserid,
                           isGroup: conversation.type == 'group',
                           resolveUrl: state.apiClient.absoluteUrl,
-                          pinned: pinnedMessage?.id == message.id,
+                          pinned: pinnedMessages
+                              .any((item) => item.id == message.id),
                           onTogglePin: _togglePinnedMessage,
                           onReply: widget.onReply,
                           onForward: widget.onForward,
@@ -2548,19 +2916,25 @@ class _ThreadState extends State<_Thread> {
                     Positioned(
                       right: 14,
                       bottom: 14,
-                      child: Material(
-                        color: AppColors.brand,
-                        elevation: 4,
-                        shape: const CircleBorder(),
-                        child: InkWell(
-                          onTap: _scrollToLatest,
-                          customBorder: const CircleBorder(),
-                          child: const Padding(
-                            padding: EdgeInsets.all(8),
-                            child: Icon(
-                              Icons.keyboard_double_arrow_down,
-                              color: Colors.white,
-                              size: 20,
+                      child: Badge(
+                        isLabelVisible: _newMessagesBelowCount > 0,
+                        label: Text(_newMessagesBelowCount > 99
+                            ? '99+'
+                            : '$_newMessagesBelowCount'),
+                        child: Material(
+                          color: AppColors.brand,
+                          elevation: 4,
+                          shape: const CircleBorder(),
+                          child: InkWell(
+                            onTap: _scrollToLatest,
+                            customBorder: const CircleBorder(),
+                            child: const Padding(
+                              padding: EdgeInsets.all(8),
+                              child: Icon(
+                                Icons.keyboard_double_arrow_down,
+                                color: Colors.white,
+                                size: 20,
+                              ),
                             ),
                           ),
                         ),
@@ -2592,12 +2966,16 @@ class _ThreadState extends State<_Thread> {
 class _PinnedMessageBar extends StatelessWidget {
   const _PinnedMessageBar({
     required this.reference,
+    required this.count,
     required this.onOpen,
+    required this.onShowAll,
     required this.onUnpin,
   });
 
   final ChatMessageReference reference;
+  final int count;
   final VoidCallback onOpen;
+  final VoidCallback onShowAll;
   final VoidCallback onUnpin;
 
   @override
@@ -2617,7 +2995,7 @@ class _PinnedMessageBar extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      context.l10n.t('pinnedMessage'),
+                      '${context.l10n.t('pinnedMessage')} · $count',
                       style: const TextStyle(
                         color: AppColors.brandDark,
                         fontSize: 12,
@@ -2637,6 +3015,13 @@ class _PinnedMessageBar extends StatelessWidget {
                     ),
                   ],
                 ),
+              ),
+              IconButton(
+                onPressed: onShowAll,
+                tooltip: context.l10n.t('pinnedMessage'),
+                icon: const Icon(Icons.keyboard_arrow_down, size: 20),
+                color: AppColors.brandDark,
+                visualDensity: VisualDensity.compact,
               ),
               IconButton(
                 onPressed: onUnpin,
@@ -2707,8 +3092,9 @@ class _ChatHeader extends StatelessWidget {
     required this.wide,
     required this.onBack,
     required this.onInfo,
+    required this.onSearch,
+    required this.onReminder,
     required this.onAddContact,
-    required this.onEditNickname,
   });
 
   final ChatConversation conversation;
@@ -2716,8 +3102,9 @@ class _ChatHeader extends StatelessWidget {
   final bool wide;
   final VoidCallback onBack;
   final VoidCallback onInfo;
+  final VoidCallback onSearch;
+  final VoidCallback onReminder;
   final Future<void> Function() onAddContact;
-  final Future<void> Function() onEditNickname;
 
   @override
   Widget build(BuildContext context) {
@@ -2728,13 +3115,10 @@ class _ChatHeader extends StatelessWidget {
         member != null &&
         !state.contacts.any((contact) =>
             contact.userid.toLowerCase() == member.userid.toLowerCase());
-    final canEditNickname = conversation.type == 'direct' &&
-        member != null &&
-        state.contacts.any((contact) =>
-            contact.userid.toLowerCase() == member.userid.toLowerCase());
     final imageUrl = conversation.avatar.isNotEmpty
         ? state.apiClient.absoluteUrl(conversation.avatar)
         : member?.avatarUrl(state);
+    const actionConstraints = BoxConstraints.tightFor(width: 40, height: 40);
 
     return Container(
       constraints: const BoxConstraints(minHeight: 50),
@@ -2747,6 +3131,8 @@ class _ChatHeader extends StatelessWidget {
         children: [
           if (!wide)
             IconButton(
+              constraints: actionConstraints,
+              padding: EdgeInsets.zero,
               tooltip: context.l10n.t('back'),
               onPressed: onBack,
               icon: const Icon(Icons.arrow_back),
@@ -2793,28 +3179,422 @@ class _ChatHeader extends StatelessWidget {
           ),
           if (conversation.type == 'direct')
             IconButton(
+              constraints: actionConstraints,
+              padding: EdgeInsets.zero,
+              tooltip: context.l10n.t('videoCall'),
+              onPressed: () => context.read<AppState>().startVideoCall(),
+              icon: const Icon(Icons.videocam_outlined),
+            ),
+          if (conversation.type == 'direct')
+            IconButton(
+              constraints: actionConstraints,
+              padding: EdgeInsets.zero,
               tooltip: context.l10n.t('call'),
               onPressed: () => context.read<AppState>().startAudioCall(),
               icon: const Icon(Icons.phone_outlined),
             ),
           if (canAddContact)
             IconButton(
+              constraints: actionConstraints,
+              padding: EdgeInsets.zero,
               tooltip: context.l10n.t('addContact'),
               onPressed: () => onAddContact(),
               icon: const Icon(Icons.person_add_alt_1_outlined),
             ),
-          if (canEditNickname)
-            IconButton(
-              tooltip: context.l10n.t('setNickname'),
-              onPressed: () => onEditNickname(),
-              icon: const Icon(Icons.edit_outlined),
-            ),
           IconButton(
+            constraints: actionConstraints,
+            padding: EdgeInsets.zero,
+            tooltip: context.l10n.t('searchMessages'),
+            onPressed: onSearch,
+            icon: const Icon(Icons.search),
+          ),
+          IconButton(
+            constraints: actionConstraints,
+            padding: EdgeInsets.zero,
+            tooltip: context.l10n.t('reminders'),
+            onPressed: onReminder,
+            icon: const Icon(Icons.event_outlined),
+          ),
+          IconButton(
+            constraints: actionConstraints,
+            padding: EdgeInsets.zero,
             tooltip: context.l10n.t('info'),
             onPressed: onInfo,
             icon: const Icon(Icons.info_outline),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ConversationMessageSearchSheet extends StatefulWidget {
+  const _ConversationMessageSearchSheet({required this.conversationId});
+
+  final int conversationId;
+
+  @override
+  State<_ConversationMessageSearchSheet> createState() =>
+      _ConversationMessageSearchSheetState();
+}
+
+class _ReminderSheet extends StatefulWidget {
+  const _ReminderSheet();
+
+  @override
+  State<_ReminderSheet> createState() => _ReminderSheetState();
+}
+
+class _ReminderSheetState extends State<_ReminderSheet> {
+  final TextEditingController _titleController = TextEditingController();
+  late DateTime _remindAt = DateTime.now().add(const Duration(hours: 1));
+  String _repeatType = 'none';
+  bool _submitting = false;
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickDateTime() async {
+    final date = await showDatePicker(
+      context: context,
+      initialDate: _remindAt,
+      firstDate: DateTime.now(),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+    if (date == null || !mounted) return;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(_remindAt),
+    );
+    if (time == null || !mounted) return;
+    setState(() {
+      _remindAt =
+          DateTime(date.year, date.month, date.day, time.hour, time.minute);
+    });
+  }
+
+  Future<void> _create() async {
+    final title = _titleController.text.trim();
+    if (title.isEmpty || !_remindAt.isAfter(DateTime.now())) return;
+    setState(() => _submitting = true);
+    try {
+      await context
+          .read<AppState>()
+          .createReminder(title, _remindAt, repeatType: _repeatType);
+      _titleController.clear();
+      if (mounted) {
+        setState(() {
+          _remindAt = DateTime.now().add(const Duration(hours: 1));
+          _repeatType = 'none';
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(context.l10n.t('reminderFailed'))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _submitting = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          16,
+          12,
+          16,
+          MediaQuery.viewInsetsOf(context).bottom + 16,
+        ),
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.78,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                context.l10n.t('reminders'),
+                style:
+                    const TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _titleController,
+                maxLength: 240,
+                decoration: InputDecoration(
+                  labelText: context.l10n.t('reminderTitle'),
+                  prefixIcon: const Icon(Icons.notifications_active_outlined),
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: _pickDateTime,
+                icon: const Icon(Icons.schedule),
+                label: Text(DateFormat('dd/MM/yyyy HH:mm').format(_remindAt)),
+              ),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                initialValue: _repeatType,
+                decoration: InputDecoration(
+                  labelText: context.l10n.t('reminderRepeat'),
+                  prefixIcon: const Icon(Icons.repeat),
+                ),
+                items: [
+                  DropdownMenuItem(
+                    value: 'none',
+                    child: Text(context.l10n.t('reminderRepeatNone')),
+                  ),
+                  DropdownMenuItem(
+                    value: 'daily',
+                    child: Text(context.l10n.t('reminderRepeatDaily')),
+                  ),
+                  DropdownMenuItem(
+                    value: 'weekly',
+                    child: Text(context.l10n.t('reminderRepeatWeekly')),
+                  ),
+                  DropdownMenuItem(
+                    value: 'monthly',
+                    child: Text(context.l10n.t('reminderRepeatMonthly')),
+                  ),
+                ],
+                onChanged: (value) =>
+                    setState(() => _repeatType = value ?? 'none'),
+              ),
+              const SizedBox(height: 8),
+              FilledButton.icon(
+                onPressed: _submitting ? null : _create,
+                icon: _submitting
+                    ? const SizedBox.square(
+                        dimension: 17,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Icon(Icons.add_alert_outlined),
+                label: Text(context.l10n.t('scheduleReminder')),
+              ),
+              const SizedBox(height: 14),
+              Expanded(
+                child: state.reminders.isEmpty
+                    ? EmptyState(
+                        icon: Icons.event_available_outlined,
+                        text: context.l10n.t('noReminders'),
+                      )
+                    : ListView.separated(
+                        itemCount: state.reminders.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final reminder = state.reminders[index];
+                          final canCancel =
+                              reminder.creatorUserid == state.tokenStore.userid;
+                          return ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading:
+                                const Icon(Icons.alarm, color: AppColors.brand),
+                            title: Text(reminder.title),
+                            subtitle: Text(
+                              '${DateFormat('dd/MM/yyyy HH:mm').format(reminder.remindAt.toLocal())} · ${_reminderRepeatLabel(context, reminder.repeatType)} · ${reminder.creatorName}',
+                            ),
+                            trailing: canCancel
+                                ? IconButton(
+                                    tooltip: context.l10n.t('cancelReminder'),
+                                    onPressed: () =>
+                                        state.cancelReminder(reminder),
+                                    icon: const Icon(Icons.delete_outline),
+                                  )
+                                : null,
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _reminderRepeatLabel(BuildContext context, String repeatType) {
+  switch (repeatType) {
+    case 'daily':
+      return context.l10n.t('reminderRepeatDaily');
+    case 'weekly':
+      return context.l10n.t('reminderRepeatWeekly');
+    case 'monthly':
+      return context.l10n.t('reminderRepeatMonthly');
+    default:
+      return context.l10n.t('reminderRepeatNone');
+  }
+}
+
+class _ConversationMessageSearchSheetState
+    extends State<_ConversationMessageSearchSheet> {
+  final TextEditingController _controller = TextEditingController();
+  Timer? _debounce;
+  List<ChatMessage> _results = const [];
+  bool _loading = false;
+  int _requestSequence = 0;
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _scheduleSearch(String value) {
+    _debounce?.cancel();
+    final keyword = value.trim();
+    if (keyword.isEmpty) {
+      _requestSequence += 1;
+      setState(() {
+        _loading = false;
+        _results = const [];
+      });
+      return;
+    }
+    _debounce = Timer(
+      const Duration(milliseconds: 280),
+      () => _search(keyword),
+    );
+  }
+
+  Future<void> _search(String keyword) async {
+    final requestSequence = ++_requestSequence;
+    setState(() => _loading = true);
+    try {
+      final page =
+          await context.read<AppState>().apiClient.searchConversationMessages(
+                widget.conversationId,
+                keyword: keyword,
+                limit: 100,
+              );
+      if (!mounted || requestSequence != _requestSequence) return;
+      setState(() => _results = page.messages);
+    } catch (_) {
+      if (!mounted || requestSequence != _requestSequence) return;
+      setState(() => _results = const []);
+    } finally {
+      if (mounted && requestSequence == _requestSequence) {
+        setState(() => _loading = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final hasKeyword = _controller.text.trim().isNotEmpty;
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 12,
+          bottom: MediaQuery.viewInsetsOf(context).bottom + 12,
+        ),
+        child: SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.72,
+          child: Column(
+            children: [
+              Container(
+                width: 38,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(
+                  color: AppColors.line,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+              TextField(
+                controller: _controller,
+                autofocus: true,
+                textInputAction: TextInputAction.search,
+                onChanged: _scheduleSearch,
+                onSubmitted: (value) {
+                  _debounce?.cancel();
+                  final keyword = value.trim();
+                  if (keyword.isNotEmpty) _search(keyword);
+                },
+                decoration: InputDecoration(
+                  hintText: context.l10n.t('searchMessages'),
+                  prefixIcon: const Icon(Icons.search),
+                  suffixIcon: _controller.text.isEmpty
+                      ? null
+                      : IconButton(
+                          tooltip: context.l10n.t('clear'),
+                          onPressed: () {
+                            _controller.clear();
+                            _scheduleSearch('');
+                          },
+                          icon: const Icon(Icons.close),
+                        ),
+                ),
+              ),
+              if (_loading) const LinearProgressIndicator(minHeight: 2),
+              const SizedBox(height: 8),
+              Expanded(
+                child: !hasKeyword
+                    ? EmptyState(
+                        icon: Icons.search,
+                        text: context.l10n.t('searchMessages'),
+                      )
+                    : (!_loading && _results.isEmpty)
+                        ? EmptyState(
+                            icon: Icons.search_off,
+                            text: context.l10n.t('noSearchResults'),
+                          )
+                        : ListView.separated(
+                            itemCount: _results.length,
+                            separatorBuilder: (_, __) =>
+                                const Divider(height: 1),
+                            itemBuilder: (context, index) {
+                              final message = _results[index];
+                              final createdAt = message.createdAt?.toLocal();
+                              return ListTile(
+                                contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 4, vertical: 3),
+                                leading: const CircleAvatar(
+                                  backgroundColor: AppColors.brandSoft,
+                                  child: Icon(Icons.chat_bubble_outline,
+                                      color: AppColors.brand, size: 19),
+                                ),
+                                title: Text(
+                                  message.senderName.trim().isEmpty
+                                      ? message.senderUserid
+                                      : message.senderName,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w900),
+                                ),
+                                subtitle: Text(
+                                  _messagePreview(context, message),
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                trailing: createdAt == null
+                                    ? null
+                                    : Text(
+                                        DateFormat('dd/MM\nHH:mm')
+                                            .format(createdAt),
+                                        textAlign: TextAlign.right,
+                                        style: const TextStyle(
+                                            color: AppColors.muted,
+                                            fontSize: 11),
+                                      ),
+                                onTap: () => Navigator.of(context).pop(message),
+                              );
+                            },
+                          ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -4338,9 +5118,13 @@ class _PollCreateSheetState extends State<_PollCreateSheet> {
 enum _InfoPanelMode { overview, members, media, polls, files }
 
 class _InfoPanel extends StatefulWidget {
-  const _InfoPanel({required this.onDownload});
+  const _InfoPanel({
+    required this.onDownload,
+    required this.onEditNickname,
+  });
 
   final ValueChanged<ChatAttachment> onDownload;
+  final Future<void> Function() onEditNickname;
 
   @override
   State<_InfoPanel> createState() => _InfoPanelState();
@@ -4403,6 +5187,14 @@ class _InfoPanelState extends State<_InfoPanel> {
         .reversed
         .toList();
     final isGroup = conversation.type == 'group';
+    final directPeer = isGroup
+        ? null
+        : conversation.members
+            .where((member) => member.userid != currentUserid)
+            .firstOrNull;
+    final canEditNickname = directPeer != null &&
+        state.contacts.any((contact) =>
+            contact.userid.toLowerCase() == directPeer.userid.toLowerCase());
 
     return SafeArea(
       child: DraggableScrollableSheet(
@@ -4424,6 +5216,7 @@ class _InfoPanelState extends State<_InfoPanel> {
                 memberCount: conversation.memberCount,
                 showBack: _mode != _InfoPanelMode.overview,
                 onBack: _backToOverview,
+                onEditNickname: canEditNickname ? widget.onEditNickname : null,
               ),
               if (_loadingHistory) ...[
                 const SizedBox(height: 6),
@@ -4848,6 +5641,7 @@ class _InfoPanelHeader extends StatelessWidget {
     required this.memberCount,
     required this.showBack,
     required this.onBack,
+    this.onEditNickname,
   });
 
   final String title;
@@ -4856,6 +5650,7 @@ class _InfoPanelHeader extends StatelessWidget {
   final int memberCount;
   final bool showBack;
   final VoidCallback onBack;
+  final Future<void> Function()? onEditNickname;
 
   @override
   Widget build(BuildContext context) {
@@ -4876,11 +5671,32 @@ class _InfoPanelHeader extends StatelessWidget {
               : YSAvatar(label: title, size: 74),
         ),
         const SizedBox(height: 10),
-        Text(
-          title,
-          textAlign: TextAlign.center,
-          style: const TextStyle(
-              color: AppColors.ink, fontSize: 18, fontWeight: FontWeight.w900),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Text(
+                title,
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    color: AppColors.ink,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900),
+              ),
+            ),
+            if (onEditNickname != null) ...[
+              const SizedBox(width: 3),
+              IconButton(
+                tooltip: context.l10n.t('setNickname'),
+                visualDensity: VisualDensity.compact,
+                onPressed: () => onEditNickname!(),
+                icon: const Icon(Icons.edit_outlined, size: 18),
+              ),
+            ],
+          ],
         ),
         const SizedBox(height: 4),
         Text(
@@ -5222,7 +6038,11 @@ String _lastMessagePreview(
   if (message.type == 'call') {
     final callLog = ChatCallLog.tryParse(message.content);
     return context.l10n.t(
-      callLog?.isMissed == true ? 'missedCall' : 'voiceCall',
+      callLog?.isMissed == true
+          ? 'missedCall'
+          : callLog?.kind == 'video'
+              ? 'videoCall'
+              : 'voiceCall',
     );
   }
   if (message.content.trim().isNotEmpty) return message.content.trim();
@@ -5237,7 +6057,11 @@ String _messagePreview(BuildContext context, ChatMessage message) {
   if (message.type == 'call') {
     final callLog = ChatCallLog.tryParse(message.content);
     return context.l10n.t(
-      callLog?.isMissed == true ? 'missedCall' : 'voiceCall',
+      callLog?.isMissed == true
+          ? 'missedCall'
+          : callLog?.kind == 'video'
+              ? 'videoCall'
+              : 'voiceCall',
     );
   }
   if (message.content.trim().isNotEmpty) return message.content.trim();

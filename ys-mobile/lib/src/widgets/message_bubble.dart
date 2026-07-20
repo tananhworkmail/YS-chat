@@ -931,8 +931,10 @@ class _CallLogBubble extends StatelessWidget {
     final title = missed
         ? context.l10n.t(mine ? 'unansweredCall' : 'missedCall')
         : context.l10n.t(mine ? 'outgoingCall' : 'incomingCallHistory');
+    final callKindLabel =
+        context.l10n.t(callLog.kind == 'video' ? 'videoCall' : 'voiceCall');
     final subtitle = missed
-        ? context.l10n.t('voiceCall')
+        ? callKindLabel
         : '${context.l10n.t('callCompleted')} · '
             '${_formatDuration(Duration(seconds: callLog.duration))}';
 
@@ -964,11 +966,13 @@ class _CallLogBubble extends StatelessWidget {
                         shape: BoxShape.circle,
                       ),
                       child: Icon(
-                        missed
-                            ? Icons.phone_missed_outlined
-                            : mine
-                                ? Icons.phone_forwarded_outlined
-                                : Icons.phone_callback_outlined,
+                        callLog.kind == 'video'
+                            ? Icons.videocam_outlined
+                            : missed
+                                ? Icons.phone_missed_outlined
+                                : mine
+                                    ? Icons.phone_forwarded_outlined
+                                    : Icons.phone_callback_outlined,
                         color: color,
                         size: 19,
                       ),

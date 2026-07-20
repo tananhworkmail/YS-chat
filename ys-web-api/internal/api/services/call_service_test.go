@@ -75,6 +75,19 @@ func TestCallAcceptIsAtomicAcrossDevices(t *testing.T) {
 	}
 }
 
+func TestVideoCallMediaTypeIsPersisted(t *testing.T) {
+	setupDirectCallTest(t)
+	event := callEvent("call.invite", uuid.NewString(), "alice-phone")
+	event.MediaType = "video"
+	invite, err := CallServiceInstance.ProcessEvent("alice", event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invite.Call.MediaType != "video" {
+		t.Fatalf("expected video media type, got %q", invite.Call.MediaType)
+	}
+}
+
 func TestCallStateRejectsLateAndOutOfOrderEvents(t *testing.T) {
 	setupDirectCallTest(t)
 	canceledID := uuid.NewString()

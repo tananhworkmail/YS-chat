@@ -117,9 +117,15 @@ export const setTyping = (conversationId, isTyping) => {
   return api.post(`/chat/conversations/${conversationId}/typing`, { isTyping });
 };
 
-export const setPinnedMessage = (conversationId, messageId = 0) => {
-  return api.put(`/chat/conversations/${conversationId}/pinned-message`, { messageId });
+export const setPinnedMessage = (conversationId, messageId, pinned = true) => {
+  return api.put(`/chat/conversations/${conversationId}/pinned-message`, { messageId, pinned });
 };
+
+export const getReminders = (conversationId) => api.get(`/chat/conversations/${conversationId}/reminders`);
+
+export const createReminder = (conversationId, payload) => api.post(`/chat/conversations/${conversationId}/reminders`, payload);
+
+export const cancelReminder = (reminderId) => api.delete(`/chat/reminders/${reminderId}`);
 
 export const editMessage = (messageId, content, version) => {
   return api.patch(`/chat/messages/${messageId}`, {
@@ -207,8 +213,8 @@ export const getRealtimeUrl = (ticket, reconnect = false) => {
 
 export const getICEConfiguration = () => api.get("/chat/calls/ice-config");
 
-export const sendCallControlEvent = ({ type, conversationId, callId, deviceId = getOrCreateDeviceId(), token = "" }) =>
-  api.post("/chat/calls/events", { type, conversationId, callId, deviceId, ...(token ? { token } : {}) });
+export const sendCallControlEvent = ({ type, conversationId, callId, mediaType = "audio", deviceId = getOrCreateDeviceId(), token = "" }) =>
+  api.post("/chat/calls/events", { type, conversationId, callId, mediaType, deviceId, ...(token ? { token } : {}) });
 
 export const getCallHistory = (limit = 50) => api.get("/chat/calls/history", { params: { limit } });
 
@@ -239,6 +245,9 @@ export default {
   markMessageDelivered,
   setTyping,
   setPinnedMessage,
+  getReminders,
+  createReminder,
+  cancelReminder,
   editMessage,
   getMessageEditHistory,
   deleteMessageForMe,
