@@ -561,6 +561,8 @@ class ChatPoll {
     this.options = const [],
     this.myOptionIds = const [],
     this.totalVotes = 0,
+    this.createdAt,
+    this.updatedAt,
   });
 
   final int id;
@@ -574,6 +576,8 @@ class ChatPoll {
   final List<ChatPollOption> options;
   final List<int> myOptionIds;
   final int totalVotes;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
 
   factory ChatPoll.fromJson(Map<String, dynamic> json) {
     final rawOptionIds = json['myOptionIds'] ?? json['myOptionIDs'];
@@ -592,6 +596,8 @@ class ChatPoll {
           ? rawOptionIds.map(_asInt).where((id) => id > 0).toList()
           : const [],
       totalVotes: _asInt(json['totalVotes']),
+      createdAt: _asDate(json['createdAt']),
+      updatedAt: _asDate(json['updatedAt']),
     );
   }
 }
@@ -954,6 +960,8 @@ class ChatConversation {
   }
 
   ChatConversation copyWith({
+    String? avatar,
+    String? background,
     List<ChatUser>? members,
     ChatMessage? lastMessage,
     Object? pinnedMessage = _unset,
@@ -968,8 +976,8 @@ class ChatConversation {
       id: id,
       type: type,
       name: name,
-      avatar: avatar,
-      background: background,
+      avatar: avatar ?? this.avatar,
+      background: background ?? this.background,
       memberCount: memberCount,
       members: members ?? this.members,
       lastMessage: lastMessage ?? this.lastMessage,

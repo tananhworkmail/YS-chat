@@ -154,6 +154,23 @@ class ApiClient {
     );
   }
 
+  Future<ChatConversation> updateConversationVisuals(
+    int conversationId, {
+    required String avatar,
+    required String background,
+  }) async {
+    final response = await _dio.put(
+      '/chat/conversations/$conversationId/settings',
+      data: {
+        'avatar': avatar,
+        'background': background,
+      },
+    );
+    return ChatConversation.fromJson(
+      Map<String, dynamic>.from(response.data['conversation'] as Map),
+    );
+  }
+
   Future<ChatMessagePage> messages(int conversationId,
       {int limit = 50, int beforeId = 0}) async {
     final response = await _dio.get(

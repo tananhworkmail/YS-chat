@@ -771,6 +771,19 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _updateConversationSettings(conversation.id, settings);
   }
 
+  Future<void> updateConversationVisuals(
+    ChatConversation conversation, {
+    String? avatar,
+    String? background,
+  }) async {
+    final updated = await apiClient.updateConversationVisuals(
+      conversation.id,
+      avatar: avatar ?? conversation.avatar,
+      background: background ?? conversation.background,
+    );
+    _replaceConversation(updated);
+  }
+
   ChatMessage _newPendingMessage({
     required int conversationId,
     required String clientMessageId,
@@ -866,6 +879,18 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       selectedConversation = conversations
           .where((conversation) => conversation.id == conversationId)
           .firstOrNull;
+    }
+    notifyListeners();
+  }
+
+  void _replaceConversation(ChatConversation updated) {
+    conversations = conversations
+        .map((conversation) =>
+            conversation.id == updated.id ? updated : conversation)
+        .toList()
+      ..sort(_sortConversations);
+    if (selectedConversation?.id == updated.id) {
+      selectedConversation = updated;
     }
     notifyListeners();
   }
@@ -1367,6 +1392,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       final message =
           rawMessage == null ? null : _personalizeMessageReactions(rawMessage);
       if (message != null) {
+        // Poll updates carry poll.updatedAt. The sort logic uses that value
+        // so a voted poll moves to the newest position while its system
+        // notice remains immediately below it.
         final wasKnown = _containsMessage(message);
         _upsertMessage(message);
         if (type == 'message.created' &&
@@ -1455,6 +1483,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         type == 'reminder.updated' ||
         type == 'reminder.canceled' ||
         type == 'reminder.due') {
+      final rawNotice = event.payload['message'];
+      if (rawNotice is Map && type == 'reminder.created') {
+        _upsertMessage(_personalizeMessageReactions(
+          ChatMessage.fromJson(Map<String, dynamic>.from(rawNotice)),
+        ));
+      }
       if (type == 'reminder.canceled') {
         final id = _eventInt(event, 'id');
         reminders = reminders.where((item) => item.id != id).toList();
@@ -1472,8 +1506,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
           reminderNoticeSequence += 1;
           final sequence = reminderNoticeSequence;
           _reminderNoticeTimer?.cancel();
-          _reminderNoticeTimer = Timer(const Duration(seconds: 5), () {
+          _reminderNoticeTimer = Timer(const Duration(seconds: 7), () {
             if (reminderNoticeSequence != sequence) return;
+            final reminder = reminderNotice;
+            if (reminder != null) {
+              unawaited(pushService.dismissReminderAlert(reminder));
+            }
             reminderNotice = null;
             notifyListeners();
           });
@@ -1488,6 +1526,23 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         _updateConversationSettings(
           event.conversationId,
           ConversationSettings.fromJson(Map<String, dynamic>.from(raw)),
+        );
+      }
+      return;
+    }
+    if (type == 'conversation.updated') {
+      final current = conversations
+          .where((conversation) => conversation.id == event.conversationId)
+          .firstOrNull;
+      if (current != null) {
+        final raw = event.payload;
+        _replaceConversation(
+          current.copyWith(
+            avatar: raw['avatar'] == null ? current.avatar : '${raw['avatar']}',
+            background: raw['background'] == null
+                ? current.background
+                : '${raw['background']}',
+          ),
         );
       }
       return;
@@ -1511,6 +1566,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void dismissReminderNotice() {
+    final reminder = reminderNotice;
+    if (reminder != null) {
+      unawaited(pushService.dismissReminderAlert(reminder));
+    }
     reminderNotice = null;
     _reminderNoticeTimer?.cancel();
     _reminderNoticeTimer = null;
@@ -1731,6 +1790,26 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   int _sortMessages(ChatMessage left, ChatMessage right) {
+    final involvesPoll = left.type == 'poll' || right.type == 'poll';
+    if (involvesPoll) {
+      final leftTime = _messageSortTime(left);
+      final rightTime = _messageSortTime(right);
+      if (leftTime != null && rightTime != null) {
+        final byTime = leftTime.compareTo(rightTime);
+        if (byTime != 0) return byTime;
+      }
+      final leftRank = left.type == 'poll'
+          ? 1
+          : left.type == 'system'
+              ? 2
+              : 0;
+      final rightRank = right.type == 'poll'
+          ? 1
+          : right.type == 'system'
+              ? 2
+              : 0;
+      if (leftRank != rightRank) return leftRank.compareTo(rightRank);
+    }
     if (left.serverSequence > 0 && right.serverSequence > 0) {
       final bySequence = left.serverSequence.compareTo(right.serverSequence);
       if (bySequence != 0) return bySequence;
@@ -1744,6 +1823,16 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     if (left.id <= 0 && right.id > 0) return 1;
     if (right.id <= 0 && left.id > 0) return -1;
     return left.id.compareTo(right.id);
+  }
+
+  DateTime? _messageSortTime(ChatMessage message) {
+    var result = message.createdAt;
+    final pollUpdatedAt = message.poll?.updatedAt;
+    if (pollUpdatedAt != null &&
+        (result == null || pollUpdatedAt.isAfter(result))) {
+      result = pollUpdatedAt;
+    }
+    return result;
   }
 
   void _applyMessageLifecycleEvent(String type, RealtimeEvent event) {

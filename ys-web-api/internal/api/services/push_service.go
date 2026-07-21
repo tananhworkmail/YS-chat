@@ -38,17 +38,17 @@ func (s *PushService) SendReminderNotification(db *gorm.DB, reminder *types.Chat
 	if err != nil || len(tokens) == 0 {
 		return
 	}
-	var conversationName string
-	_ = db.Table("chat_conversations").Where("id = ?", reminder.ConversationID).Pluck("name", &conversationName).Error
-	title := "Nhắc hẹn"
-	if strings.TrimSpace(conversationName) != "" {
-		title += " · " + strings.TrimSpace(conversationName)
-	}
 	data := map[string]string{
 		"type": "reminder.due", "reminderId": strconv.FormatUint(reminder.ID, 10),
 		"conversationId": strconv.FormatUint(reminder.ConversationID, 10), "title": reminder.Title,
 		"remindAt": reminder.RemindAt.Format(time.RFC3339), "repeatType": reminder.RepeatType,
 	}
+	title := "Nhắc hẹn"
+	body := strings.TrimSpace(reminder.Title)
+	if body == "" {
+		body = title
+	}
+	ttl := 30 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	for start := 0; start < len(tokens); start += 500 {
@@ -57,9 +57,33 @@ func (s *PushService) SendReminderNotification(db *gorm.DB, reminder *types.Chat
 			end = len(tokens)
 		}
 		response, sendErr := client.SendEachForMulticast(ctx, &messaging.MulticastMessage{
-			Tokens: tokens[start:end], Notification: &messaging.Notification{Title: title, Body: reminder.Title}, Data: data,
-			Android: &messaging.AndroidConfig{Priority: "high", DirectBootOK: true, Notification: &messaging.AndroidNotification{Title: title, Body: reminder.Title, Icon: "ic_launcher", Color: "#0891B2", Sound: "default", ChannelID: "ys_reminders"}},
-			APNS:    &messaging.APNSConfig{Payload: &messaging.APNSPayload{Aps: &messaging.Aps{Sound: "default"}}},
+			Tokens: tokens[start:end],
+			// Keep Android reminder pushes data-only, just like incoming calls.
+			// This makes FirebaseMessaging deliver the message to the background
+			// handler, which posts the high-priority full-screen alarm notification.
+			Data: data,
+			Android: &messaging.AndroidConfig{
+				Priority:     "high",
+				TTL:          &ttl,
+				DirectBootOK: true,
+			},
+			APNS: &messaging.APNSConfig{
+				Headers: map[string]string{
+					"apns-push-type":  "alert",
+					"apns-priority":   "10",
+					"apns-expiration": strconv.FormatInt(time.Now().Add(ttl).Unix(), 10),
+				},
+				Payload: &messaging.APNSPayload{
+					Aps: &messaging.Aps{
+						Alert:            &messaging.ApsAlert{Title: title, Body: body},
+						Sound:            "default",
+						Category:         "ys_reminder_alarm",
+						ThreadID:         "ys-reminders",
+						ContentAvailable: true,
+						CustomData:       map[string]interface{}{"interruption-level": "time-sensitive"},
+					},
+				},
+			},
 		})
 		s.logMulticastResult(db, "reminder.due", tokens[start:end], response, sendErr)
 	}

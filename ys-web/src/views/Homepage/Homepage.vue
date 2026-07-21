@@ -1215,7 +1215,7 @@
                 </el-dropdown>
                 </div>
               </div>
-              <div v-if="isOwnMessage(message)" class="message-delivery-status" :class="messageDeliveryState(message)">
+              <div v-if="isOwnMessage(message) && message.type !== 'system'" class="message-delivery-status" :class="messageDeliveryState(message)">
                 <button
                   v-if="messageDeliveryState(message) === 'failed'"
                   class="message-retry-button"
@@ -1553,13 +1553,13 @@
       <template v-else>
       <div class="profile-block">
         <div
-          v-if="activeConversation.type === 'group'"
+          v-if="activeConversation.type === 'group' || activeConversation.type === 'direct'"
           class="conversation-cover"
           :class="{ empty: !activeConversation.background }"
         >
           <img v-if="activeConversation.background" :src="activeConversation.background" alt="" />
           <button
-            v-if="isCurrentUserGroupOwner"
+            v-if="activeConversation.type === 'group' || activeConversation.type === 'direct'"
             class="cover-upload-button"
             type="button"
             @click="groupBackgroundInputRef?.click()"
@@ -1567,7 +1567,7 @@
             <Camera :size="15" />
           </button>
         </div>
-        <div class="conversation-avatar-editor" :class="{ 'with-cover': activeConversation.type === 'group' }">
+        <div class="conversation-avatar-editor" :class="{ 'with-cover': activeConversation.type === 'group' || activeConversation.type === 'direct' }">
           <el-avatar :size="72" :src="activeConversation.avatar || undefined">
           {{ initials(activeConversation.name) }}
           </el-avatar>
@@ -1578,7 +1578,7 @@
             :title="presenceLabel(conversationPresenceUser(activeConversation))"
           ></span>
           <button
-            v-if="isCurrentUserGroupOwner"
+            v-if="activeConversation.type === 'group'"
             class="avatar-upload-button mini"
             type="button"
             @click="groupAvatarInputRef?.click()"
@@ -2284,10 +2284,10 @@
         <input v-model="reminderForm.remindAt" type="datetime-local" />
         <label>{{ homeT("reminder.repeat") }}</label>
         <select v-model="reminderForm.repeatType">
-          <option value="none">{{ homeT("reminder.repeatNone") }}</option>
-          <option value="daily">{{ homeT("reminder.repeatDaily") }}</option>
-          <option value="weekly">{{ homeT("reminder.repeatWeekly") }}</option>
-          <option value="monthly">{{ homeT("reminder.repeatMonthly") }}</option>
+          <option value="none">{{ homeT("reminder.repeat_none") }}</option>
+          <option value="daily">{{ homeT("reminder.repeat_daily") }}</option>
+          <option value="weekly">{{ homeT("reminder.repeat_weekly") }}</option>
+          <option value="monthly">{{ homeT("reminder.repeat_monthly") }}</option>
         </select>
       </div>
       <div v-if="scheduledReminders.length" class="scheduled-reminder-list">
@@ -2847,7 +2847,7 @@ const messageListStyle = computed(() => {
   const background = activeConversation.value?.background;
   if (!background) return {};
   return {
-    backgroundImage: `linear-gradient(rgba(248, 250, 252, 0.84), rgba(248, 250, 252, 0.84)), url("${cssUrl(background)}")`,
+    backgroundImage: `url("${cssUrl(background)}")`,
   };
 });
 
@@ -2963,13 +2963,11 @@ const mentionSuggestions = computed(() => {
     ? [allMentionOption]
     : [];
   const memberOptions = members
-    .filter((member) => !useridsMatch(member.userid, currentUserid))
     .filter((member) => {
       return mentionOptionMatches(member, keyword);
-    })
-    .slice(0, 6);
+    });
 
-  return [...allOption, ...memberOptions].slice(0, 7);
+  return [...allOption, ...memberOptions];
 });
 
 const isGroupConversation = (conversation = {}) => conversation.type === "group";
@@ -3343,6 +3341,9 @@ const handleReminderRealtimeEvent = (event = {}) => {
     return;
   }
   if (event.type === "reminder.created" || event.type === "reminder.updated") {
+    if (event.type === "reminder.created" && event.payload?.message?.id) {
+      upsertMessage(event.payload.message);
+    }
     if (Number(reminder.conversationId) === Number(activeConversationId.value)) {
       scheduledReminders.value = [...scheduledReminders.value.filter((item) => item.id !== reminder.id), reminder]
         .sort((first, second) => new Date(first.remindAt) - new Date(second.remindAt));
@@ -4721,7 +4722,8 @@ const handleAvatarSelected = async (event) => {
 const handleGroupImageSelected = async (event, field) => {
   const file = event.target.files?.[0];
   event.target.value = "";
-  if (!file || !activeConversationId.value || activeConversation.value?.type !== "group") return;
+  if (!file || !activeConversationId.value || !activeConversation.value) return;
+  if (field === "avatar" && activeConversation.value.type !== "group") return;
 
   try {
     const uploadRes = await chatApi.uploadFiles([{ file, relativePath: file.name }]);
@@ -4795,14 +4797,14 @@ const openGroupFromDirectory = async (conversation) => {
 
 const messageSortValue = (message = {}) => {
   const createdAt = dayjs(message.createdAt).valueOf() || 0;
-  if (message.type !== "poll") return createdAt;
-  const pollUpdatedAt = dayjs(message.poll?.updatedAt).valueOf() || 0;
+  if (message.type !== "poll" || !message.poll?.updatedAt) return createdAt;
+  const pollUpdatedAt = dayjs(message.poll.updatedAt).valueOf() || 0;
   return Math.max(createdAt, pollUpdatedAt);
 };
 
 const messageSortRank = (message = {}) => {
-  if (message.type === "poll") return 2;
-  if (message.type === "system") return 1;
+  if (message.type === "poll") return 1;
+  if (message.type === "system") return 2;
   return 0;
 };
 
@@ -11383,7 +11385,7 @@ textarea:focus,
 @keyframes reminder-countdown { to { transform: scaleX(0); } }
 
 .scheduled-reminder-list {
-  max-height: 240px;
+  max-height: min(60vh, 520px);
   display: grid;
   gap: 6px;
   margin-top: 16px;

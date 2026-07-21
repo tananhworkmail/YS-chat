@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -18,6 +19,13 @@ import 'api_client.dart';
 import 'token_store.dart';
 
 final _backgroundNotifications = FlutterLocalNotificationsPlugin();
+
+const _reminderChannelId = 'ys_reminders_alarm';
+const _reminderChannelName = 'YS Chat reminder alarms';
+const _reminderCategoryId = 'ys_reminder_alarm';
+const _dismissReminderActionId = 'dismiss_reminder';
+
+bool _backgroundLocalInitialized = false;
 
 enum NativeCallActionType { accept, decline, ended }
 
@@ -73,12 +81,17 @@ Future<void> ysFirebaseMessagingBackgroundHandler(RemoteMessage message) async {
   try {
     await Firebase.initializeApp();
   } catch (_) {
-    return;
+    // The background isolate can already have an initialized Firebase app.
+    // Do not drop the push in that case; the reminder must still be posted.
   }
 
   final type = '${message.data['type'] ?? ''}';
   if (type == 'call.invite') {
     await _showNativeIncomingCall(message.data);
+    return;
+  }
+  if (type == 'reminder.due') {
+    await _showReminderAlarmFromData(message.data);
     return;
   }
   if (_isCallControlType(type)) {
@@ -90,11 +103,8 @@ Future<void> ysFirebaseMessagingBackgroundHandler(RemoteMessage message) async {
   // Data-only chat payloads need a local notification fallback.
   if (message.notification != null) return;
 
-  const settings = InitializationSettings(
-    android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-    iOS: DarwinInitializationSettings(),
-  );
-  await _backgroundNotifications.initialize(settings);
+  await _backgroundNotifications
+      .initialize(_notificationInitializationSettings());
   await _backgroundNotifications.show(
     message.messageId.hashCode,
     _remoteTitle(message),
@@ -331,35 +341,20 @@ class PushService {
   }
 
   Future<void> showReminderAlert(ChatReminder reminder) async {
+    await _showReminderAlarmFromData({
+      'conversationId': '${reminder.conversationId}',
+      'reminderId': '${reminder.id}',
+      'title': reminder.title,
+      'remindAt': reminder.remindAt.toIso8601String(),
+      'repeatType': reminder.repeatType,
+    });
+  }
+
+  Future<void> dismissReminderAlert(ChatReminder reminder) async {
     await _ensureLocalInitialized();
-    final notificationId = (reminder.id.hashCode ^ 0x526d696e) & 0x7fffffff;
-    await _notifications.show(
-      notificationId,
-      'Nhắc hẹn',
-      reminder.title,
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'ys_reminders',
-          'YS Chat reminders',
-          channelDescription: 'Conversation reminder alerts',
-          importance: Importance.max,
-          priority: Priority.max,
-          category: AndroidNotificationCategory.alarm,
-          channelShowBadge: true,
-          color: AppColors.brand,
-          enableVibration: true,
-          playSound: true,
-          fullScreenIntent: true,
-          groupKey: 'ys_reminders',
-        ),
-        iOS: DarwinNotificationDetails(
-          presentAlert: true,
-          presentBadge: true,
-          presentSound: true,
-        ),
-      ),
-      payload: '${reminder.conversationId}',
-    );
+    final notificationId = _reminderNotificationId(reminder.id);
+    await _notifications.cancel(notificationId);
+    await _backgroundNotifications.cancel(notificationId);
   }
 
   Future<void> _ensureNativeCallsInitialized() async {
@@ -453,46 +448,15 @@ class PushService {
       return;
     }
     if (type == 'reminder.due') {
-      await _ensureLocalInitialized();
-      final id = (_asInt(message.data['reminderId']) ^ 0x526d696e) & 0x7fffffff;
-      await _notifications.show(
-        id,
-        'Nhắc hẹn',
-        '${message.data['title'] ?? message.notification?.body ?? ''}',
-        const NotificationDetails(
-          android: AndroidNotificationDetails(
-            'ys_reminders',
-            'YS Chat reminders',
-            channelDescription: 'Conversation reminder alerts',
-            importance: Importance.max,
-            priority: Priority.max,
-            category: AndroidNotificationCategory.alarm,
-            channelShowBadge: true,
-            color: AppColors.brand,
-            enableVibration: true,
-            playSound: true,
-            fullScreenIntent: true,
-            groupKey: 'ys_reminders',
-          ),
-          iOS: DarwinNotificationDetails(
-            presentAlert: true,
-            presentBadge: true,
-            presentSound: true,
-          ),
-        ),
-        payload: '${message.data['conversationId'] ?? ''}',
-      );
+      await _showReminderAlarmFromData(message.data);
+      return;
     }
   }
 
   Future<void> _ensureLocalInitialized() async {
     if (_localInitialized) return;
 
-    const initializationSettings = InitializationSettings(
-      android: AndroidInitializationSettings('@mipmap/ic_launcher'),
-      iOS: DarwinInitializationSettings(),
-    );
-    await _notifications.initialize(initializationSettings);
+    await _notifications.initialize(_notificationInitializationSettings());
     final androidNotifications =
         _notifications.resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>();
@@ -505,16 +469,7 @@ class PushService {
         playSound: true,
       ),
     );
-    await androidNotifications?.createNotificationChannel(
-      const AndroidNotificationChannel(
-        'ys_reminders',
-        'YS Chat reminders',
-        description: 'Conversation reminder alerts',
-        importance: Importance.max,
-        playSound: true,
-        enableVibration: true,
-      ),
-    );
+    await _createReminderAlarmChannel(androidNotifications);
     await androidNotifications?.requestNotificationsPermission();
     await _notifications
         .resolvePlatformSpecificImplementation<
@@ -591,6 +546,131 @@ class PushService {
     await _nativeCallActions.close();
     await _remoteCallEvents.close();
   }
+}
+
+Future<void> _showReminderAlarmFromData(Map<String, dynamic> data) async {
+  await _ensureBackgroundLocalInitialized();
+
+  final title = '${data['title'] ?? 'Nhắc hẹn'}'.trim();
+  final conversationId = _asInt(data['conversationId']);
+  final reminderId = _asInt(data['reminderId']);
+  final notificationId = reminderId == 0
+      ? ((DateTime.now().millisecondsSinceEpoch ^ 0x526d696e) & 0x7fffffff)
+      : _reminderNotificationId(reminderId);
+  final body = title.isEmpty ? 'Đến giờ nhắc hẹn' : title;
+  await _backgroundNotifications.show(
+    notificationId,
+    'Nhắc hẹn',
+    body,
+    NotificationDetails(
+      android: AndroidNotificationDetails(
+        _reminderChannelId,
+        _reminderChannelName,
+        channelDescription: 'Báo thức nhắc lịch hẹn',
+        importance: Importance.max,
+        priority: Priority.max,
+        category: AndroidNotificationCategory.alarm,
+        visibility: NotificationVisibility.public,
+        channelShowBadge: true,
+        color: AppColors.brand,
+        enableVibration: true,
+        vibrationPattern: Int64List.fromList(const [0, 900, 450, 900]),
+        playSound: true,
+        fullScreenIntent: true,
+        timeoutAfter: 7000,
+        audioAttributesUsage: AudioAttributesUsage.alarm,
+        autoCancel: false,
+        ongoing: true,
+        additionalFlags: Int32List.fromList(const [4]),
+        actions: const [
+          AndroidNotificationAction(
+            _dismissReminderActionId,
+            'Tắt',
+            showsUserInterface: false,
+            cancelNotification: true,
+            semanticAction: SemanticAction.delete,
+          ),
+        ],
+        styleInformation: BigTextStyleInformation(
+          body,
+          contentTitle: 'Nhắc hẹn',
+          summaryText: 'YS Chat',
+        ),
+      ),
+      iOS: const DarwinNotificationDetails(
+        presentAlert: true,
+        presentBadge: true,
+        presentSound: true,
+        categoryIdentifier: _reminderCategoryId,
+        interruptionLevel: InterruptionLevel.timeSensitive,
+      ),
+    ),
+    payload: 'reminder:$conversationId:${data['reminderId'] ?? ''}',
+  );
+}
+
+int _reminderNotificationId(Object? reminderId) =>
+    (_asInt(reminderId) ^ 0x526d696e) & 0x7fffffff;
+
+InitializationSettings _notificationInitializationSettings() =>
+    InitializationSettings(
+      android: const AndroidInitializationSettings('@mipmap/ic_launcher'),
+      iOS: DarwinInitializationSettings(
+        notificationCategories: [
+          DarwinNotificationCategory(
+            _reminderCategoryId,
+            actions: [
+              DarwinNotificationAction.plain(
+                _dismissReminderActionId,
+                'Tắt',
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+
+Future<void> _createReminderAlarmChannel(
+  AndroidFlutterLocalNotificationsPlugin? androidNotifications,
+) async {
+  await androidNotifications?.createNotificationChannel(
+    AndroidNotificationChannel(
+      _reminderChannelId,
+      _reminderChannelName,
+      description: 'Báo thức nhắc lịch hẹn',
+      importance: Importance.max,
+      playSound: true,
+      enableVibration: true,
+      vibrationPattern: Int64List.fromList(const [0, 900, 450, 900]),
+      audioAttributesUsage: AudioAttributesUsage.alarm,
+    ),
+  );
+}
+
+Future<void> _ensureBackgroundLocalInitialized() async {
+  if (_backgroundLocalInitialized) return;
+
+  await _backgroundNotifications
+      .initialize(_notificationInitializationSettings());
+  final androidNotifications =
+      _backgroundNotifications.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+  await androidNotifications?.createNotificationChannel(
+    const AndroidNotificationChannel(
+      'ys_chat_messages',
+      'YS Chat messages',
+      description: 'Realtime chat notifications',
+      importance: Importance.high,
+      playSound: true,
+    ),
+  );
+  await _createReminderAlarmChannel(androidNotifications);
+  await androidNotifications?.requestNotificationsPermission();
+  await _backgroundNotifications
+      .resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin>()
+      ?.requestPermissions(alert: true, badge: true, sound: true);
+  _backgroundLocalInitialized = true;
 }
 
 Future<void> _showNativeIncomingCall(Map<String, dynamic> data) async {

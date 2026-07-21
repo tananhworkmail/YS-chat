@@ -457,8 +457,55 @@ class _ChatScreenState extends State<ChatScreen> {
       builder: (_) => _InfoPanel(
         onDownload: _downloadAttachment,
         onEditNickname: _editActiveConversationNickname,
+        onReminder: _showReminderSheet,
+        onAddContact: _addActiveConversationContact,
+        onChangeBackground: () => _pickConversationImage(avatar: false),
+        onChangeGroupAvatar: () => _pickConversationImage(avatar: true),
       ),
     );
+  }
+
+  Future<void> _showReminderSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => const _ReminderSheet(),
+    );
+  }
+
+  Future<void> _pickConversationImage({required bool avatar}) async {
+    final state = context.read<AppState>();
+    final conversation = state.selectedConversation;
+    if (conversation == null || (avatar && conversation.type != 'group')) {
+      return;
+    }
+    final result = await FilePicker.pickFiles(
+      type: FileType.image,
+      allowMultiple: false,
+    );
+    final path = result?.files.single.path;
+    if (path == null || path.isEmpty || !mounted) return;
+    try {
+      final attachments = await state.apiClient.uploadFiles([File(path)]);
+      final fileUrl = attachments.firstOrNull?.fileUrl.trim() ?? '';
+      if (fileUrl.isEmpty) throw StateError('image upload failed');
+      await state.updateConversationVisuals(
+        conversation,
+        avatar: avatar ? fileUrl : null,
+        background: avatar ? null : fileUrl,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(avatar ? 'Đã đổi ảnh đại diện nhóm' : 'Đã đổi ảnh nền'),
+        ),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Không thể cập nhật hình ảnh')),
+      );
+    }
   }
 
   Future<void> _openPollSheet() async {
@@ -509,7 +556,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 onDeleteForMe: _deleteMessageForMe,
                 onDownload: _downloadAttachment,
                 onInfo: _showInfoPanel,
-                onAddContact: _addActiveConversationContact,
                 onCreatePoll: _openPollSheet,
                 onSend: _sendText,
                 onPickFiles: () => _pickFiles(FileType.any),
@@ -807,7 +853,7 @@ class _ReminderNoticePanel extends StatelessWidget {
                         TweenAnimationBuilder<double>(
                           key: ValueKey(state.reminderNoticeSequence),
                           tween: Tween(begin: 1, end: 0),
-                          duration: const Duration(seconds: 5),
+                          duration: const Duration(seconds: 7),
                           builder: (_, value, __) => LinearProgressIndicator(
                             value: value,
                             minHeight: 4,
@@ -908,32 +954,47 @@ class _CallPanelState extends State<_CallPanel> {
         color: const Color(0xff111827),
         child: SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+            padding: EdgeInsets.fromLTRB(
+              state.callIsVideo ? 12 : 24,
+              8,
+              state.callIsVideo ? 12 : 24,
+              state.callIsVideo ? 16 : 24,
+            ),
             child: Column(
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(
-                      Icons.lock_outline,
-                      color: Color(0xff9ca3af),
-                      size: 15,
+                if (state.callIsVideo)
+                  Text(
+                    status,
+                    style: const TextStyle(
+                      color: Color(0xffd1d5db),
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
                     ),
-                    const SizedBox(width: 6),
-                    Text(
-                      context.l10n.t('call'),
-                      style: const TextStyle(
-                        color: Color(0xffd1d5db),
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
+                  )
+                else
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(
+                        Icons.lock_outline,
+                        color: Color(0xff9ca3af),
+                        size: 15,
                       ),
-                    ),
-                  ],
-                ),
+                      const SizedBox(width: 6),
+                      Text(
+                        context.l10n.t('call'),
+                        style: const TextStyle(
+                          color: Color(0xffd1d5db),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
                 if (state.callIsVideo)
                   Expanded(
                     child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 18),
+                      padding: const EdgeInsets.symmetric(vertical: 6),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(14),
                         child: Stack(
@@ -975,6 +1036,31 @@ class _CallPanelState extends State<_CallPanel> {
                                   ),
                                 ),
                               ),
+                            Positioned(
+                              top: 10,
+                              right: 10,
+                              child: Material(
+                                color: Colors.black.withValues(alpha: 0.52),
+                                shape: const CircleBorder(),
+                                child: Tooltip(
+                                  message: context.l10n.t('switchCamera'),
+                                  child: InkWell(
+                                    customBorder: const CircleBorder(),
+                                    onTap: () => context
+                                        .read<AppState>()
+                                        .switchCallCamera(),
+                                    child: const SizedBox.square(
+                                      dimension: 38,
+                                      child: Icon(
+                                        Icons.cameraswitch_outlined,
+                                        color: Colors.white,
+                                        size: 21,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
                           ],
                         ),
                       ),
@@ -999,30 +1085,32 @@ class _CallPanelState extends State<_CallPanel> {
                     ),
                   ),
                 ],
-                const SizedBox(height: 26),
-                Text(
-                  state.callPeerName,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 24,
-                    fontWeight: FontWeight.w800,
+                if (!state.callIsVideo) ...[
+                  const SizedBox(height: 26),
+                  Text(
+                    state.callPeerName,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.w800,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  status,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Color(0xffd1d5db),
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
+                  const SizedBox(height: 10),
+                  Text(
+                    status,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Color(0xffd1d5db),
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
+                ],
                 if (state.callIsVideo)
                   const SizedBox(height: 16)
                 else
@@ -1057,6 +1145,7 @@ class _CallPanelState extends State<_CallPanel> {
                         icon: state.callMuted ? Icons.mic_off : Icons.mic,
                         label: context.l10n
                             .t(state.callMuted ? 'unmuteCall' : 'muteCall'),
+                        compact: state.callIsVideo,
                         color: state.callMuted
                             ? const Color(0xfff59e0b)
                             : Colors.white.withValues(alpha: 0.16),
@@ -1070,34 +1159,29 @@ class _CallPanelState extends State<_CallPanel> {
                           label: context.l10n.t(state.callCameraOff
                               ? 'cameraOnCall'
                               : 'cameraOffCall'),
+                          compact: true,
                           color: state.callCameraOff
                               ? const Color(0xfff59e0b)
                               : Colors.white.withValues(alpha: 0.16),
                           onTap: () =>
                               context.read<AppState>().toggleCallCamera(),
                         ),
-                      if (state.callIsVideo)
+                      if (!state.callIsVideo)
                         _CallActionButton(
-                          icon: Icons.cameraswitch_outlined,
-                          label: context.l10n.t('switchCamera'),
-                          color: Colors.white.withValues(alpha: 0.16),
+                          icon: state.callSpeakerOn
+                              ? Icons.volume_up
+                              : Icons.hearing,
+                          label: context.l10n.t('speakerCall'),
+                          color: state.callSpeakerOn
+                              ? AppColors.brand
+                              : Colors.white.withValues(alpha: 0.16),
                           onTap: () =>
-                              context.read<AppState>().switchCallCamera(),
+                              context.read<AppState>().toggleCallSpeaker(),
                         ),
-                      _CallActionButton(
-                        icon: state.callSpeakerOn
-                            ? Icons.volume_up
-                            : Icons.hearing,
-                        label: context.l10n.t('speakerCall'),
-                        color: state.callSpeakerOn
-                            ? AppColors.brand
-                            : Colors.white.withValues(alpha: 0.16),
-                        onTap: () =>
-                            context.read<AppState>().toggleCallSpeaker(),
-                      ),
                       _CallActionButton(
                         icon: Icons.call_end,
                         label: context.l10n.t('endCall'),
+                        compact: state.callIsVideo,
                         color: AppColors.danger,
                         onTap: () => context.read<AppState>().endOrCancelCall(),
                       ),
@@ -1118,17 +1202,20 @@ class _CallActionButton extends StatelessWidget {
     required this.label,
     required this.color,
     required this.onTap,
+    this.compact = false,
   });
 
   final IconData icon;
   final String label;
   final Color color;
   final VoidCallback onTap;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
+    final dimension = compact ? 50.0 : 58.0;
     return SizedBox(
-      width: 78,
+      width: compact ? 70 : 78,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -1141,8 +1228,9 @@ class _CallActionButton extends StatelessWidget {
                 onTap: onTap,
                 customBorder: const CircleBorder(),
                 child: SizedBox.square(
-                  dimension: 58,
-                  child: Icon(icon, color: Colors.white, size: 25),
+                  dimension: dimension,
+                  child:
+                      Icon(icon, color: Colors.white, size: compact ? 22 : 25),
                 ),
               ),
             ),
@@ -1153,9 +1241,9 @@ class _CallActionButton extends StatelessWidget {
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
             textAlign: TextAlign.center,
-            style: const TextStyle(
+            style: TextStyle(
               color: Colors.white,
-              fontSize: 11,
+              fontSize: compact ? 10 : 11,
               fontWeight: FontWeight.w700,
             ),
           ),
@@ -2517,7 +2605,6 @@ class _Thread extends StatefulWidget {
     required this.onDeleteForMe,
     required this.onDownload,
     required this.onInfo,
-    required this.onAddContact,
     required this.onCreatePoll,
     required this.onSend,
     required this.onPickFiles,
@@ -2540,7 +2627,6 @@ class _Thread extends StatefulWidget {
   final ValueChanged<ChatMessage> onDeleteForMe;
   final ValueChanged<ChatAttachment> onDownload;
   final VoidCallback onInfo;
-  final Future<void> Function() onAddContact;
   final VoidCallback onCreatePoll;
   final VoidCallback onSend;
   final VoidCallback onPickFiles;
@@ -2654,14 +2740,6 @@ class _ThreadState extends State<_Thread> {
       ),
     );
     if (message != null && mounted) await _scrollToMessage(message.id);
-  }
-
-  Future<void> _showReminders() async {
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) => const _ReminderSheet(),
-    );
   }
 
   Future<void> _scrollToMessage(int messageId) async {
@@ -2824,8 +2902,6 @@ class _ThreadState extends State<_Thread> {
               onBack: widget.onBack,
               onInfo: widget.onInfo,
               onSearch: _showConversationSearch,
-              onReminder: _showReminders,
-              onAddContact: widget.onAddContact,
             ),
             if (pinnedMessage != null)
               _PinnedMessageBar(
@@ -3057,7 +3133,6 @@ class _ChatBackground extends StatelessWidget {
           errorBuilder: (_, __, ___) =>
               const ColoredBox(color: AppColors.canvas),
         ),
-        ColoredBox(color: AppColors.canvas.withValues(alpha: 0.82)),
       ],
     );
   }
@@ -3093,8 +3168,6 @@ class _ChatHeader extends StatelessWidget {
     required this.onBack,
     required this.onInfo,
     required this.onSearch,
-    required this.onReminder,
-    required this.onAddContact,
   });
 
   final ChatConversation conversation;
@@ -3103,18 +3176,12 @@ class _ChatHeader extends StatelessWidget {
   final VoidCallback onBack;
   final VoidCallback onInfo;
   final VoidCallback onSearch;
-  final VoidCallback onReminder;
-  final Future<void> Function() onAddContact;
 
   @override
   Widget build(BuildContext context) {
     final state = context.read<AppState>();
     final title = conversation.titleFor(currentUserid);
     final member = _presenceMember(conversation, currentUserid);
-    final canAddContact = conversation.type == 'direct' &&
-        member != null &&
-        !state.contacts.any((contact) =>
-            contact.userid.toLowerCase() == member.userid.toLowerCase());
     final imageUrl = conversation.avatar.isNotEmpty
         ? state.apiClient.absoluteUrl(conversation.avatar)
         : member?.avatarUrl(state);
@@ -3147,35 +3214,49 @@ class _ChatHeader extends StatelessWidget {
                 size: 34),
           const SizedBox(width: 8),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      color: AppColors.ink,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w900),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: onInfo,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 5),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          color: AppColors.ink,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w900),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      conversation.type == 'group'
+                          ? context.l10n.memberCount(conversation.memberCount)
+                          : (member?.isOnline == true
+                              ? context.l10n.t('online')
+                              : context.l10n.t('directMessage')),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          color: AppColors.muted,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 2),
-                Text(
-                  conversation.type == 'group'
-                      ? context.l10n.memberCount(conversation.memberCount)
-                      : (member?.isOnline == true
-                          ? context.l10n.t('online')
-                          : context.l10n.t('directMessage')),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      color: AppColors.muted,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700),
-                ),
-              ],
+              ),
             ),
+          ),
+          IconButton(
+            constraints: actionConstraints,
+            padding: EdgeInsets.zero,
+            tooltip: context.l10n.t('searchMessages'),
+            onPressed: onSearch,
+            icon: const Icon(Icons.search),
           ),
           if (conversation.type == 'direct')
             IconButton(
@@ -3193,28 +3274,6 @@ class _ChatHeader extends StatelessWidget {
               onPressed: () => context.read<AppState>().startAudioCall(),
               icon: const Icon(Icons.phone_outlined),
             ),
-          if (canAddContact)
-            IconButton(
-              constraints: actionConstraints,
-              padding: EdgeInsets.zero,
-              tooltip: context.l10n.t('addContact'),
-              onPressed: () => onAddContact(),
-              icon: const Icon(Icons.person_add_alt_1_outlined),
-            ),
-          IconButton(
-            constraints: actionConstraints,
-            padding: EdgeInsets.zero,
-            tooltip: context.l10n.t('searchMessages'),
-            onPressed: onSearch,
-            icon: const Icon(Icons.search),
-          ),
-          IconButton(
-            constraints: actionConstraints,
-            padding: EdgeInsets.zero,
-            tooltip: context.l10n.t('reminders'),
-            onPressed: onReminder,
-            icon: const Icon(Icons.event_outlined),
-          ),
           IconButton(
             constraints: actionConstraints,
             padding: EdgeInsets.zero,
@@ -5121,10 +5180,18 @@ class _InfoPanel extends StatefulWidget {
   const _InfoPanel({
     required this.onDownload,
     required this.onEditNickname,
+    required this.onReminder,
+    required this.onAddContact,
+    required this.onChangeBackground,
+    required this.onChangeGroupAvatar,
   });
 
   final ValueChanged<ChatAttachment> onDownload;
   final Future<void> Function() onEditNickname;
+  final VoidCallback onReminder;
+  final Future<void> Function() onAddContact;
+  final VoidCallback onChangeBackground;
+  final VoidCallback onChangeGroupAvatar;
 
   @override
   State<_InfoPanel> createState() => _InfoPanelState();
@@ -5195,6 +5262,9 @@ class _InfoPanelState extends State<_InfoPanel> {
     final canEditNickname = directPeer != null &&
         state.contacts.any((contact) =>
             contact.userid.toLowerCase() == directPeer.userid.toLowerCase());
+    final isContact = directPeer != null &&
+        state.contacts.any((contact) =>
+            contact.userid.toLowerCase() == directPeer.userid.toLowerCase());
 
     return SafeArea(
       child: DraggableScrollableSheet(
@@ -5214,10 +5284,34 @@ class _InfoPanelState extends State<_InfoPanel> {
                     : context.l10n.t('directChat'),
                 isGroup: isGroup,
                 memberCount: conversation.memberCount,
+                avatarUrl: conversation.avatar.trim().isEmpty
+                    ? null
+                    : state.apiClient.absoluteUrl(conversation.avatar.trim()),
+                backgroundUrl: conversation.background.trim().isEmpty
+                    ? null
+                    : state.apiClient
+                        .absoluteUrl(conversation.background.trim()),
                 showBack: _mode != _InfoPanelMode.overview,
                 onBack: _backToOverview,
                 onEditNickname: canEditNickname ? widget.onEditNickname : null,
+                onChangeBackground: _mode == _InfoPanelMode.overview
+                    ? widget.onChangeBackground
+                    : null,
+                onChangeAvatar: _mode == _InfoPanelMode.overview && isGroup
+                    ? widget.onChangeGroupAvatar
+                    : null,
               ),
+              if (_mode == _InfoPanelMode.overview &&
+                  directPeer != null &&
+                  !isContact) ...[
+                const SizedBox(height: 12),
+                _InfoSummaryTile(
+                  icon: Icons.person_add_alt_1_outlined,
+                  title: context.l10n.t('addContact'),
+                  subtitle: 'Chưa có trong danh bạ',
+                  onTap: () => widget.onAddContact(),
+                ),
+              ],
               if (_loadingHistory) ...[
                 const SizedBox(height: 6),
                 const LinearProgressIndicator(minHeight: 2),
@@ -5264,6 +5358,14 @@ class _InfoPanelState extends State<_InfoPanel> {
                     conversation,
                     !conversation.settings.isArchived,
                   ),
+                ),
+                _InfoSummaryTile(
+                  icon: Icons.event_outlined,
+                  title: context.l10n.t('reminders'),
+                  subtitle: state.reminders.isEmpty
+                      ? context.l10n.t('noReminders')
+                      : '${state.reminders.length} ${context.l10n.t('reminders').toLowerCase()}',
+                  onTap: widget.onReminder,
                 ),
                 if (isGroup)
                   _InfoSummaryTile(
@@ -5639,18 +5741,26 @@ class _InfoPanelHeader extends StatelessWidget {
     required this.subtitle,
     required this.isGroup,
     required this.memberCount,
+    this.avatarUrl,
+    this.backgroundUrl,
     required this.showBack,
     required this.onBack,
     this.onEditNickname,
+    this.onChangeBackground,
+    this.onChangeAvatar,
   });
 
   final String title;
   final String subtitle;
   final bool isGroup;
   final int memberCount;
+  final String? avatarUrl;
+  final String? backgroundUrl;
   final bool showBack;
   final VoidCallback onBack;
   final Future<void> Function()? onEditNickname;
+  final VoidCallback? onChangeBackground;
+  final VoidCallback? onChangeAvatar;
 
   @override
   Widget build(BuildContext context) {
@@ -5665,10 +5775,64 @@ class _InfoPanelHeader extends StatelessWidget {
               icon: const Icon(Icons.arrow_back),
             ),
           ),
-        Center(
-          child: isGroup
-              ? _GroupAvatar(count: memberCount)
-              : YSAvatar(label: title, size: 74),
+        SizedBox(
+          height: 154,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 112,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(14),
+                  child: backgroundUrl == null || backgroundUrl!.isEmpty
+                      ? const ColoredBox(color: AppColors.brandSoft)
+                      : Image.network(
+                          backgroundUrl!,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) =>
+                              const ColoredBox(color: AppColors.brandSoft),
+                        ),
+                ),
+              ),
+              if (onChangeBackground != null)
+                Positioned(
+                  right: 8,
+                  bottom: 50,
+                  child: _InfoImageEditButton(onTap: onChangeBackground!),
+                ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Center(
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      isGroup && (avatarUrl == null || avatarUrl!.isEmpty)
+                          ? _GroupAvatar(count: memberCount, size: 86)
+                          : YSAvatar(
+                              label: title,
+                              imageUrl: avatarUrl,
+                              size: 86,
+                            ),
+                      if (onChangeAvatar != null)
+                        Positioned(
+                          right: -3,
+                          bottom: -1,
+                          child: _InfoImageEditButton(
+                            onTap: onChangeAvatar!,
+                            size: 30,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: 10),
         Row(
@@ -5732,6 +5896,31 @@ class _InfoSummaryTile extends StatelessWidget {
       subtitle: Text(subtitle),
       trailing: const Icon(Icons.chevron_right),
       onTap: onTap,
+    );
+  }
+}
+
+class _InfoImageEditButton extends StatelessWidget {
+  const _InfoImageEditButton({required this.onTap, this.size = 32});
+
+  final VoidCallback onTap;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: AppColors.brand,
+      shape: const CircleBorder(),
+      elevation: 3,
+      child: InkWell(
+        onTap: onTap,
+        customBorder: const CircleBorder(),
+        child: SizedBox.square(
+          dimension: size,
+          child: Icon(Icons.camera_alt_outlined,
+              color: Colors.white, size: size * 0.5),
+        ),
+      ),
     );
   }
 }

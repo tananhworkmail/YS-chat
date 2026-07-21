@@ -673,33 +673,75 @@ func (s *ChatService) UpdateConversationSettings(currentUserid string, conversat
 	if err != nil {
 		return nil, err
 	}
-	if conversationType != "group" {
-		return nil, errors.New(ErrChatNoPermission)
-	}
-
-	if ok, err := s.isConversationOwner(db, conversationID, currentUserid); err != nil {
-		return nil, errors.New(ErrSystem)
-	} else if !ok {
-		return nil, errors.New(ErrChatOnlyOwnerCanManageMembers)
-	}
 
 	avatar := strings.TrimSpace(req.Avatar)
 	background := strings.TrimSpace(req.Background)
 	if len(avatar) > 1024 || len(background) > 1024 {
 		return nil, errors.New(ErrInvalidInput)
 	}
-
-	if err := db.Table("chat_conversations").
-		Where("id = ?", conversationID).
-		Updates(map[string]interface{}{
-			"avatar":     avatar,
-			"background": background,
-			"updated_at": time.Now(),
-		}).Error; err != nil {
+	var previous struct {
+		Avatar     string `gorm:"column:avatar"`
+		Background string `gorm:"column:background"`
+	}
+	if err := db.Table("chat_conversations").Select("avatar, background").Where("id = ?", conversationID).Take(&previous).Error; err != nil {
 		return nil, errors.New(ErrSystem)
 	}
 
-	return s.getConversation(db, currentUserid, conversationID)
+	updates := map[string]interface{}{
+		"background": background,
+		"updated_at": time.Now(),
+	}
+	if conversationType == "group" {
+		updates["avatar"] = avatar
+	}
+
+	if err := db.Table("chat_conversations").Where("id = ?", conversationID).Updates(updates).Error; err != nil {
+		return nil, errors.New(ErrSystem)
+	}
+	backgroundChanged := previous.Background != background
+	avatarChanged := conversationType == "group" && previous.Avatar != avatar
+	if backgroundChanged || avatarChanged {
+		actorName, nameErr := s.conversationUserDisplayName(db, conversationID, currentUserid)
+		if nameErr == nil {
+			if strings.TrimSpace(actorName) == "" {
+				actorName = currentUserid
+			}
+			content := actorName + " đã cập nhật "
+			switch {
+			case backgroundChanged && avatarChanged:
+				content += "ảnh nền và ảnh đại diện"
+			case backgroundChanged:
+				content += "ảnh nền"
+			default:
+				content += "ảnh đại diện"
+			}
+			if messageID, createErr := s.createSystemMessage(db, conversationID, currentUserid, content, time.Now()); createErr == nil {
+				s.broadcastSystemMessageByID(db, currentUserid, conversationID, messageID)
+			}
+		}
+	}
+
+	conversation, err := s.getConversation(db, currentUserid, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	audience := make([]string, 0, len(conversation.Members))
+	for _, member := range conversation.Members {
+		if strings.TrimSpace(member.Userid) != "" {
+			audience = append(audience, member.Userid)
+		}
+	}
+	if len(audience) > 0 {
+		RealtimeHubInstance.BroadcastToUsers(audience, RealtimeEvent{
+			Type:           "conversation.updated",
+			ConversationID: conversationID,
+			Payload: map[string]interface{}{
+				"avatar":     conversation.Avatar,
+				"background": conversation.Background,
+			},
+		})
+	}
+	return conversation, nil
 }
 
 func (s *ChatService) AddMembers(currentUserid string, conversationID uint64, req request.AddConversationMembersRequest) (*types.ChatConversation, error) {

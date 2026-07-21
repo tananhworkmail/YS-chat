@@ -47,7 +47,22 @@ func (s *ReminderService) Create(userid string, conversationID uint64, input req
 		return nil, errors.New(ErrSystem)
 	}
 	reminder := s.toReminder(db, record)
-	RealtimeHubInstance.BroadcastToUsers(s.memberUserids(db, conversationID), RealtimeEvent{Type: "reminder.created", ConversationID: conversationID, Payload: reminder})
+	var noticeMessage *types.ChatMessage
+	actorName, nameErr := ChatServiceInstance.conversationUserDisplayName(db, conversationID, userid)
+	if nameErr == nil {
+		if strings.TrimSpace(actorName) == "" {
+			actorName = userid
+		}
+		content := actorName + " đã đặt nhắc hẹn \"" + title + "\""
+		if messageID, createErr := ChatServiceInstance.createSystemMessage(db, conversationID, userid, content, time.Now().UTC()); createErr == nil {
+			noticeMessage, _ = ChatServiceInstance.loadMessageByID(db, userid, messageID)
+		}
+	}
+	payload := struct {
+		*types.ChatReminder
+		Message *types.ChatMessage `json:"message,omitempty"`
+	}{ChatReminder: reminder, Message: noticeMessage}
+	RealtimeHubInstance.BroadcastToUsers(s.memberUserids(db, conversationID), RealtimeEvent{Type: "reminder.created", ConversationID: conversationID, Payload: payload})
 	return reminder, nil
 }
 
