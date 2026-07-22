@@ -762,15 +762,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _updateConversationSettings(conversation.id, settings);
   }
 
-  Future<void> setConversationArchived(
-      ChatConversation conversation, bool archived) async {
-    final settings = await apiClient.updateConversationSettings(
-      conversation.id,
-      archivedAt: archived ? DateTime.now() : null,
-    );
-    _updateConversationSettings(conversation.id, settings);
-  }
-
   Future<void> updateConversationVisuals(
     ChatConversation conversation, {
     String? avatar,
@@ -2242,9 +2233,6 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   int _sortConversations(ChatConversation a, ChatConversation b) {
-    if (a.settings.isArchived != b.settings.isArchived) {
-      return a.settings.isArchived ? 1 : -1;
-    }
     if (a.settings.isPinned != b.settings.isPinned) {
       return a.settings.isPinned ? -1 : 1;
     }

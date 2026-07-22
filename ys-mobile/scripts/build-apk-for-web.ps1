@@ -96,7 +96,8 @@ function Stop-BuildJavaDaemons {
     $buildDaemons = Get-CimInstance Win32_Process | Where-Object {
         $_.Name -eq "java.exe" -and (
             $_.CommandLine -like "*org.gradle.launcher.daemon.bootstrap.GradleDaemon*" -or
-            $_.CommandLine -like "*org.jetbrains.kotlin.daemon.KotlinCompileDaemon*"
+            $_.CommandLine -like "*org.jetbrains.kotlin.daemon.KotlinCompileDaemon*" -or
+            $_.CommandLine -like "*com.github.badsyntax.gradle.GradleServer*"
         )
     }
 
@@ -105,6 +106,22 @@ function Stop-BuildJavaDaemons {
     }
 
     if ($buildDaemons) {
+        Start-Sleep -Milliseconds 800
+    }
+}
+
+function Stop-FlutterBuildDaemons {
+    $flutterDaemons = Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -in @("dart.exe", "dartvm.exe") -and
+        $_.CommandLine -like "*flutter_tools.snapshot*" -and
+        $_.CommandLine -like "* daemon*"
+    }
+
+    foreach ($process in $flutterDaemons) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($flutterDaemons) {
         Start-Sleep -Milliseconds 800
     }
 }
@@ -137,6 +154,7 @@ Push-Location $mobileRoot
 try {
     Stop-GradleDaemon
     Stop-BuildJavaDaemons
+    Stop-FlutterBuildDaemons
     Clear-FlutterBuildReadOnlyAttributes
     Remove-StaleFlutterDirectory "ios\Flutter\ephemeral\Packages\.packages"
     Remove-StaleFlutterDirectory "build\unit_test_assets"
@@ -164,5 +182,6 @@ try {
 } finally {
     Stop-GradleDaemon
     Stop-BuildJavaDaemons
+    Stop-FlutterBuildDaemons
     Pop-Location
 }

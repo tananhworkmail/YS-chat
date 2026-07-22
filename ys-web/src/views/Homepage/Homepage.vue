@@ -307,7 +307,6 @@
                 <span class="conversation-name">
                   <Pin v-if="isConversationPinned(conversation)" :size="13" />
                   <BellOff v-if="isConversationMuted(conversation)" :size="13" />
-                  <Archive v-if="isConversationArchived(conversation)" :size="13" />
                   {{ conversation.name }}
                 </span>
                 <div class="conversation-meta">
@@ -490,7 +489,6 @@
                 <span class="conversation-name">
                   <Pin v-if="isConversationPinned(conversation)" :size="13" />
                   <BellOff v-if="isConversationMuted(conversation)" :size="13" />
-                  <Archive v-if="isConversationArchived(conversation)" :size="13" />
                   {{ conversation.name }}
                 </span>
                 <div class="conversation-meta">
@@ -1647,16 +1645,6 @@
             <Pin :size="17" />
             <span>{{ isConversationPinned(activeConversation) ? homeT("info.unpinConversation") : homeT("info.pinConversation") }}</span>
           </button>
-          <button
-            type="button"
-            :class="{ active: isConversationArchived(activeConversation) }"
-            :disabled="settingsSaving"
-            @click="toggleConversationArchive"
-          >
-            <ArchiveRestore v-if="isConversationArchived(activeConversation)" :size="17" />
-            <Archive v-else :size="17" />
-            <span>{{ isConversationArchived(activeConversation) ? homeT("info.unarchive") : homeT("info.archive") }}</span>
-          </button>
         </div>
       </section>
 
@@ -2382,8 +2370,6 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import dayjs from "dayjs";
 import BrandLogo from "@/components/BrandLogo.vue";
 import {
-  Archive,
-  ArchiveRestore,
   AlarmClock,
   Bell,
   BellOff,
@@ -6237,7 +6223,6 @@ const conversationUserSettings = (conversation = {}) => {
   return {
     muteUntil: settings.muteUntil ?? settings.mute_until ?? conversation.muteUntil ?? conversation.mute_until ?? null,
     pinnedAt: settings.pinnedAt ?? settings.pinned_at ?? conversation.pinnedAt ?? conversation.pinned_at ?? null,
-    archivedAt: settings.archivedAt ?? settings.archived_at ?? conversation.archivedAt ?? conversation.archived_at ?? null,
   };
 };
 
@@ -6248,13 +6233,9 @@ const isConversationMuted = (conversation = {}) => {
 
 const isConversationPinned = (conversation = {}) => Boolean(conversationUserSettings(conversation).pinnedAt);
 
-const isConversationArchived = (conversation = {}) => Boolean(conversationUserSettings(conversation).archivedAt);
-
 const sortConversationsForDisplay = (items = []) => items
   .map((conversation, index) => ({ conversation, index }))
   .sort((first, second) => {
-    const archivedDiff = Number(isConversationArchived(first.conversation)) - Number(isConversationArchived(second.conversation));
-    if (archivedDiff !== 0) return archivedDiff;
     const pinnedDiff = Number(isConversationPinned(second.conversation)) - Number(isConversationPinned(first.conversation));
     if (pinnedDiff !== 0) return pinnedDiff;
     return first.index - second.index;
@@ -6277,7 +6258,6 @@ const applyConversationUserSettings = (conversationId, settings = {}) => {
             const nextSettings = {
               muteUntil: settingValue("muteUntil", "mute_until"),
               pinnedAt: settingValue("pinnedAt", "pinned_at"),
-              archivedAt: settingValue("archivedAt", "archived_at"),
             };
             return { ...nextSettings, mySettings: nextSettings };
           })(),
@@ -6313,11 +6293,6 @@ const toggleConversationMute = () => {
 const toggleConversationPin = () => {
   const pinned = isConversationPinned(activeConversation.value);
   void saveConversationUserSettings({ pinnedAt: pinned ? null : new Date().toISOString() });
-};
-
-const toggleConversationArchive = () => {
-  const archived = isConversationArchived(activeConversation.value);
-  void saveConversationUserSettings({ archivedAt: archived ? null : new Date().toISOString() });
 };
 
 const applyConversationSettingsEvent = (event = {}) => {

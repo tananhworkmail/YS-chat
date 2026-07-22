@@ -2248,12 +2248,6 @@ class _ConversationItem extends StatelessWidget {
                               child: Icon(Icons.notifications_off_outlined,
                                   size: 13, color: AppColors.muted),
                             ),
-                          if (conversation.settings.isArchived)
-                            const Padding(
-                              padding: EdgeInsets.only(left: 4),
-                              child: Icon(Icons.archive_outlined,
-                                  size: 13, color: AppColors.muted),
-                            ),
                           Text(
                             _conversationTime(conversation),
                             style: const TextStyle(
@@ -2331,19 +2325,6 @@ class _ConversationItem extends StatelessWidget {
                 Navigator.of(sheetContext).pop();
                 state.setConversationPinned(
                     conversation, !conversation.settings.isPinned);
-              },
-            ),
-            ListTile(
-              leading: Icon(conversation.settings.isArchived
-                  ? Icons.unarchive_outlined
-                  : Icons.archive_outlined),
-              title: Text(context.l10n.t(conversation.settings.isArchived
-                  ? 'unarchiveConversation'
-                  : 'archiveConversation')),
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                state.setConversationArchived(
-                    conversation, !conversation.settings.isArchived);
               },
             ),
           ],
@@ -5344,19 +5325,6 @@ class _InfoPanelState extends State<_InfoPanel> {
                   onTap: () => state.setConversationPinned(
                     conversation,
                     !conversation.settings.isPinned,
-                  ),
-                ),
-                _InfoSummaryTile(
-                  icon: conversation.settings.isArchived
-                      ? Icons.unarchive_outlined
-                      : Icons.archive_outlined,
-                  title: context.l10n.t(conversation.settings.isArchived
-                      ? 'unarchiveConversation'
-                      : 'archiveConversation'),
-                  subtitle: context.l10n.t('personalSetting'),
-                  onTap: () => state.setConversationArchived(
-                    conversation,
-                    !conversation.settings.isArchived,
                   ),
                 ),
                 _InfoSummaryTile(
