@@ -12,6 +12,8 @@ import (
 	"web-api/internal/pkg/config"
 )
 
+const defaultSTUNURL = "stun:stun.l.google.com:19302"
+
 type ICEConfiguration struct {
 	ICEServers []ICEServer `json:"iceServers"`
 	ExpiresAt  time.Time   `json:"expiresAt"`
@@ -34,9 +36,11 @@ func BuildICEConfiguration(userid string) ICEConfiguration {
 	}
 	expiresAt := time.Now().UTC().Add(ttl)
 	result := ICEConfiguration{ICEServers: []ICEServer{}, ExpiresAt: expiresAt}
-	if urls := validICEURLs(configuration.STUNURLs, "stun:", "stuns:"); len(urls) > 0 {
-		result.ICEServers = append(result.ICEServers, ICEServer{URLs: urls})
+	stunURLs := validICEURLs(configuration.STUNURLs, "stun:", "stuns:")
+	if len(stunURLs) == 0 {
+		stunURLs = []string{defaultSTUNURL}
 	}
+	result.ICEServers = append(result.ICEServers, ICEServer{URLs: stunURLs})
 	turnURLs := validICEURLs(configuration.TURNURLs, "turn:", "turns:")
 	if len(turnURLs) == 0 {
 		return result

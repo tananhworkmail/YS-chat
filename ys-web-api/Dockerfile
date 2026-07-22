@@ -48,7 +48,7 @@ COPY --from=build_base /src/log /app/log
 RUN chmod +x /app/webapi
 
 # Mở cổng 3666
-EXPOSE 3666
+EXPOSE 3666/tcp 3478/tcp 3478/udp 49160-49200/udp
 
 # Chạy ứng dụng
 CMD ["/app/webapi"]

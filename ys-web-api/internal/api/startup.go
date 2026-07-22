@@ -30,6 +30,10 @@ func Run(configPath string) {
 	if err := services.ConfigureRealtimeHub(config.GetConfig().Realtime); err != nil {
 		logger.Fatalf("failed to setup realtime event bus, %s", err)
 	}
+	turnServer, err := services.StartEmbeddedTURN(&config.GetConfig().WebRTC)
+	if err != nil {
+		logger.Fatalf("failed to setup embedded TURN relay, %s", err)
+	}
 
 	gin.SetMode(config.GetConfig().Server.Mode)
 
@@ -59,6 +63,9 @@ func Run(configPath string) {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 		_ = services.RealtimeHubInstance.Shutdown(shutdownCtx)
+		if turnServer != nil {
+			_ = turnServer.Close()
+		}
 	}()
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Fatalf("%v", err)

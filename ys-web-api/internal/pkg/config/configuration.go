@@ -37,6 +37,12 @@ type WebRTCConfiguration struct {
 	TURNUsername               string
 	TURNCredential             string
 	TURNCredentialTTLSeconds   int
+	EmbeddedTURNEnabled        bool
+	EmbeddedTURNListenAddress  string
+	EmbeddedTURNRelayIP        string
+	EmbeddedTURNRealm          string
+	EmbeddedTURNMinPort        int
+	EmbeddedTURNMaxPort        int
 	CallRingTimeoutSeconds     int
 	CallConnectTimeoutSeconds  int
 	CallMaximumDurationSeconds int

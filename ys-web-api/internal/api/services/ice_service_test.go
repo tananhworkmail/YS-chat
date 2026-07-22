@@ -10,11 +10,28 @@ import (
 	"web-api/internal/pkg/config"
 )
 
+func TestBuildICEConfigurationFallsBackToPublicSTUN(t *testing.T) {
+	previous := config.Config
+	config.Config = &config.Configuration{}
+	t.Cleanup(func() { config.Config = previous })
+	t.Setenv("TURN_SHARED_SECRET", "")
+	t.Setenv("TURN_USERNAME", "")
+	t.Setenv("TURN_CREDENTIAL", "")
+
+	result := BuildICEConfiguration("alice")
+	if len(result.ICEServers) != 1 || len(result.ICEServers[0].URLs) != 1 {
+		t.Fatalf("expected one fallback STUN entry, got %+v", result.ICEServers)
+	}
+	if result.ICEServers[0].URLs[0] != defaultSTUNURL {
+		t.Fatalf("unexpected fallback STUN URL: %+v", result.ICEServers[0].URLs)
+	}
+}
+
 func TestBuildICEConfigurationUsesShortLivedTURNCredential(t *testing.T) {
 	previous := config.Config
 	config.Config = &config.Configuration{WebRTC: config.WebRTCConfiguration{
-		STUNURLs: []string{"stun:stun.example.test:3478"},
-		TURNURLs: []string{"turn:turn.example.test:3478"},
+		STUNURLs:                 []string{"stun:stun.example.test:3478"},
+		TURNURLs:                 []string{"turn:turn.example.test:3478"},
 		TURNCredentialTTLSeconds: 600,
 	}}
 	t.Cleanup(func() { config.Config = previous })

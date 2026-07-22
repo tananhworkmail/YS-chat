@@ -116,6 +116,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   MediaStream? _localCallStream;
   Future<void>? _localCallMediaFuture;
   MediaStream? _remoteCallStream;
+  Future<MediaStream>? _remoteCallStreamFuture;
   bool _acceptingIncomingCall = false;
   final List<Map<String, dynamic>> _pendingIceCandidates = [];
 
@@ -2274,6 +2275,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
     try {
       await _prepareLocalCallMedia();
+      if (!await _waitForRealtimeCallChannel()) {
+        _cleanupCall('Khong the ket noi may chu cuoc goi');
+        return;
+      }
       if (!await _sendCallControlEvent(
         type: 'call.invite',
         conversationId: callConversationId,
@@ -2305,6 +2310,10 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       // Prepare media before notifying the caller. Otherwise call.offer can
       // race this method and initialize getUserMedia/PeerConnection twice.
       await _prepareLocalCallMedia();
+      if (!await _waitForRealtimeCallChannel()) {
+        _cleanupCall('Khong the ket noi may chu cuoc goi');
+        return;
+      }
       if (callState != 'incoming' || callId.isEmpty) return;
       if (!await _sendCallControlEvent(
         type: 'call.accept',
@@ -2617,13 +2626,21 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         break;
       case 'call.ice':
         if (event.signal == null) return;
-        if (_peerConnection?.getRemoteDescription() == null) {
+        final pc = _peerConnection;
+        if (pc == null) {
           _pendingIceCandidates.add(event.signal!);
           return;
         }
         try {
-          await _peerConnection!.addCandidate(_iceCandidate(event.signal!));
-        } catch (_) {}
+          final remoteDescription = await pc.getRemoteDescription();
+          if (remoteDescription == null) {
+            _pendingIceCandidates.add(event.signal!);
+            return;
+          }
+          await pc.addCandidate(_iceCandidate(event.signal!));
+        } catch (_) {
+          _pendingIceCandidates.add(event.signal!);
+        }
         break;
     }
   }
@@ -2669,6 +2686,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       throw StateError('Call ended while media was being prepared');
     }
     _localCallStream = stream;
+    if (callIsVideo && stream.getVideoTracks().isEmpty) {
+      for (final track in stream.getTracks()) {
+        track.stop();
+      }
+      _localCallStream = null;
+      await stream.dispose();
+      throw StateError('Camera did not provide a video track');
+    }
     callMuted = false;
     callSpeakerOn = callIsVideo;
     try {
@@ -2696,6 +2721,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     final requestedCallId = callId;
     final pc = await createPeerConnection({
       'iceServers': await apiClient.iceServers(),
+      'sdpSemantics': 'unified-plan',
+      'bundlePolicy': 'max-bundle',
+      'rtcpMuxPolicy': 'require',
     });
     if (requestedCallId.isEmpty ||
         callId != requestedCallId ||
@@ -2712,12 +2740,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         _sendCallEvent('call.ice', candidate.toMap());
       }
     };
-    pc.onTrack = (event) {
-      if (event.streams.isNotEmpty) {
-        _remoteCallStream = event.streams.first;
-      }
+    pc.onAddStream = (stream) {
+      if (callId != requestedCallId || callState == 'idle') return;
+      _remoteCallStream = stream;
       _activateCall();
       notifyListeners();
+    };
+    pc.onTrack = (event) {
+      unawaited(_handleRemoteCallTrack(requestedCallId, event));
     };
     pc.onConnectionState = (state) {
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
@@ -2729,6 +2759,75 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       }
     };
     return pc;
+  }
+
+  Future<void> _handleRemoteCallTrack(
+      String requestedCallId, RTCTrackEvent event) async {
+    if (callId != requestedCallId || callState == 'idle') return;
+    try {
+      event.track.enabled = true;
+      if (event.streams.isNotEmpty) {
+        _remoteCallStream = event.streams.first;
+      } else {
+        final stream = await _ensureRemoteCallStream(requestedCallId);
+        if (stream == null) return;
+        final alreadyAttached =
+            stream.getTracks().any((track) => track.id == event.track.id);
+        if (!alreadyAttached) {
+          await stream.addTrack(event.track);
+        }
+      }
+      if (callId != requestedCallId || callState == 'idle') return;
+      _activateCall();
+      notifyListeners();
+    } catch (_) {
+      // Audio can remain usable even when a device cannot create the fallback
+      // stream used to render a streamless Unified Plan video track.
+    }
+  }
+
+  Future<MediaStream?> _ensureRemoteCallStream(String requestedCallId) async {
+    final existing = _remoteCallStream;
+    if (existing != null) return existing;
+    final pending = _remoteCallStreamFuture;
+    if (pending != null) {
+      final stream = await pending;
+      if (callId != requestedCallId || callState == 'idle') return null;
+      return _remoteCallStream ?? stream;
+    }
+
+    final future = createLocalMediaStream('remote-$requestedCallId');
+    _remoteCallStreamFuture = future;
+    try {
+      final stream = await future;
+      if (callId != requestedCallId || callState == 'idle') {
+        await stream.dispose();
+        return null;
+      }
+      final current = _remoteCallStream;
+      if (current != null) {
+        if (current.id != stream.id) await stream.dispose();
+        return current;
+      }
+      _remoteCallStream = stream;
+      return stream;
+    } finally {
+      if (identical(_remoteCallStreamFuture, future)) {
+        _remoteCallStreamFuture = null;
+      }
+    }
+  }
+
+  Future<bool> _waitForRealtimeCallChannel() async {
+    if (realtimeService.isConnected) return true;
+    _connectRealtime();
+    final deadline = DateTime.now().add(const Duration(seconds: 8));
+    while (DateTime.now().isBefore(deadline)) {
+      if (realtimeService.isConnected) return true;
+      if (callState == 'idle' || callId.isEmpty) return false;
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    return realtimeService.isConnected;
   }
 
   Future<void> _startOutgoingCallConnection() async {
@@ -2877,6 +2976,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _localCallStream = null;
     _localCallMediaFuture = null;
     _remoteCallStream = null;
+    _remoteCallStreamFuture = null;
     _pendingIceCandidates.clear();
     _transitionCallState('idle');
     callStatus = message;

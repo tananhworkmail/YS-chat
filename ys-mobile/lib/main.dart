@@ -1,7 +1,10 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:provider/provider.dart';
 
 import 'src/app/app_config.dart';
@@ -18,6 +21,7 @@ import 'src/theme/app_theme.dart';
 Future<void> main() async {
   await runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    await _initializeWebRTC();
 
     FlutterError.onError = (details) {
       FlutterError.presentError(details);
@@ -55,6 +59,29 @@ Future<void> main() async {
     debugPrint('YS Chat uncaught error: $error');
     debugPrintStack(stackTrace: stackTrace);
   });
+}
+
+const _deviceChannel = MethodChannel('com.tythac.ys_mobile/device');
+
+Future<void> _initializeWebRTC() async {
+  var forceSoftwareCodec = false;
+  if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+    try {
+      forceSoftwareCodec =
+          await _deviceChannel.invokeMethod<bool>('isEmulator') ?? false;
+    } on PlatformException catch (error) {
+      debugPrint('Cannot detect Android emulator: $error');
+    } on MissingPluginException catch (error) {
+      debugPrint('Android device channel is unavailable: $error');
+    }
+  }
+
+  await WebRTC.initialize(
+    options: forceSoftwareCodec ? {'forceSWCodec': true} : const {},
+  );
+  if (forceSoftwareCodec) {
+    debugPrint('WebRTC software video codecs enabled for Android emulator');
+  }
 }
 
 class YSChatApp extends StatelessWidget {

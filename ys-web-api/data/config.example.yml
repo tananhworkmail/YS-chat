@@ -30,6 +30,15 @@ webrtc:
   # Prefer TURN_SHARED_SECRET for short-lived TURN REST credentials. Static
   # TURN_USERNAME/TURN_CREDENTIAL environment variables are a fallback.
   turnCredentialTTLSeconds: 3600
+  # The embedded relay removes the need to deploy coturn separately. Set the
+  # relay IP to the address clients can reach, and open the listener plus relay
+  # port range in the host/container firewall.
+  embeddedTURNEnabled: false
+  embeddedTURNListenAddress: "0.0.0.0:3478"
+  embeddedTURNRelayIP: ""
+  embeddedTURNRealm: "ys-chat"
+  embeddedTURNMinPort: 49160
+  embeddedTURNMaxPort: 49200
   callRingTimeoutSeconds: 45
   callConnectTimeoutSeconds: 60
   callMaximumDurationSeconds: 14400

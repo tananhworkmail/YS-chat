@@ -886,8 +886,8 @@ class _CallPanelState extends State<_CallPanel> {
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
   bool _renderersReady = false;
-  MediaStream? _boundLocalStream;
-  MediaStream? _boundRemoteStream;
+  String _boundLocalVideoKey = '';
+  String _boundRemoteVideoKey = '';
 
   @override
   void initState() {
@@ -897,8 +897,10 @@ class _CallPanelState extends State<_CallPanel> {
 
   Future<void> _initializeRenderers() async {
     try {
-      await Future.wait(
-          [_localRenderer.initialize(), _remoteRenderer.initialize()]);
+      // Initialize sequentially. Some Android WebRTC implementations can
+      // cross-bind texture IDs when two renderers are created concurrently.
+      await _remoteRenderer.initialize();
+      await _localRenderer.initialize();
       if (mounted) setState(() => _renderersReady = true);
     } catch (_) {
       // Keep audio calls usable on devices that cannot create video textures.
@@ -917,21 +919,27 @@ class _CallPanelState extends State<_CallPanel> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    final localStream = state.callState != 'idle' && state.callIsVideo
+        ? state.localCallStream
+        : null;
+    final remoteStream = state.callState != 'idle' && state.callIsVideo
+        ? state.remoteCallStream
+        : null;
+    final localVideoTrack = localStream?.getVideoTracks().firstOrNull;
+    final remoteVideoTrack = remoteStream?.getVideoTracks().firstOrNull;
     if (_renderersReady) {
-      final localStream = state.callState != 'idle' && state.callIsVideo
-          ? state.localCallStream
-          : null;
-      final remoteStream = state.callState != 'idle' && state.callIsVideo
-          ? state.remoteCallStream
-          : null;
-      if (!identical(_boundLocalStream, localStream)) {
-        _boundLocalStream = localStream;
-        _localRenderer.srcObject = localStream;
-      }
-      if (!identical(_boundRemoteStream, remoteStream)) {
-        _boundRemoteStream = remoteStream;
-        _remoteRenderer.srcObject = remoteStream;
-      }
+      _bindVideoRenderer(
+        renderer: _localRenderer,
+        stream: localStream,
+        track: localVideoTrack,
+        local: true,
+      );
+      _bindVideoRenderer(
+        renderer: _remoteRenderer,
+        stream: remoteStream,
+        track: remoteVideoTrack,
+        local: false,
+      );
     }
     if (state.callState == 'idle') return const SizedBox.shrink();
 
@@ -1002,8 +1010,7 @@ class _CallPanelState extends State<_CallPanel> {
                           children: [
                             ColoredBox(
                               color: Colors.black,
-                              child: _renderersReady &&
-                                      state.remoteCallStream != null
+                              child: _renderersReady && remoteVideoTrack != null
                                   ? RTCVideoView(
                                       _remoteRenderer,
                                       objectFit: RTCVideoViewObjectFit
@@ -1019,7 +1026,7 @@ class _CallPanelState extends State<_CallPanel> {
                                     ),
                             ),
                             if (_renderersReady &&
-                                state.localCallStream != null &&
+                                localVideoTrack != null &&
                                 !state.callCameraOff)
                               Positioned(
                                 right: 12,
@@ -1193,6 +1200,32 @@ class _CallPanelState extends State<_CallPanel> {
         ),
       ),
     );
+  }
+
+  void _bindVideoRenderer({
+    required RTCVideoRenderer renderer,
+    required MediaStream? stream,
+    required MediaStreamTrack? track,
+    required bool local,
+  }) {
+    final key =
+        stream == null || track == null ? '' : '${stream.id}:${track.id}';
+    if (local ? _boundLocalVideoKey == key : _boundRemoteVideoKey == key) {
+      return;
+    }
+    if (local) {
+      _boundLocalVideoKey = key;
+    } else {
+      _boundRemoteVideoKey = key;
+    }
+    if (key.isEmpty) {
+      renderer.srcObject = null;
+      return;
+    }
+    // Bind the complete native stream. On Android, binding a remote track by
+    // trackId can leave the renderer attached to an owner-less track and
+    // produce a black frame even though WebRTC is receiving video.
+    renderer.srcObject = stream;
   }
 }
 
