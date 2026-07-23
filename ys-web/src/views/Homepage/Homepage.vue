@@ -2624,8 +2624,9 @@ const realtimeStableAfterMs = 30000;
 const currentDeviceId = chatApi.getOrCreateDeviceId();
 let callDurationTimer = null;
 let callStartedAt = 0;
-let ringtoneContext = null;
-let ringtoneTimer = null;
+let ringtoneAudio = null;
+let ringtonePlaying = false;
+let ringtoneUnlocked = false;
 let discardRecording = false;
 const readStateStorageKey = `ys_chat_read_state_${currentUserid}`;
 const unreadStorageKey = `ys_chat_unread_counts_${currentUserid}`;
@@ -2985,6 +2986,8 @@ onMounted(async () => {
   persistMessageCursors();
   connectRealtime();
   document.addEventListener("visibilitychange", syncAfterVisibilityReturn);
+  document.addEventListener("pointerdown", unlockRingtoneAudio);
+  document.addEventListener("keydown", unlockRingtoneAudio);
   window.addEventListener("online", syncAfterNetworkReturn);
   window.addEventListener("offline", syncAfterNetworkLost);
 });
@@ -3002,6 +3005,8 @@ onBeforeUnmount(() => {
   typingExpiryTimers.forEach((timer) => window.clearTimeout(timer));
   typingExpiryTimers.clear();
   document.removeEventListener("visibilitychange", syncAfterVisibilityReturn);
+  document.removeEventListener("pointerdown", unlockRingtoneAudio);
+  document.removeEventListener("keydown", unlockRingtoneAudio);
   window.removeEventListener("online", syncAfterNetworkReturn);
   window.removeEventListener("offline", syncAfterNetworkLost);
   cancelVoiceRecording();
@@ -3925,43 +3930,52 @@ const startCallTimeout = () => {
   }, 45 * 1000);
 };
 
+const getRingtoneAudio = () => {
+  if (ringtoneAudio) return ringtoneAudio;
+  ringtoneAudio = new Audio("/ringtone.mp3");
+  ringtoneAudio.loop = true;
+  ringtoneAudio.preload = "auto";
+  ringtoneAudio.volume = 1;
+  return ringtoneAudio;
+};
+
+const unlockRingtoneAudio = () => {
+  if (ringtoneUnlocked || ringtonePlaying) return;
+  const audio = getRingtoneAudio();
+  audio.volume = 0;
+  const playback = audio.play();
+  if (!playback) return;
+  void playback.then(() => {
+    ringtoneUnlocked = true;
+    if (!ringtonePlaying) {
+      audio.pause();
+      audio.currentTime = 0;
+    }
+    audio.volume = 1;
+    document.removeEventListener("pointerdown", unlockRingtoneAudio);
+    document.removeEventListener("keydown", unlockRingtoneAudio);
+  }).catch(() => {
+    audio.volume = 1;
+  });
+};
+
 const startRingtone = () => {
   stopRingtone();
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) return;
-
-  try {
-    ringtoneContext = new AudioContextClass();
-    const playTone = () => {
-      if (!ringtoneContext) return;
-      const oscillator = ringtoneContext.createOscillator();
-      const gain = ringtoneContext.createGain();
-      oscillator.type = "sine";
-      oscillator.frequency.value = 880;
-      gain.gain.setValueAtTime(0.0001, ringtoneContext.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.16, ringtoneContext.currentTime + 0.03);
-      gain.gain.exponentialRampToValueAtTime(0.0001, ringtoneContext.currentTime + 0.38);
-      oscillator.connect(gain);
-      gain.connect(ringtoneContext.destination);
-      oscillator.start();
-      oscillator.stop(ringtoneContext.currentTime + 0.42);
-    };
-    void ringtoneContext.resume().then(playTone).catch(() => {});
-    ringtoneTimer = window.setInterval(playTone, 1400);
-  } catch {
-    ringtoneContext = null;
-  }
+  const audio = getRingtoneAudio();
+  ringtonePlaying = true;
+  audio.loop = true;
+  audio.volume = 1;
+  audio.currentTime = 0;
+  void audio.play().catch(() => {
+    ringtonePlaying = false;
+  });
 };
 
 const stopRingtone = () => {
-  if (ringtoneTimer) {
-    window.clearInterval(ringtoneTimer);
-    ringtoneTimer = null;
-  }
-  if (ringtoneContext) {
-    void ringtoneContext.close().catch(() => {});
-    ringtoneContext = null;
-  }
+  ringtonePlaying = false;
+  if (!ringtoneAudio) return;
+  ringtoneAudio.pause();
+  ringtoneAudio.currentTime = 0;
 };
 
 const startReminderRingtone = () => {

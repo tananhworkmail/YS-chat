@@ -1037,7 +1037,7 @@ class _CallPanelState extends State<_CallPanel> {
                                   borderRadius: BorderRadius.circular(10),
                                   child: RTCVideoView(
                                     _localRenderer,
-                                    mirror: true,
+                                    mirror: false,
                                     objectFit: RTCVideoViewObjectFit
                                         .RTCVideoViewObjectFitCover,
                                   ),

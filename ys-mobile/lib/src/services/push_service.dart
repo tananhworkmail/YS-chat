@@ -718,7 +718,7 @@ Future<void> _showNativeIncomingCall(Map<String, dynamic> data) async {
     android: const AndroidParams(
       isCustomNotification: true,
       isShowLogo: false,
-      ringtonePath: 'system_ringtone_default',
+      ringtonePath: 'ringtone',
       backgroundColor: '#111827',
       actionColor: '#16A34A',
       textColor: '#FFFFFF',
@@ -743,7 +743,7 @@ Future<void> _showNativeIncomingCall(Map<String, dynamic> data) async {
       supportsGrouping: false,
       supportsUngrouping: false,
       includesCallsInRecents: true,
-      ringtonePath: 'system_ringtone_default',
+      ringtonePath: 'ringtone.mp3',
     ),
   );
   await FlutterCallkitIncoming.showCallkitIncoming(params);
